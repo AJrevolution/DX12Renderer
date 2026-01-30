@@ -32,11 +32,11 @@ void Device::EnableDebugLayer(bool enable)
         debug->EnableDebugLayer();
 
         //Optional GPU-based validation (slower, but catches more)
-        ComPtr<ID3D12Debug1> debug1;
-        if (SUCCEEDED(debug.As(&debug1)))
-        {
-            debug1->SetEnableGPUBasedValidation(TRUE);
-        }
+        //ComPtr<ID3D12Debug1> debug1;
+        //if (SUCCEEDED(debug.As(&debug1)))
+        //{
+        //    debug1->SetEnableGPUBasedValidation(TRUE);
+        //}
     }
 
     //DXGI debug messages

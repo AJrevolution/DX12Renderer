@@ -4,6 +4,8 @@
 #include "Device.h"
 #include "CommandQueue.h"
 #include "SwapChain.h"
+#include "GPUMarkers.h"
+#include "GPUTimer.h"
 
 #include <array>
 #include <vector>
@@ -47,4 +49,6 @@ private:
     std::vector<D3D12_RESOURCE_STATES> m_backBufferStates;
 
     float m_clearColor[4] = { 0.08f, 0.10f, 0.14f, 1.0f };
+
+    GPUTimer m_frameTimer;
 };

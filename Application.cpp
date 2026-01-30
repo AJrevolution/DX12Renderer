@@ -1,5 +1,7 @@
 #include "Application.h"
 
+
+
 bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* title)
 {
     //Window
@@ -12,6 +14,8 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
     //Command Queue
     m_graphicsQueue.Initialize(m_device.GetDevice(), D3D12_COMMAND_LIST_TYPE_DIRECT);
 
+    m_frameTimer.Initialize(m_device.GetDevice());
+
     //Swap Chain
     m_swapChain.Initialize(
         m_device.GetFactory(),
@@ -22,6 +26,7 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
         kFrameCount,
         DXGI_FORMAT_R8G8B8A8_UNORM
     );
+
 
     //Per-frame allocators
     for (uint32_t i = 0; i < kFrameCount; ++i)
@@ -53,6 +58,8 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
 
     //Honest backbuffer state tracking
     m_backBufferStates.assign(kFrameCount, D3D12_RESOURCE_STATE_PRESENT);
+
+
 
     return true;
 }
@@ -121,7 +128,14 @@ void Application::EndFrame()
 
 void Application::Render()
 {
+
     BeginFrame(); 
+
+    m_frameTimer.Begin(m_cmdList.Get());
+
+    CmdBeginEvent(m_cmdList.Get(), "Frame");
+    CmdBeginEvent(m_cmdList.Get(), "Clear & Setup");
+
 
     //Get buffer to prepare for drawing
     const uint32_t bbIndex = m_swapChain.GetCurrentBackBufferIndex();
@@ -145,6 +159,9 @@ void Application::Render()
     auto rtv = m_swapChain.GetCurrentRTV();
     m_cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     m_cmdList->ClearRenderTargetView(rtv, m_clearColor, 0, nullptr);
+    CmdEndEvent(m_cmdList.Get()); // End Clear & Setup
+
+    CmdBeginEvent(m_cmdList.Get(), "PresentPrep");
 
     // Transition RENDER_TARGET -> PRESENT
     {
@@ -158,6 +175,12 @@ void Application::Render()
         m_cmdList->ResourceBarrier(1, &barrier);
         m_backBufferStates[bbIndex] = D3D12_RESOURCE_STATE_PRESENT;
     }
+
+    CmdEndEvent(m_cmdList.Get()); // PresentPrep
+    CmdEndEvent(m_cmdList.Get()); // Frame
+
+    m_frameTimer.End(m_cmdList.Get());
+    m_frameTimer.Resolve(m_cmdList.Get());
 
     EndFrame();
 }
