@@ -108,6 +108,12 @@ void Device::Initialize(bool useWarp, bool enableDebugLayer)
         "D3D12CreateDevice"
     );
 
+    D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = { D3D_SHADER_MODEL_6_0 };
+    if (SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel))))
+    {
+        DebugOutput(std::format("Highest supported Shader Model: {}", (int)shaderModel.HighestShaderModel));
+    }
+
     // Optional: reduce spam; break on serious messages
 #if defined(_DEBUG)
     ComPtr<ID3D12InfoQueue> info;

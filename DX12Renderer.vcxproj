@@ -109,13 +109,16 @@
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>d3d12.lib;dxgi.lib;dxguid.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PreBuildEvent>
+      <Command>if not exist "$(ProjectDir)Shaders\Compiled" mkdir "$(ProjectDir)Shaders\Compiled"</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -126,13 +129,16 @@
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>d3d12.lib;dxgi.lib;dxguid.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PreBuildEvent>
+      <Command>if not exist "$(ProjectDir)Shaders\Compiled" mkdir "$(ProjectDir)Shaders\Compiled"</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Application.h" />
@@ -141,6 +147,11 @@
     <ClInclude Include="Device.h" />
     <ClInclude Include="GPUMarkers.h" />
     <ClInclude Include="GPUTimer.h" />
+    <ClInclude Include="PipelineState.h" />
+    <ClInclude Include="Source\Core\Paths.h" />
+    <ClInclude Include="Source\Renderer\Passes\TrianglePass.h" />
+    <ClInclude Include="Source\RHI\Pipeline\RootSignature.h" />
+    <ClInclude Include="Source\RHI\Pipeline\Shader.h" />
     <ClInclude Include="SwapChain.h" />
     <ClInclude Include="ThirdParty\directx\d3d12.h" />
     <ClInclude Include="Window.h" />
@@ -151,11 +162,50 @@
     <ClCompile Include="Device.cpp" />
     <ClCompile Include="GPUTimer.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="PipelineState.cpp" />
+    <ClCompile Include="RootSignature.cpp" />
+    <ClCompile Include="Source\RHI\Pipeline\Shader.cpp" />
     <ClCompile Include="SwapChain.cpp" />
+    <ClCompile Include="TrianglePass.cpp" />
     <ClCompile Include="Window.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="Assets\Shaders\HLSL\Triangle_VS.hlsl">
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if "$(Configuration)"=="Debug" (
+  dxc.exe -T vs_6_0 -E main -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Triangle_VS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Triangle_VS.hlsl"
+) else (
+  dxc.exe -T vs_6_0 -E main -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Triangle_VS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Triangle_VS.hlsl"
+)</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\Triangle_VS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">if "$(Configuration)"=="Debug" (
+  dxc.exe -T vs_6_6 -E main -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(ProjectDir)Shaders\Compiled\Triangle_VS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Triangle_VS.hlsl"
+) else (
+  dxc.exe -T vs_6_6 -E main -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(ProjectDir)Shaders\Compiled\Triangle_VS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Triangle_VS.hlsl"
+)
+</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)Shaders\Compiled\Triangle_VS.cso</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="Assets\Shaders\HLSL\Triangle_PS.hlsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if "$(Configuration)"=="Debug" (
+  dxc.exe -T ps_6_0 -E main -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Triangle_PS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Triangle_PS.hlsl"
+) else (
+  dxc.exe -T ps_6_0 -E main -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Triangle_PS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Triangle_PS.hlsl"
+)</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\Triangle_PS.cso;%(Outputs)</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">if "$(Configuration)"=="Debug" (
+  dxc.exe -T ps_6_6 -E main -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(ProjectDir)Shaders\Compiled\Triangle_PS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Triangle_PS.hlsl"
+) else (
+  dxc.exe -T ps_6_6 -E main -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(ProjectDir)Shaders\Compiled\Triangle_PS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Triangle_PS.hlsl"
+)
+</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)Shaders\Compiled\Triangle_PS.cso;%(Outputs)</Outputs>
+    </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

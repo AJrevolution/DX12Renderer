@@ -6,6 +6,7 @@
 #include "SwapChain.h"
 #include "GPUMarkers.h"
 #include "GPUTimer.h"
+#include "Source/Core/Paths.h"
 
 #include <array>
 #include <vector>
