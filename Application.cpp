@@ -18,7 +18,7 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
     m_graphicsQueue.Initialize(m_device.GetDevice(), D3D12_COMMAND_LIST_TYPE_DIRECT);
 
     //Timing
-    m_frameTimer.Initialize(m_device.GetDevice());
+    m_frameTimer.Initialize(m_device.GetDevice(), kFrameCount);
 
     //Swap Chain
     m_swapChain.Initialize(
@@ -116,6 +116,11 @@ void Application::BeginFrame()
     ThrowIfFailed(frame.allocator->Reset(), "Frame Alloc Reset");
     //Open command list, ready to write new commands
     ThrowIfFailed(m_cmdList->Reset(frame.allocator.Get(), nullptr), "CmdList Reset");
+
+#if defined(_DEBUG)
+    const double ms = m_frameTimer.ReadbackMs(m_graphicsQueue.Get(), m_frameIndex);
+    if (ms >= 0.0) m_lastGpuMs = ms;
+#endif
 }
 
 void Application::EndFrame()
@@ -137,7 +142,7 @@ void Application::Render()
 
     BeginFrame(); 
 
-    m_frameTimer.Begin(m_cmdList.Get());
+    m_frameTimer.Begin(m_cmdList.Get(), m_frameIndex);
 
     CmdBeginEvent(m_cmdList.Get(), "Frame");
     CmdBeginEvent(m_cmdList.Get(), "Clear & Setup");
@@ -190,8 +195,8 @@ void Application::Render()
     CmdEndEvent(m_cmdList.Get()); // PresentPrep
     CmdEndEvent(m_cmdList.Get()); // Frame
 
-    m_frameTimer.End(m_cmdList.Get());
-    m_frameTimer.Resolve(m_cmdList.Get());
+    m_frameTimer.End(m_cmdList.Get(), m_frameIndex);
+    m_frameTimer.Resolve(m_cmdList.Get(), m_frameIndex);
 
     EndFrame();
 }

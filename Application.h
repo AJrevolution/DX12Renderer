@@ -5,7 +5,7 @@
 #include "CommandQueue.h"
 #include "SwapChain.h"
 #include "GPUMarkers.h"
-#include "GPUTimer.h"
+#include "Source/RHI/Diagnostics/GPUTimerSet.h"
 #include "Source/Core/Paths.h"
 
 #include <array>
@@ -51,5 +51,7 @@ private:
 
     float m_clearColor[4] = { 0.08f, 0.10f, 0.14f, 1.0f };
 
-    GPUTimer m_frameTimer;
+	GPUTimerSet m_frameTimer;
+    uint64_t m_frameCounter = 0;
+    double m_lastGpuMs = -1.0;
 };

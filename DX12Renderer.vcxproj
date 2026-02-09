@@ -146,10 +146,10 @@
     <ClInclude Include="Common.h" />
     <ClInclude Include="Device.h" />
     <ClInclude Include="GPUMarkers.h" />
-    <ClInclude Include="GPUTimer.h" />
     <ClInclude Include="PipelineState.h" />
     <ClInclude Include="Source\Core\Paths.h" />
     <ClInclude Include="Source\Renderer\Passes\TrianglePass.h" />
+    <ClInclude Include="Source\RHI\Diagnostics\GPUTimerSet.h" />
     <ClInclude Include="Source\RHI\Pipeline\RootSignature.h" />
     <ClInclude Include="Source\RHI\Pipeline\Shader.h" />
     <ClInclude Include="SwapChain.h" />
@@ -160,11 +160,11 @@
     <ClCompile Include="Application.cpp" />
     <ClCompile Include="CommandQueue.cpp" />
     <ClCompile Include="Device.cpp" />
-    <ClCompile Include="GPUTimer.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Paths.cpp" />
     <ClCompile Include="PipelineState.cpp" />
     <ClCompile Include="RootSignature.cpp" />
+    <ClCompile Include="Source\RHI\Diagnostics\GPUTimerSet.cpp" />
     <ClCompile Include="Source\RHI\Pipeline\Shader.cpp" />
     <ClCompile Include="SwapChain.cpp" />
     <ClCompile Include="TrianglePass.cpp" />
