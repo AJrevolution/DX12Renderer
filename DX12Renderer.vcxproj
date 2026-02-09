@@ -162,6 +162,7 @@
     <ClCompile Include="Device.cpp" />
     <ClCompile Include="GPUTimer.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="Paths.cpp" />
     <ClCompile Include="PipelineState.cpp" />
     <ClCompile Include="RootSignature.cpp" />
     <ClCompile Include="Source\RHI\Pipeline\Shader.cpp" />

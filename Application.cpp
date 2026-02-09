@@ -64,7 +64,7 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
     m_backBufferStates.assign(kFrameCount, D3D12_RESOURCE_STATE_PRESENT);
    
 	
-    const auto shaderDir = GetExecutableDir() / L"Shaders" / L"Compiled";
+    const auto shaderDir = Paths::ExecutableDir() / L"Shaders" / L"Compiled";
     m_triangle.Initialize(m_device.GetDevice(), m_swapChain.GetFormat(), shaderDir);
 
     return true;
