@@ -149,6 +149,7 @@
     <ClInclude Include="PipelineState.h" />
     <ClInclude Include="Source\Core\Paths.h" />
     <ClInclude Include="Source\Renderer\Passes\TrianglePass.h" />
+    <ClInclude Include="Source\Renderer\Renderer.h" />
     <ClInclude Include="Source\RHI\Diagnostics\GPUTimerSet.h" />
     <ClInclude Include="Source\RHI\Pipeline\RootSignature.h" />
     <ClInclude Include="Source\RHI\Pipeline\Shader.h" />
@@ -164,6 +165,7 @@
     <ClCompile Include="Paths.cpp" />
     <ClCompile Include="PipelineState.cpp" />
     <ClCompile Include="RootSignature.cpp" />
+    <ClCompile Include="Source\Renderer\Renderer.cpp" />
     <ClCompile Include="Source\RHI\Diagnostics\GPUTimerSet.cpp" />
     <ClCompile Include="Source\RHI\Pipeline\Shader.cpp" />
     <ClCompile Include="SwapChain.cpp" />

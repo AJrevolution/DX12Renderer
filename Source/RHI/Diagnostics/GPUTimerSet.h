@@ -11,7 +11,7 @@ public:
     void End(ID3D12GraphicsCommandList* cmd, uint32_t frameIndex);
     void Resolve(ID3D12GraphicsCommandList* cmd, uint32_t frameIndex);
 
-    // Call after you've waited the frame's fence (BeginFrame) so results are guaranteed ready.
+    // Call after waited for the frame's fence (BeginFrame)
     double ReadbackMs(ID3D12CommandQueue* queue, uint32_t frameIndex);
 
 private:

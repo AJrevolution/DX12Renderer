@@ -1,8 +1,9 @@
 #include "Application.h"
 #include "Source/Renderer/Passes/TrianglePass.h"
 #include "Source/Core/Paths.h"
+#include "Source/Renderer/Renderer.h"
 
-TrianglePass m_triangle;
+Renderer m_renderer;
 
 
 bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* title)
@@ -65,7 +66,8 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
    
 	
     const auto shaderDir = Paths::ExecutableDir() / L"Shaders" / L"Compiled";
-    m_triangle.Initialize(m_device.GetDevice(), m_swapChain.GetFormat(), shaderDir);
+
+    m_renderer.Initialize(m_device.GetDevice(), m_swapChain.GetFormat());
 
     return true;
 }
@@ -139,7 +141,6 @@ void Application::EndFrame()
 
 void Application::Render()
 {
-
     BeginFrame(); 
 
     m_frameTimer.Begin(m_cmdList.Get(), m_frameIndex);
@@ -172,7 +173,7 @@ void Application::Render()
     m_cmdList->ClearRenderTargetView(rtv, m_clearColor, 0, nullptr);
     
     CmdBeginEvent(m_cmdList.Get(), "Triangle Pass");
-    m_triangle.Render(m_cmdList.Get(), rtv, m_swapChain.Width(), m_swapChain.Height());
+    m_renderer.RenderFrame(m_cmdList.Get(), rtv, m_swapChain.Width(), m_swapChain.Height());
     CmdEndEvent(m_cmdList.Get()); //triangle pass
 
     CmdEndEvent(m_cmdList.Get()); // End Clear & Setup
