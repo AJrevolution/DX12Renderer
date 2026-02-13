@@ -1,5 +1,6 @@
 #include "Source\Renderer\Passes\TrianglePass.h"
-#include "ThirdParty/DirectX-Headers/include/directx/d3dx12.h"
+#include "ThirdParty\DirectX-Headers\include\directx\d3dx12.h"
+#include "Source\RHI\CommandList\CommandList.h"
 
 void TrianglePass::Initialize(
     ID3D12Device* device, 
@@ -34,23 +35,36 @@ void TrianglePass::Initialize(
     auto alloc = upload.Allocate(frameIndex, vbSize, 16);
     memcpy(alloc.cpu, verts, vbSize);
     
-    //Copy from UploadArena into DEFAULT VB
-    cmd->CopyBufferRegion(
+    CommandList cl(cmd);
+    ////Copy from UploadArena into DEFAULT VB
+    //cmd->CopyBufferRegion(
+    //    m_vbDefault.Get(), 0,
+    //    upload.GetBuffer(frameIndex), alloc.offset,
+    //    vbSize
+    //);
+
+    cl.CopyBuffer(
         m_vbDefault.Get(), 0,
         upload.GetBuffer(frameIndex), alloc.offset,
         vbSize
     );
    
     //Barrier COPY_DEST -> VERTEX_BUFFER
-    {
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = m_vbDefault.Get();
-        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        cmd->ResourceBarrier(1, &b);
-    }
+    //{
+    //    D3D12_RESOURCE_BARRIER b{};
+    //    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    //    b.Transition.pResource = m_vbDefault.Get();
+    //    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    //    b.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+    //    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    //    cmd->ResourceBarrier(1, &b);
+    //}
+
+    cl.Transition(
+        m_vbDefault.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
+    );
 
     //Build VBV
     m_vbView.BufferLocation = m_vbDefault.GPUAddress();

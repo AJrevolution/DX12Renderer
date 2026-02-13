@@ -145,6 +145,7 @@
     <ClInclude Include="CommandQueue.h" />
     <ClInclude Include="Common.h" />
     <ClInclude Include="Device.h" />
+    <ClInclude Include="Source\RHI\CommandList\CommandList.h" />
     <ClInclude Include="Source\RHI\Resources\GPUBuffer.h" />
     <ClInclude Include="GPUMarkers.h" />
     <ClInclude Include="PipelineState.h" />
@@ -163,6 +164,7 @@
     <ClCompile Include="Application.cpp" />
     <ClCompile Include="CommandQueue.cpp" />
     <ClCompile Include="Device.cpp" />
+    <ClCompile Include="Source\RHI\CommandList\CommandList.cpp" />
     <ClCompile Include="Source\RHI\Resources\GPUBuffer.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Paths.cpp" />
