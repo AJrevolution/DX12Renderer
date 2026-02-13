@@ -1,8 +1,17 @@
 #include "Source\Renderer\Passes\TrianglePass.h"
 #include "ThirdParty/DirectX-Headers/include/directx/d3dx12.h"
 
-void TrianglePass::Initialize(ID3D12Device* device, DXGI_FORMAT rtvFormat, const fs::path& shaderDir)
+void TrianglePass::Initialize(
+    ID3D12Device* device, 
+    DXGI_FORMAT rtvFormat, 
+    const fs::path& shaderDir,
+    ID3D12GraphicsCommandList* cmd,
+    UploadArena& upload,
+    uint32_t frameIndex)
 {
+    if (m_initialized)
+        return;
+
     Shader vs = Shader::LoadFromFile(shaderDir / L"Triangle_VS.cso");
     Shader ps = Shader::LoadFromFile(shaderDir / L"Triangle_PS.cso");
 
@@ -18,31 +27,37 @@ void TrianglePass::Initialize(ID3D12Device* device, DXGI_FORMAT rtvFormat, const
     };
     const UINT vbSize = sizeof(verts);
     
-    auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
-    auto resDesc = CD3DX12_RESOURCE_DESC::Buffer(vbSize);
+    //Default heap
+    m_vbDefault.CreateDefaultBuffer(device, vbSize, D3D12_RESOURCE_STATE_COPY_DEST, L"VB: Triangle (DEFAULT)");
 
-    ThrowIfFailed(
-        device->CreateCommittedResource(
-            &heapProps,
-            D3D12_HEAP_FLAG_NONE,
-            &resDesc,
-            D3D12_RESOURCE_STATE_GENERIC_READ,
-            nullptr,
-            IID_PPV_ARGS(&m_vb)),
-        "CreateCommittedResource(VB)"
+    //Staging memory from UploadArena
+    auto alloc = upload.Allocate(frameIndex, vbSize, 16);
+    memcpy(alloc.cpu, verts, vbSize);
+    
+    //Copy from UploadArena into DEFAULT VB
+    cmd->CopyBufferRegion(
+        m_vbDefault.Get(), 0,
+        upload.GetBuffer(frameIndex), alloc.offset,
+        vbSize
     );
+   
+    //Barrier COPY_DEST -> VERTEX_BUFFER
+    {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = m_vbDefault.Get();
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        cmd->ResourceBarrier(1, &b);
+    }
 
-    SetD3D12ObjectName(m_vb.Get(), L"VB: Triangle");
-
-    void* mapped = nullptr;
-    const D3D12_RANGE readRange{ 0, 0 };
-    ThrowIfFailed(m_vb->Map(0, &readRange, &mapped), "VB Map");
-    memcpy(mapped, verts, vbSize);
-    m_vb->Unmap(0, nullptr);
-
-    m_vbView.BufferLocation = m_vb->GetGPUVirtualAddress();
+    //Build VBV
+    m_vbView.BufferLocation = m_vbDefault.GPUAddress();
     m_vbView.SizeInBytes = vbSize;
     m_vbView.StrideInBytes = sizeof(Vertex);
+
+    m_initialized = true;
 }
 
 void TrianglePass::Render(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t width, uint32_t height)

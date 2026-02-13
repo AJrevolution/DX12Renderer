@@ -145,6 +145,7 @@
     <ClInclude Include="CommandQueue.h" />
     <ClInclude Include="Common.h" />
     <ClInclude Include="Device.h" />
+    <ClInclude Include="Source\RHI\Resources\GPUBuffer.h" />
     <ClInclude Include="GPUMarkers.h" />
     <ClInclude Include="PipelineState.h" />
     <ClInclude Include="Source\Core\Paths.h" />
@@ -155,12 +156,14 @@
     <ClInclude Include="Source\RHI\Pipeline\Shader.h" />
     <ClInclude Include="SwapChain.h" />
     <ClInclude Include="ThirdParty\directx\d3d12.h" />
+    <ClInclude Include="Source\RHI\Memory\UploadArena.h" />
     <ClInclude Include="Window.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Application.cpp" />
     <ClCompile Include="CommandQueue.cpp" />
     <ClCompile Include="Device.cpp" />
+    <ClCompile Include="Source\RHI\Resources\GPUBuffer.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Paths.cpp" />
     <ClCompile Include="PipelineState.cpp" />
@@ -170,6 +173,7 @@
     <ClCompile Include="Source\RHI\Pipeline\Shader.cpp" />
     <ClCompile Include="SwapChain.cpp" />
     <ClCompile Include="TrianglePass.cpp" />
+    <ClCompile Include="Source\RHI\Memory\UploadArena.cpp" />
     <ClCompile Include="Window.cpp" />
   </ItemGroup>
   <ItemGroup>

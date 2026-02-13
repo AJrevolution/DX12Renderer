@@ -2,9 +2,9 @@
 #include "Source/Renderer/Passes/TrianglePass.h"
 #include "Source/Core/Paths.h"
 #include "Source/Renderer/Renderer.h"
+#include "Source/RHI/Memory/UploadArena.h"
 
 Renderer m_renderer;
-
 
 bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* title)
 {
@@ -67,7 +67,7 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
 	
     const auto shaderDir = Paths::ExecutableDir() / L"Shaders" / L"Compiled";
 
-    m_renderer.Initialize(m_device.GetDevice(), m_swapChain.GetFormat());
+    m_renderer.Initialize(m_device.GetDevice(), m_swapChain.GetFormat(), kFrameCount);
 
     return true;
 }
@@ -173,7 +173,7 @@ void Application::Render()
     m_cmdList->ClearRenderTargetView(rtv, m_clearColor, 0, nullptr);
     
     CmdBeginEvent(m_cmdList.Get(), "Triangle Pass");
-    m_renderer.RenderFrame(m_cmdList.Get(), rtv, m_swapChain.Width(), m_swapChain.Height());
+    m_renderer.RenderFrame(m_device.GetDevice(), m_cmdList.Get(), m_frameIndex, rtv, m_swapChain.Width(), m_swapChain.Height());
     CmdEndEvent(m_cmdList.Get()); //triangle pass
 
     CmdEndEvent(m_cmdList.Get()); // End Clear & Setup

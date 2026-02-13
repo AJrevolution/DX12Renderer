@@ -3,6 +3,8 @@
 #include "Source\RHI\Pipeline\Shader.h"
 #include "Source\RHI\Pipeline\RootSignature.h"
 #include "PipelineState.h"
+#include "Source/RHI/Resources/GPUBuffer.h"
+#include "Source/RHI/Memory/UploadArena.h"
 
 #include <filesystem>
 namespace fs = std::filesystem;
@@ -10,7 +12,13 @@ namespace fs = std::filesystem;
 class TrianglePass
 {
 public:
-    void Initialize(ID3D12Device* device, DXGI_FORMAT rtvFormat, const fs::path& shaderDir);
+    void Initialize(
+        ID3D12Device* device, 
+        DXGI_FORMAT rtvFormat, 
+        const fs::path& shaderDir,
+        ID3D12GraphicsCommandList* cmd,
+        UploadArena& upload,
+        uint32_t frameIndex);
 
     void Render(
         ID3D12GraphicsCommandList* cmd,
@@ -18,6 +26,8 @@ public:
         uint32_t width,
         uint32_t height
     );
+    
+    bool IsInitialized() const { return m_initialized; }
 
 private:
     struct Vertex
@@ -26,9 +36,11 @@ private:
         float r, g, b, a;
     };
 
+    bool m_initialized = false;
+
     RootSignature m_rootSig;
     PipelineState m_pso;
 
-    ComPtr<ID3D12Resource> m_vb;
+    GPUBuffer m_vbDefault;
     D3D12_VERTEX_BUFFER_VIEW m_vbView{};
 };

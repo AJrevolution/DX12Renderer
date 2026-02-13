@@ -8,10 +8,12 @@
 class Renderer
 {
 public:
-    void Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat);
+    void Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount);
 
     void RenderFrame(
+        ID3D12Device* device,
         ID3D12GraphicsCommandList* cmd,
+        uint32_t frameIndex,
         D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv,
         uint32_t width,
         uint32_t height
@@ -19,4 +21,7 @@ public:
 
 private:
     TrianglePass m_triangle;
+    UploadArena  m_upload;
+    DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
+    bool         m_triangleReady = false;
 };
