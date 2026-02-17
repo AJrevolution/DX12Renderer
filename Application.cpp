@@ -2,7 +2,7 @@
 #include "Source/Renderer/Passes/TrianglePass.h"
 #include "Source/Core/Paths.h"
 #include "Source/Renderer/Renderer.h"
-#include "Source/RHI/Memory/UploadArena.h"
+
 
 Renderer m_renderer;
 
@@ -113,6 +113,9 @@ void Application::BeginFrame()
     //If GPU is still using this frame’s allocator, wait for its fence
     if (frame.fenceValue != 0)
         m_graphicsQueue.Wait(frame.fenceValue);
+
+    //Reset per - frame transient upload allocator, frame is fence safe
+    m_renderer.BeginFrame(m_frameIndex);
 
     //Reset command allocator
     ThrowIfFailed(frame.allocator->Reset(), "Frame Alloc Reset");

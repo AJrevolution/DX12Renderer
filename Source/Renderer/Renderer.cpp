@@ -1,6 +1,5 @@
 #include "Source/Renderer/Renderer.h"
 #include "Source/Core/Paths.h"
-#include "Source/RHI/Memory/UploadArena.h"
 
 void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
 {
@@ -8,6 +7,12 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
 
     //1 MB per frame for now, increase later for textures.
     m_upload.Initialize(device, frameCount, 1ull * 1024ull * 1024ull);
+}
+
+void Renderer::BeginFrame(uint32_t frameIndex)
+{
+    // FrameIndex is already fence-safe by the time Application calls this.
+    m_upload.BeginFrame(frameIndex);
 }
 
 void Renderer::RenderFrame(
@@ -19,9 +24,7 @@ void Renderer::RenderFrame(
     uint32_t height)
 {
     CmdBeginEvent(cmd, "Renderer");
-    
-    //Reset per-frame upload head (safe because Application already waited this frame index fence)
-    m_upload.BeginFrame(frameIndex);
+
     
     //Lazy init - record copy into DEFAULT VB on the current command list once
     if (!m_triangleReady)

@@ -1,14 +1,17 @@
 #pragma once
 #include "Common.h"
 #include "Source/Renderer/Passes/TrianglePass.h"
-#include "Source/RHI/Diagnostics/GPUTimerSet.h"
+//#include "Source/RHI/Diagnostics/GPUTimerSet.h"
 #include "GPUMarkers.h"
+#include "Source/RHI/Memory/UploadArena.h"
 #include <filesystem>
 
 class Renderer
 {
 public:
     void Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount);
+
+    void BeginFrame(uint32_t frameIndex);
 
     void RenderFrame(
         ID3D12Device* device,
