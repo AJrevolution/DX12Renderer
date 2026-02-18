@@ -172,7 +172,7 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Paths.cpp" />
     <ClCompile Include="PipelineState.cpp" />
-    <ClCompile Include="RootSignature.cpp" />
+    <ClCompile Include="Source\RHI\Pipeline\RootSignature.cpp" />
     <ClCompile Include="Source\Renderer\Renderer.cpp" />
     <ClCompile Include="Source\RHI\Diagnostics\GPUTimerSet.cpp" />
     <ClCompile Include="Source\RHI\Pipeline\Shader.cpp" />
