@@ -31,6 +31,11 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
         kFrameCount,
         DXGI_FORMAT_R8G8B8A8_UNORM
     );
+    
+    m_renderer.Initialize(m_device.GetDevice(), m_swapChain.GetFormat(), kFrameCount);
+    
+    //Called once swapchain has stored initial window size to ensure DepthBuffer matches
+    m_renderer.OnResize(m_device.GetDevice(), m_swapChain.Width(), m_swapChain.Height());
 
 
     //Per-frame allocators
@@ -67,7 +72,7 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
 	
     const auto shaderDir = Paths::ExecutableDir() / L"Shaders" / L"Compiled";
 
-    m_renderer.Initialize(m_device.GetDevice(), m_swapChain.GetFormat(), kFrameCount);
+   
 
     return true;
 }
@@ -100,6 +105,10 @@ void Application::HandleResizeIfNeeded()
     m_graphicsQueue.Flush();
 
     m_swapChain.Resize(m_device.GetDevice(), w, h);
+    
+    //Depth Buffer
+    m_renderer.OnResize(m_device.GetDevice(), w, h);
+
 
     // Reset state tracking after resize
     m_backBufferStates.assign(m_swapChain.BufferCount(), D3D12_RESOURCE_STATE_PRESENT);

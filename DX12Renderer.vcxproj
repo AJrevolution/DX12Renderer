@@ -144,6 +144,7 @@
     <ClInclude Include="Application.h" />
     <ClInclude Include="CommandQueue.h" />
     <ClInclude Include="Common.h" />
+    <ClInclude Include="Source\RHI\Memory\DescriptorAllocator.h" />
     <ClInclude Include="Device.h" />
     <ClInclude Include="Source\RHI\CommandList\CommandList.h" />
     <ClInclude Include="Source\RHI\Resources\GPUBuffer.h" />
@@ -155,6 +156,7 @@
     <ClInclude Include="Source\RHI\Diagnostics\GPUTimerSet.h" />
     <ClInclude Include="Source\RHI\Pipeline\RootSignature.h" />
     <ClInclude Include="Source\RHI\Pipeline\Shader.h" />
+    <ClInclude Include="Source\RHI\Resources\Texture.h" />
     <ClInclude Include="SwapChain.h" />
     <ClInclude Include="ThirdParty\directx\d3d12.h" />
     <ClInclude Include="Source\RHI\Memory\UploadArena.h" />
@@ -163,6 +165,7 @@
   <ItemGroup>
     <ClCompile Include="Application.cpp" />
     <ClCompile Include="CommandQueue.cpp" />
+    <ClCompile Include="Source\RHI\Memory\DescriptorAllocator.cpp" />
     <ClCompile Include="Device.cpp" />
     <ClCompile Include="Source\RHI\CommandList\CommandList.cpp" />
     <ClCompile Include="Source\RHI\Resources\GPUBuffer.cpp" />
@@ -174,6 +177,7 @@
     <ClCompile Include="Source\RHI\Diagnostics\GPUTimerSet.cpp" />
     <ClCompile Include="Source\RHI\Pipeline\Shader.cpp" />
     <ClCompile Include="SwapChain.cpp" />
+    <ClCompile Include="Source\RHI\Resources\Texture.cpp" />
     <ClCompile Include="TrianglePass.cpp" />
     <ClCompile Include="Source\RHI\Memory\UploadArena.cpp" />
     <ClCompile Include="Window.cpp" />
