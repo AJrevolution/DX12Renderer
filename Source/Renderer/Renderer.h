@@ -1,7 +1,6 @@
 #pragma once
 #include "Common.h"
 #include "Source/Renderer/Passes/TrianglePass.h"
-//#include "Source/RHI/Diagnostics/GPUTimerSet.h"
 #include "GPUMarkers.h"
 #include "Source/RHI/Memory/UploadArena.h"
 #include <filesystem>
