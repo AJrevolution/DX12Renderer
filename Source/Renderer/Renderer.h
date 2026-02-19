@@ -7,6 +7,7 @@
 #include "Source/RHI/Memory/DescriptorAllocator.h"
 #include "Source/RHI/Resources/Texture.h"
 
+
 class Renderer
 {
 public:
@@ -26,6 +27,8 @@ public:
     );
 
 private:
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height);
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -35,4 +38,6 @@ private:
     Texture m_depth;
     D3D12_CPU_DESCRIPTOR_HANDLE m_depthDsv{};
     bool m_depthReady = false;
+
+
 };

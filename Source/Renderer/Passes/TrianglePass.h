@@ -24,7 +24,8 @@ public:
         ID3D12GraphicsCommandList* cmd,
         D3D12_CPU_DESCRIPTOR_HANDLE rtv,
         uint32_t width,
-        uint32_t height
+        uint32_t height,
+        D3D12_GPU_VIRTUAL_ADDRESS globalCB
     );
     
     bool IsInitialized() const { return m_initialized; }

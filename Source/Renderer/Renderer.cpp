@@ -1,5 +1,6 @@
 #include "Source/Renderer/Renderer.h"
 #include "Source/Core/Paths.h"
+#include "Source/Renderer/FrameConstants.h"
 
 void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
 {
@@ -28,7 +29,9 @@ void Renderer::RenderFrame(
 {
     CmdBeginEvent(cmd, "Renderer");
 
-    
+    //Prepare global data
+    D3D12_GPU_VIRTUAL_ADDRESS globalCB = UpdateGlobalConstants(frameIndex, width, height);
+
     //Lazy init - record copy into DEFAULT VB on the current command list once
     if (!m_triangleReady)
     {
@@ -59,7 +62,7 @@ void Renderer::RenderFrame(
     }
 
     CmdBeginEvent(cmd, "TrianglePass");
-    m_triangle.Render(cmd, backbufferRtv, width, height);
+    m_triangle.Render(cmd, backbufferRtv, width, height, globalCB);
     CmdEndEvent(cmd);
 
 
@@ -82,4 +85,21 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     device->CreateDepthStencilView(m_depth.Get(), &dsv, m_depthDsv);
 
     m_depthReady = true;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height)
+{
+    // The 256 alignment is handled by the allocator, but we ensure the size is also a multiple of 256
+    constexpr uint32_t cbSize = (sizeof(PerFrameConstants) + 255) & ~255;
+
+    auto alloc = m_upload.Allocate(frameIndex, cbSize, 256);
+    auto* cb = reinterpret_cast<PerFrameConstants*>(alloc.cpu);
+
+    // Fill the data
+    DirectX::XMStoreFloat4x4(&cb->viewProj, DirectX::XMMatrixIdentity());
+    cb->cameraPos = { 0.0f, 0.0f, 0.0f };
+    cb->time = 0.0f; // Tie this to a timer later
+    cb->frameIndex = frameIndex;
+
+    return alloc.gpu;
 }

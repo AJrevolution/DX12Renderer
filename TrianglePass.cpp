@@ -16,7 +16,7 @@ void TrianglePass::Initialize(
     Shader vs = Shader::LoadFromFile(shaderDir / L"Triangle_VS.cso");
     Shader ps = Shader::LoadFromFile(shaderDir / L"Triangle_PS.cso");
 
-    m_rootSig.InitializeEmpty(device);
+    m_rootSig.InitializeMain (device);
     m_pso.InitialiseTriangle(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rtvFormat);
 
     //temp
@@ -74,7 +74,7 @@ void TrianglePass::Initialize(
     m_initialized = true;
 }
 
-void TrianglePass::Render(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t width, uint32_t height)
+void TrianglePass::Render(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t width, uint32_t height, D3D12_GPU_VIRTUAL_ADDRESS globalCB)
 {
     const D3D12_VIEWPORT vp{ 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f };
     const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
@@ -82,10 +82,13 @@ void TrianglePass::Render(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_H
     cmd->SetPipelineState(m_pso.Get());
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
 
+    cmd->SetGraphicsRootConstantBufferView(0, globalCB);
+
     cmd->RSSetViewports(1, &vp);
     cmd->RSSetScissorRects(1, &sc);
 
-    cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    // Note: OMSetRenderTargets was moved to Renderer::RenderFrame 
+    // to handle the Depth Stencil correctly.
 
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->IASetVertexBuffers(0, 1, &m_vbView);
