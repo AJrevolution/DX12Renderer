@@ -33,6 +33,7 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
     );
     
     m_renderer.Initialize(m_device.GetDevice(), m_swapChain.GetFormat(), kFrameCount);
+
     
     //Called once swapchain has stored initial window size to ensure DepthBuffer matches
     m_renderer.OnResize(m_device.GetDevice(), m_swapChain.Width(), m_swapChain.Height());
@@ -66,10 +67,8 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
     //Command lists are created in an open state; close until used
     ThrowIfFailed(m_cmdList->Close(), "Close initial command list");
 
-    //Honest backbuffer state tracking
     m_backBufferStates.assign(kFrameCount, D3D12_RESOURCE_STATE_PRESENT);
-   
-	
+
     const auto shaderDir = Paths::ExecutableDir() / L"Shaders" / L"Compiled";
 
    

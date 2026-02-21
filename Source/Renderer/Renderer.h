@@ -25,19 +25,26 @@ public:
         uint32_t width,
         uint32_t height
     );
+    
+    void SetupResources(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, uint32_t frameIndex);
 
 private:
     D3D12_GPU_VIRTUAL_ADDRESS UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height);
+    void CreateTestTexture(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, uint32_t frameIndex);
+   
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
-    bool         m_triangleReady = false;
 
     DescriptorAllocator m_dsvHeap;
     Texture m_depth;
     D3D12_CPU_DESCRIPTOR_HANDLE m_depthDsv{};
     bool m_depthReady = false;
 
-
+    DescriptorAllocator m_srvHeap;
+    Texture m_testTexture;
+    DescriptorAllocator::Allocation m_testTextureSrv;
+    
+    bool m_resourcesReady = false;
 };

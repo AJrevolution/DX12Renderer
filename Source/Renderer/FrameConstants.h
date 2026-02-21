@@ -1,7 +1,7 @@
 #pragma once
 #include <DirectXMath.h>
 
-
+// Note: Using Row-Major (DirectXMath) passed to HLSL. Use mul(pos, ViewProj) in shader.
 struct PerFrameConstants
 {
     DirectX::XMFLOAT4X4 viewProj;

@@ -22,9 +22,10 @@ void TrianglePass::Initialize(
     //temp
     const Vertex verts[] =
     {
-        {  0.0f,  0.5f, 0.0f, 1,0,0,1 },
-        {  0.5f, -0.5f, 0.0f, 0,1,0,1 },
-        { -0.5f, -0.5f, 0.0f, 0,0,1,1 },
+        // Position            // Color          // UV
+        {  0.0f,  0.5f, 0.0f,  1,0,0,1,          0.5f, 0.0f }, // Top Middle
+        {  0.5f, -0.5f, 0.0f,  0,1,0,1,          1.0f, 1.0f }, // Bottom Right
+        { -0.5f, -0.5f, 0.0f,  0,0,1,1,          0.0f, 1.0f }, // Bottom Left
     };
     const UINT vbSize = sizeof(verts);
     
@@ -74,7 +75,7 @@ void TrianglePass::Initialize(
     m_initialized = true;
 }
 
-void TrianglePass::Render(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t width, uint32_t height, D3D12_GPU_VIRTUAL_ADDRESS globalCB)
+void TrianglePass::Render(ID3D12GraphicsCommandList* cmd, uint32_t width, uint32_t height, D3D12_GPU_VIRTUAL_ADDRESS globalCB, D3D12_GPU_DESCRIPTOR_HANDLE textureSRV)
 {
     const D3D12_VIEWPORT vp{ 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f };
     const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
@@ -83,6 +84,8 @@ void TrianglePass::Render(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_H
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
 
     cmd->SetGraphicsRootConstantBufferView(0, globalCB);
+
+    cmd->SetGraphicsRootDescriptorTable(2, textureSRV);
 
     cmd->RSSetViewports(1, &vp);
     cmd->RSSetScissorRects(1, &sc);

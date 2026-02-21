@@ -22,10 +22,10 @@ public:
 
     void Render(
         ID3D12GraphicsCommandList* cmd,
-        D3D12_CPU_DESCRIPTOR_HANDLE rtv,
         uint32_t width,
         uint32_t height,
-        D3D12_GPU_VIRTUAL_ADDRESS globalCB
+        D3D12_GPU_VIRTUAL_ADDRESS globalCB,     //Root Param 1 (register b0)
+		D3D12_GPU_DESCRIPTOR_HANDLE textureSRV  //Root Param 2 (Descriptor Table)
     );
     
     bool IsInitialized() const { return m_initialized; }
@@ -35,6 +35,7 @@ private:
     {
         float px, py, pz;
         float r, g, b, a;
+        float u, v;
     };
 
     bool m_initialized = false;

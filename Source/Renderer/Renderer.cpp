@@ -1,6 +1,7 @@
 #include "Source/Renderer/Renderer.h"
 #include "Source/Core/Paths.h"
 #include "Source/Renderer/FrameConstants.h"
+#include "ThirdParty\DirectX-Headers\include\directx\d3dx12.h"
 
 void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
 {
@@ -11,6 +12,10 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
 
     // CPU-only DSV heap
     m_dsvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 16, false, L"DSV Heap (CPU)");
+    
+    // Shader-visible SRV heap for textures
+    m_srvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 256, true, L"SRV Heap (Shader Visible)");
+
 }
 
 void Renderer::BeginFrame(uint32_t frameIndex)
@@ -32,18 +37,10 @@ void Renderer::RenderFrame(
     //Prepare global data
     D3D12_GPU_VIRTUAL_ADDRESS globalCB = UpdateGlobalConstants(frameIndex, width, height);
 
-    //Lazy init - record copy into DEFAULT VB on the current command list once
-    if (!m_triangleReady)
+    if (!m_resourcesReady)
     {
-        m_triangle.Initialize(
-            device,
-            m_backbufferFormat,
-            Paths::ShaderDir(),
-            cmd,
-            m_upload,
-            frameIndex
-        );
-        m_triangleReady = true;
+        SetupResources(device, cmd, frameIndex);
+        m_resourcesReady = true;
     }
 
     if (!m_depthReady)
@@ -61,8 +58,12 @@ void Renderer::RenderFrame(
         cmd->OMSetRenderTargets(1, &backbufferRtv, FALSE, &m_depthDsv);
     }
 
+    //Bind the heap before drawing
+    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
+    cmd->SetDescriptorHeaps(1, heaps);
+
     CmdBeginEvent(cmd, "TrianglePass");
-    m_triangle.Render(cmd, backbufferRtv, width, height, globalCB);
+    m_triangle.Render(cmd, width, height, globalCB, m_testTextureSrv.gpu);
     CmdEndEvent(cmd);
 
 
@@ -102,4 +103,61 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     cb->frameIndex = frameIndex;
 
     return alloc.gpu;
+}
+
+void Renderer::CreateTestTexture(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, uint32_t frameIndex)
+{
+    m_testTexture.Create2D(device, 2, 2, DXGI_FORMAT_R8G8B8A8_UNORM, L"Checkerboard Texture");
+
+    uint32_t pixels[] = {
+        0xFFFFFFFF, 0xFF000000,
+        0xFF000000, 0xFFFFFFFF
+    };
+    
+    const uint64_t rowPitch = 256; // D3D12_TEXTURE_DATA_PITCH_ALIGNMENT
+    const uint64_t totalSize = rowPitch * 2;
+
+    auto upload = m_upload.Allocate(frameIndex, totalSize, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+
+    uint8_t* pDest = reinterpret_cast<uint8_t*>(upload.cpu);
+    memcpy(pDest, &pixels[0], 8);           // Row 0 (2 pixels * 4 bytes)
+    memcpy(pDest + rowPitch, &pixels[2], 8); // Row 1
+
+    D3D12_TEXTURE_COPY_LOCATION src = {};
+    src.pResource = m_upload.GetBuffer(frameIndex);
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+
+    // THIS OFFSET MUST BE A MULTIPLE OF 512
+    src.PlacedFootprint.Offset = upload.offset;
+    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    src.PlacedFootprint.Footprint.Width = 2;
+    src.PlacedFootprint.Footprint.Height = 2;
+    src.PlacedFootprint.Footprint.Depth = 1;
+    src.PlacedFootprint.Footprint.RowPitch = (UINT)rowPitch;
+
+    D3D12_TEXTURE_COPY_LOCATION dst = {};
+    dst.pResource = m_testTexture.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = 0;
+
+    cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        m_testTexture.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+    );
+    cmd->ResourceBarrier(1, &barrier);
+
+    m_testTextureSrv = m_srvHeap.Allocate(1);
+    device->CreateShaderResourceView(m_testTexture.Get(), nullptr, m_testTextureSrv.cpu);
+}
+
+void Renderer::SetupResources(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, uint32_t frameIndex)
+{
+    // Initialize Triangle Pass (records VB upload to current frameIndex)
+    m_triangle.Initialize(device, m_backbufferFormat, Paths::ShaderDir(), cmd, m_upload, frameIndex);
+
+    // Create and Upload Texture (records Texture upload to current frameIndex)
+    CreateTestTexture(device, cmd, frameIndex);
 }
