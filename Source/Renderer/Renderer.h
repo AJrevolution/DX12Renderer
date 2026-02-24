@@ -6,7 +6,8 @@
 #include <filesystem>
 #include "Source/RHI/Memory/DescriptorAllocator.h"
 #include "Source/RHI/Resources/Texture.h"
-
+#include "Source/Scene/Mesh.h"
+#include "Source/Scene/Material.h"
 
 class Renderer
 {
@@ -30,8 +31,6 @@ public:
 
 private:
     D3D12_GPU_VIRTUAL_ADDRESS UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height);
-    void CreateTestTexture(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, uint32_t frameIndex);
-   
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -47,4 +46,9 @@ private:
     DescriptorAllocator::Allocation m_testTextureSrv;
     
     bool m_resourcesReady = false;
+
+    Mesh     m_quad;
+    Material m_material;
+    Texture  m_albedoTex;
+    bool     m_sceneReady = false;
 };

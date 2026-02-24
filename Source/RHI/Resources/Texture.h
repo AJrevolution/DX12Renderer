@@ -1,5 +1,8 @@
 #pragma once
 #include "Common.h"
+#include "Source/RHI/Memory/UploadArena.h"
+#include "Source/RHI/Memory/DescriptorAllocator.h"
+#include <filesystem>
 
 class Texture
 {
@@ -17,6 +20,16 @@ public:
         uint32_t height, 
         DXGI_FORMAT format, 
         const wchar_t* name);
+
+    DescriptorAllocator::Allocation LoadFromFile_DirectXTex(
+        ID3D12Device* device,
+        ID3D12GraphicsCommandList* cmd,
+        UploadArena& upload,
+        uint32_t frameIndex,
+        const std::filesystem::path& filePath,
+        DescriptorAllocator& srvHeap,
+        bool treatAsSRGB,
+        const wchar_t* debugName);
 
     ID3D12Resource* Get() const { return m_resource.Get(); }
     DXGI_FORMAT ResourceFormat() const { return m_resourceFormat; }

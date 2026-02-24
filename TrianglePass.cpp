@@ -5,10 +5,7 @@
 void TrianglePass::Initialize(
     ID3D12Device* device, 
     DXGI_FORMAT rtvFormat, 
-    const fs::path& shaderDir,
-    ID3D12GraphicsCommandList* cmd,
-    UploadArena& upload,
-    uint32_t frameIndex)
+    const fs::path& shaderDir)
 {
     if (m_initialized)
         return;
@@ -19,63 +16,16 @@ void TrianglePass::Initialize(
     m_rootSig.InitializeMain (device);
     m_pso.InitialiseTriangle(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rtvFormat);
 
-    //temp
-    const Vertex verts[] =
-    {
-        // Position            // Color          // UV
-        {  0.0f,  0.5f, 0.0f,  1,0,0,1,          0.5f, 0.0f }, // Top Middle
-        {  0.5f, -0.5f, 0.0f,  0,1,0,1,          1.0f, 1.0f }, // Bottom Right
-        { -0.5f, -0.5f, 0.0f,  0,0,1,1,          0.0f, 1.0f }, // Bottom Left
-    };
-    const UINT vbSize = sizeof(verts);
-    
-    //Default heap
-    m_vbDefault.CreateDefaultBuffer(device, vbSize, D3D12_RESOURCE_STATE_COPY_DEST, L"VB: Triangle (DEFAULT)");
-
-    //Staging memory from UploadArena
-    auto alloc = upload.Allocate(frameIndex, vbSize, 16);
-    memcpy(alloc.cpu, verts, vbSize);
-    
-    CommandList cl(cmd);
-    ////Copy from UploadArena into DEFAULT VB
-    //cmd->CopyBufferRegion(
-    //    m_vbDefault.Get(), 0,
-    //    upload.GetBuffer(frameIndex), alloc.offset,
-    //    vbSize
-    //);
-
-    cl.CopyBuffer(
-        m_vbDefault.Get(), 0,
-        upload.GetBuffer(frameIndex), alloc.offset,
-        vbSize
-    );
-   
-    //Barrier COPY_DEST -> VERTEX_BUFFER
-    //{
-    //    D3D12_RESOURCE_BARRIER b{};
-    //    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    //    b.Transition.pResource = m_vbDefault.Get();
-    //    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    //    b.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
-    //    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    //    cmd->ResourceBarrier(1, &b);
-    //}
-
-    cl.Transition(
-        m_vbDefault.Get(),
-        D3D12_RESOURCE_STATE_COPY_DEST,
-        D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
-    );
-
-    //Build VBV
-    m_vbView.BufferLocation = m_vbDefault.GPUAddress();
-    m_vbView.SizeInBytes = vbSize;
-    m_vbView.StrideInBytes = sizeof(Vertex);
-
     m_initialized = true;
 }
 
-void TrianglePass::Render(ID3D12GraphicsCommandList* cmd, uint32_t width, uint32_t height, D3D12_GPU_VIRTUAL_ADDRESS globalCB, D3D12_GPU_DESCRIPTOR_HANDLE textureSRV)
+void TrianglePass::Render(ID3D12GraphicsCommandList* cmd, 
+    uint32_t width,
+    uint32_t height, 
+    D3D12_GPU_VIRTUAL_ADDRESS perFrameCb,
+    D3D12_GPU_VIRTUAL_ADDRESS perDrawCb,
+    const Material& material,
+    const Mesh& mesh)
 {
     const D3D12_VIEWPORT vp{ 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f };
     const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
@@ -83,18 +33,20 @@ void TrianglePass::Render(ID3D12GraphicsCommandList* cmd, uint32_t width, uint32
     cmd->SetPipelineState(m_pso.Get());
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
 
-    cmd->SetGraphicsRootConstantBufferView(0, globalCB);
-
-    cmd->SetGraphicsRootDescriptorTable(2, textureSRV);
+    // Root params:
+    // 0: b0 per-frame
+    // 1: b1 per-draw
+    // 2: descriptor table (space1) for material SRVs
+    cmd->SetGraphicsRootConstantBufferView(0, perFrameCb);
+    cmd->SetGraphicsRootConstantBufferView(1, perDrawCb);
+    cmd->SetGraphicsRootDescriptorTable(2, material.baseColorSrv.gpu);
 
     cmd->RSSetViewports(1, &vp);
     cmd->RSSetScissorRects(1, &sc);
 
-    // Note: OMSetRenderTargets was moved to Renderer::RenderFrame 
-    // to handle the Depth Stencil correctly.
-
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cmd->IASetVertexBuffers(0, 1, &m_vbView);
+    cmd->IASetVertexBuffers(0, 1, &mesh.VBV());
+    cmd->IASetIndexBuffer(&mesh.IBV());
 
-    cmd->DrawInstanced(3, 1, 0, 0);
+    cmd->DrawIndexedInstanced(mesh.IndexCount(), 1, 0, 0, 0);
 }

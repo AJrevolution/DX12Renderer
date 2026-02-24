@@ -5,6 +5,8 @@
 #include "PipelineState.h"
 #include "Source/RHI/Resources/GPUBuffer.h"
 #include "Source/RHI/Memory/UploadArena.h"
+#include "Source/Scene/Mesh.h"
+#include "Source/Scene/Material.h"
 
 #include <filesystem>
 namespace fs = std::filesystem;
@@ -15,17 +17,16 @@ public:
     void Initialize(
         ID3D12Device* device, 
         DXGI_FORMAT rtvFormat, 
-        const fs::path& shaderDir,
-        ID3D12GraphicsCommandList* cmd,
-        UploadArena& upload,
-        uint32_t frameIndex);
+        const fs::path& shaderDir   );
 
     void Render(
         ID3D12GraphicsCommandList* cmd,
         uint32_t width,
         uint32_t height,
-        D3D12_GPU_VIRTUAL_ADDRESS globalCB,     //Root Param 1 (register b0)
-		D3D12_GPU_DESCRIPTOR_HANDLE textureSRV  //Root Param 2 (Descriptor Table)
+        D3D12_GPU_VIRTUAL_ADDRESS perFrameCb,   // root param 0 (b0)
+        D3D12_GPU_VIRTUAL_ADDRESS perDrawCb,    // root param 1 (b1)
+        const Material& material,
+        const Mesh& mesh
     );
     
     bool IsInitialized() const { return m_initialized; }

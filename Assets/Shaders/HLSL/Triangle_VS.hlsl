@@ -9,6 +9,13 @@ cbuffer PerFrameConstants : register(b0)
     uint FrameIndex;
 };
 
+cbuffer PerDrawConstants : register(b1)
+{
+    float4x4 World;
+    uint MaterialIndex;
+    uint3 _pad;
+};
+
 struct VSIn 
 { 
     float3 pos : POSITION; 
@@ -25,9 +32,8 @@ struct VSOut
 VSOut main(VSIn i)
 {
     VSOut o;
-    // Use ViewProj from your cbuffer
-    // Row-Major: float4 * matrix
-    o.pos = mul(float4(i.pos, 1.0f), ViewProj);
+    float4 wpos = mul(float4(i.pos, 1.0f), World); // row-major convention
+    o.pos = mul(wpos, ViewProj); // row-major convention
     o.col = i.col;
     o.uv = i.uv; // Must pass UV through to the Pixel Shader
     return o;

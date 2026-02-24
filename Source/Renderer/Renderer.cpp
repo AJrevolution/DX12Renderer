@@ -2,6 +2,7 @@
 #include "Source/Core/Paths.h"
 #include "Source/Renderer/FrameConstants.h"
 #include "ThirdParty\DirectX-Headers\include\directx\d3dx12.h"
+#include "DrawConstants.h"
 
 void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
 {
@@ -35,37 +36,47 @@ void Renderer::RenderFrame(
     CmdBeginEvent(cmd, "Renderer");
 
     //Prepare global data
-    D3D12_GPU_VIRTUAL_ADDRESS globalCB = UpdateGlobalConstants(frameIndex, width, height);
+    //D3D12_GPU_VIRTUAL_ADDRESS globalCB = UpdateGlobalConstants(frameIndex, width, height);
 
     if (!m_resourcesReady)
     {
         SetupResources(device, cmd, frameIndex);
         m_resourcesReady = true;
     }
-
-    if (!m_depthReady)
+    
+    // Depth must already be created by OnResize
+    if (m_depthReady)
     {
-        DebugOutput("Renderer::RenderFrame: depth not initialized! Skipping depth operations.");
-        // If depth isn't ready, bind the RTV solo to avoid crashing
-        cmd->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
+        cmd->ClearDepthStencilView(m_depthDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        cmd->OMSetRenderTargets(1, &backbufferRtv, FALSE, &m_depthDsv);
     }
     else
     {
-        // Clear and Bind
-        cmd->ClearDepthStencilView(m_depthDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-
-        // Bind BOTH the RTV and the DSV
-        cmd->OMSetRenderTargets(1, &backbufferRtv, FALSE, &m_depthDsv);
+        cmd->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
     }
 
     //Bind the heap before drawing
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
     cmd->SetDescriptorHeaps(1, heaps);
 
-    CmdBeginEvent(cmd, "TrianglePass");
-    m_triangle.Render(cmd, width, height, globalCB, m_testTextureSrv.gpu);
-    CmdEndEvent(cmd);
+    // Per-frame CB (b0)
+    const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb = UpdateGlobalConstants(frameIndex, width, height);
 
+    // Per-draw CB (b1) allocated from UploadArena, 256-aligned
+    {
+        auto drawAlloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
+        auto* dc = reinterpret_cast<PerDrawConstants*>(drawAlloc.cpu);
+
+        using namespace DirectX;
+        const float t = 0.0f; // replace with timer later
+        XMStoreFloat4x4(&dc->world, XMMatrixIdentity()); // or rotation: XMMatrixRotationZ(t)
+
+        dc->materialIndex = 0;
+
+        CmdBeginEvent(cmd, "TexturedQuadPass");
+        m_triangle.Render(cmd, width, height, perFrameCb, drawAlloc.gpu, m_material, m_quad);
+        CmdEndEvent(cmd);
+    }
 
     CmdEndEvent(cmd);
 }
@@ -105,59 +116,33 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     return alloc.gpu;
 }
 
-void Renderer::CreateTestTexture(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, uint32_t frameIndex)
-{
-    m_testTexture.Create2D(device, 2, 2, DXGI_FORMAT_R8G8B8A8_UNORM, L"Checkerboard Texture");
-
-    uint32_t pixels[] = {
-        0xFFFFFFFF, 0xFF000000,
-        0xFF000000, 0xFFFFFFFF
-    };
-    
-    const uint64_t rowPitch = 256; // D3D12_TEXTURE_DATA_PITCH_ALIGNMENT
-    const uint64_t totalSize = rowPitch * 2;
-
-    auto upload = m_upload.Allocate(frameIndex, totalSize, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
-
-    uint8_t* pDest = reinterpret_cast<uint8_t*>(upload.cpu);
-    memcpy(pDest, &pixels[0], 8);           // Row 0 (2 pixels * 4 bytes)
-    memcpy(pDest + rowPitch, &pixels[2], 8); // Row 1
-
-    D3D12_TEXTURE_COPY_LOCATION src = {};
-    src.pResource = m_upload.GetBuffer(frameIndex);
-    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-
-    // THIS OFFSET MUST BE A MULTIPLE OF 512
-    src.PlacedFootprint.Offset = upload.offset;
-    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    src.PlacedFootprint.Footprint.Width = 2;
-    src.PlacedFootprint.Footprint.Height = 2;
-    src.PlacedFootprint.Footprint.Depth = 1;
-    src.PlacedFootprint.Footprint.RowPitch = (UINT)rowPitch;
-
-    D3D12_TEXTURE_COPY_LOCATION dst = {};
-    dst.pResource = m_testTexture.Get();
-    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dst.SubresourceIndex = 0;
-
-    cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-
-    D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-        m_testTexture.Get(),
-        D3D12_RESOURCE_STATE_COPY_DEST,
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
-    );
-    cmd->ResourceBarrier(1, &barrier);
-
-    m_testTextureSrv = m_srvHeap.Allocate(1);
-    device->CreateShaderResourceView(m_testTexture.Get(), nullptr, m_testTextureSrv.cpu);
-}
 
 void Renderer::SetupResources(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, uint32_t frameIndex)
 {
-    // Initialize Triangle Pass (records VB upload to current frameIndex)
-    m_triangle.Initialize(device, m_backbufferFormat, Paths::ShaderDir(), cmd, m_upload, frameIndex);
+    // Initialize the PASS (PSO + Root Sig) TODO sort out triangle intialising
+    m_triangle.Initialize(device, m_backbufferFormat, Paths::ShaderDir());
 
-    // Create and Upload Texture (records Texture upload to current frameIndex)
-    CreateTestTexture(device, cmd, frameIndex);
+    // Create mesh GPU resources (DEFAULT heap VB+IB)
+    m_quad.CreateTexturedQuad(device, cmd, m_upload, frameIndex);
+
+    // Load a real texture from disk 
+    const auto content = Paths::ContentDir_DevOnly();
+    if (!content.empty())
+    {
+        auto texPath = content / L"Textures" / L"checker.png"; 
+        m_material.baseColorSrv = m_albedoTex.LoadFromFile_DirectXTex(
+            device, cmd, m_upload, frameIndex,
+            texPath,
+            m_srvHeap,
+            /*treatAsSRGB=*/true,
+            L"Tex: BaseColor"
+        );
+        m_sceneReady = true;
+    }
+    else
+    {
+        DebugOutput("Renderer::SetupResources: ContentDir not found.");
+
+        m_sceneReady = true; // false if want to hard-fail
+    }
 }
