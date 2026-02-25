@@ -145,6 +145,8 @@ DescriptorAllocator::Allocation Texture::LoadFromFile_DirectXTex(
         D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_resource)
     ), "Texture creation failed");
 
+    m_resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+
     if (debugName) m_resource->SetName(debugName);
 
     // Upload Logic using Footprints
