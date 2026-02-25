@@ -111,7 +111,8 @@ DescriptorAllocator::Allocation Texture::LoadFromFile_DirectXTex(
     else
         hr = LoadFromWICFile(wpath.c_str(), WIC_FLAGS_NONE, &meta, image);
 
-    // Ensure we have R8G8B8A8_UNORM
+    // Ensure we have R8G8B8A8_UNORM for simplicity
+    //// TODO: support Mip chains, BC compression, and native formats.
     if (meta.format != DXGI_FORMAT_R8G8B8A8_UNORM)
     {
         ScratchImage converted;
@@ -132,103 +133,57 @@ DescriptorAllocator::Allocation Texture::LoadFromFile_DirectXTex(
     const uint32_t width = (uint32_t)src->width;
     const uint32_t height = (uint32_t)src->height;
 
-    DXGI_FORMAT gpuFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-    DXGI_FORMAT srvFormat = MakeSRGBIfNeeded(gpuFormat, treatAsSRGB);
+    // Determine SRV format based on sRGB intent
+    DXGI_FORMAT srvFormat = treatAsSRGB ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    
+    // Create Default Resource
+    D3D12_RESOURCE_DESC texDesc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, width, height);
+    auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
 
-    // Create DEFAULT heap texture in COPY_DEST
-    D3D12_RESOURCE_DESC texDesc{};
-    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    texDesc.Width = width;
-    texDesc.Height = height;
-    texDesc.DepthOrArraySize = 1;
-    texDesc.MipLevels = 1;
-    texDesc.Format = gpuFormat; // resource format (unorm)
-    texDesc.SampleDesc.Count = 1;
-    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    ThrowIfFailed(device->CreateCommittedResource(
+        &defaultHeap, D3D12_HEAP_FLAG_NONE, &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_resource)
+    ), "Texture creation failed");
 
-    CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+    if (debugName) m_resource->SetName(debugName);
 
-    ThrowIfFailed(
-        device->CreateCommittedResource(
-            &defaultHeap,
-            D3D12_HEAP_FLAG_NONE,
-            &texDesc,
-            D3D12_RESOURCE_STATE_COPY_DEST,
-            nullptr,
-            IID_PPV_ARGS(&m_resource)),
-        "CreateCommittedResource(Texture DEFAULT)"
-    );
-
-    m_resourceFormat = gpuFormat;
-    if (debugName) SetD3D12ObjectName(m_resource.Get(), debugName);
-
-    // Compute copyable footprint
-    UINT numRows = 0;
-    UINT64 rowSizeInBytes = 0;
-    UINT64 totalBytes = 0;
+    // Upload Logic using Footprints
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT numRows = 0;
+    UINT64 rowSize = 0, totalBytes = 0;
+    device->GetCopyableFootprints(&texDesc, 0, 1, 0, &footprint, &numRows, &rowSize, &totalBytes);
 
-    device->GetCopyableFootprints(
-        &texDesc,
-        0, 1, 0,
-        &footprint,
-        &numRows,
-        &rowSizeInBytes,
-        &totalBytes
-    );
-
-    // Allocate upload memory from UploadArena (placement alignment 512 recommended)
+    // Allocate from Arena (Ensuring we bumped the size to 16MB+ in Renderer!)
     auto uploadAlloc = upload.Allocate(frameIndex, totalBytes, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
 
-    // Copy into upload memory respecting row pitch
-    // src->rowPitch is bytes per row in CPU image
-    const uint8_t* srcPixels = src->pixels;
-    uint8_t* dstBase = uploadAlloc.cpu;
-
-    for (UINT row = 0; row < numRows; ++row)
+    // Copy pixels to upload buffer
+    for (UINT y = 0; y < numRows; ++y)
     {
-        memcpy(
-            dstBase + row * footprint.Footprint.RowPitch,
-            srcPixels + row * src->rowPitch,
-            (size_t)rowSizeInBytes
-        );
+        memcpy(uploadAlloc.cpu + (y * footprint.Footprint.RowPitch),
+            src->pixels + (y * src->rowPitch), rowSize);
     }
 
-    // Record CopyTextureRegion
-    D3D12_TEXTURE_COPY_LOCATION srcLoc{};
-    srcLoc.pResource = upload.GetBuffer(frameIndex);
-    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    srcLoc.PlacedFootprint = footprint;
-    srcLoc.PlacedFootprint.Offset = uploadAlloc.offset; // must be 512-aligned; we ensured alignment above
-
-    D3D12_TEXTURE_COPY_LOCATION dstLoc{};
-    dstLoc.pResource = m_resource.Get();
-    dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dstLoc.SubresourceIndex = 0;
+    // Execute Copy
+    auto dstLoc = CD3DX12_TEXTURE_COPY_LOCATION(m_resource.Get(), 0);
+    auto srcLoc = CD3DX12_TEXTURE_COPY_LOCATION(upload.GetBuffer(frameIndex), footprint);
+    srcLoc.PlacedFootprint.Offset = uploadAlloc.offset;
 
     cmd->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
 
-    // REQUIRED barrier: COPY_DEST -> PIXEL_SHADER_RESOURCE
-    {
-        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(
-            m_resource.Get(),
-            D3D12_RESOURCE_STATE_COPY_DEST,
-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
-        );
-        cmd->ResourceBarrier(1, &b);
-    }
+    // Transition to Shader Resource
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_resource.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmd->ResourceBarrier(1, &barrier);
 
-    // Create SRV allocation and view
-    auto alloc = srvHeap.Allocate(1);
+    // INTERNAL SRV ALLOCATION 
+    auto allocation = srvHeap.Allocate(1);
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = srvFormat;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Texture2D.MipLevels = 1;
 
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = srvFormat;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(m_resource.Get(), &srvDesc, allocation.cpu);
 
-    device->CreateShaderResourceView(m_resource.Get(), &srv, alloc.cpu);
-
-    return alloc;
+    return allocation;
 }

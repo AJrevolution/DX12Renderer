@@ -9,7 +9,7 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
     m_backbufferFormat = backbufferFormat;
 
     //1 MB per frame for now, increase later for textures.
-    m_upload.Initialize(device, frameCount, 1ull * 1024ull * 1024ull);
+    m_upload.Initialize(device, frameCount, 16 * 1024 * 1024);
 
     // CPU-only DSV heap
     m_dsvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 16, false, L"DSV Heap (CPU)");
@@ -129,14 +129,12 @@ void Renderer::SetupResources(ID3D12Device* device, ID3D12GraphicsCommandList* c
     const auto content = Paths::ContentDir_DevOnly();
     if (!content.empty())
     {
-        auto texPath = content / L"Textures" / L"checker.png"; 
         m_material.baseColorSrv = m_albedoTex.LoadFromFile_DirectXTex(
             device, cmd, m_upload, frameIndex,
-            texPath,
+            content / L"Textures" / L"checker.png",
             m_srvHeap,
-            /*treatAsSRGB=*/true,
-            L"Tex: BaseColor"
-        );
+            true,
+            L"Tex: Albedo");
         m_sceneReady = true;
     }
     else
