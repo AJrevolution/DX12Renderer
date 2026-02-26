@@ -87,6 +87,9 @@
     <ClInclude Include="Source\Renderer\DrawConstants.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\RHI\CommandList\ResourceStateTracker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -147,6 +150,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Source\Scene\Material.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\RHI\CommandList\ResourceStateTracker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
