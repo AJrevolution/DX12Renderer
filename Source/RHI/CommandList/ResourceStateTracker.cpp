@@ -1,5 +1,5 @@
 #include "ResourceStateTracker.h"
-
+#include "ThirdParty/DirectX-Headers/include/directx/d3dx12.h"
 std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> ResourceStateTracker::s_globalState;
 std::mutex ResourceStateTracker::s_globalMutex;
 
@@ -25,37 +25,44 @@ D3D12_RESOURCE_STATES ResourceStateTracker::GetGlobalState(ID3D12Resource* resou
         return D3D12_RESOURCE_STATE_COMMON;
     return it->second;
 }
-
 void ResourceStateTracker::Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES newState)
 {
     if (!resource) return;
 
-    // If seen in this cmd list, we know the "before"
     auto it = m_localState.find(resource);
-    if (it != m_localState.end())
+
+    if (it == m_localState.end())
     {
-        const D3D12_RESOURCE_STATES before = it->second;
-        if (before != newState)
+        m_localState[resource] = std::nullopt;
+        m_finalState[resource] = newState;
+        m_pending.push_back({ resource, newState });
+        return;
+    }
+
+    // If we are still in the "Pending" window for this list
+    if (!it->second.has_value())
+    {
+        // Update the existing entry in m_pending so we don't have duplicates
+        for (auto& p : m_pending)
         {
-            D3D12_RESOURCE_BARRIER b{};
-            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            b.Transition.pResource = resource;
-            b.Transition.StateBefore = before;
-            b.Transition.StateAfter = newState;
-            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            m_barriers.push_back(b);
-
-            it->second = newState;
+            if (p.resource == resource)
+            {
+                p.desired = newState;
+                break;
+            }
         }
-
         m_finalState[resource] = newState;
         return;
     }
 
-    // First time this cmd list sees this resource -> pending transition resolved later vs global.
-    m_localState[resource] = newState;
+    // Normal path: we know the local state, so batch a standard transition
+    D3D12_RESOURCE_STATES currentState = it->second.value();
+    if (currentState != newState)
+    {
+        m_barriers.push_back(CD3DX12_RESOURCE_BARRIER::Transition(resource, currentState, newState));
+        it->second = newState;
+    }
     m_finalState[resource] = newState;
-    m_pending.push_back(PendingTransition{ resource, newState });
 }
 
 void ResourceStateTracker::UAVBarrier(ID3D12Resource* resource)
@@ -78,36 +85,27 @@ void ResourceStateTracker::FlushBarriers(ID3D12GraphicsCommandList* cmd)
 
 void ResourceStateTracker::FlushPendingBarriers(ID3D12GraphicsCommandList* cmd)
 {
-    if (!cmd || m_pending.empty())
-        return;
+    if (m_pending.empty()) return;
 
     std::vector<D3D12_RESOURCE_BARRIER> resolved;
-    resolved.reserve(m_pending.size());
-
     {
         std::scoped_lock lock(s_globalMutex);
-
         for (const auto& p : m_pending)
         {
-            const D3D12_RESOURCE_STATES globalBefore =
-                (s_globalState.count(p.resource) ? s_globalState[p.resource] : D3D12_RESOURCE_STATE_COMMON);
+            // Look up where it actually is in the world
+            D3D12_RESOURCE_STATES globalBefore = D3D12_RESOURCE_STATE_COMMON;
+            if (s_globalState.count(p.resource)) globalBefore = s_globalState[p.resource];
 
-            if (globalBefore == p.desired)
-                continue;
-
-            D3D12_RESOURCE_BARRIER b{};
-            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            b.Transition.pResource = p.resource;
-            b.Transition.StateBefore = globalBefore;
-            b.Transition.StateAfter = p.desired;
-            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            resolved.push_back(b);
+            if (globalBefore != p.desired)
+            {
+                resolved.push_back(CD3DX12_RESOURCE_BARRIER::Transition(p.resource, globalBefore, p.desired));
+            }
+            // NOW the local state is truthful
+            m_localState[p.resource] = p.desired;
         }
     }
 
-    if (!resolved.empty())
-        cmd->ResourceBarrier((UINT)resolved.size(), resolved.data());
-
+    if (!resolved.empty()) cmd->ResourceBarrier((UINT)resolved.size(), resolved.data());
     m_pending.clear();
 }
 

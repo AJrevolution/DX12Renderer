@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <vector>
 #include <mutex>
+#include <optional>
 
 class ResourceStateTracker
 {
@@ -12,13 +13,10 @@ public:
     void Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES newState);
     void UAVBarrier(ID3D12Resource* resource);
 
-    // Emit barriers that were generated with known "before" state (local-known transitions).
-    void FlushBarriers(ID3D12GraphicsCommandList* cmd);
 
-    // Resolve pending transitions against global states and emit barriers.
+    void FlushBarriers(ID3D12GraphicsCommandList* cmd);
     void FlushPendingBarriers(ID3D12GraphicsCommandList* cmd);
 
-    // Update the global state table with the final states for resources used by this command list.
     void CommitFinalStates();
 
     // Global state helpers (used for swapchain buffers / resources created externally)
@@ -34,8 +32,9 @@ private:
 
 private:
     // Per-command-list local tracking
-    std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_localState;
+    std::unordered_map<ID3D12Resource*, std::optional<D3D12_RESOURCE_STATES>> m_localState;
     std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_finalState;
+
 
     std::vector<D3D12_RESOURCE_BARRIER> m_barriers;
     std::vector<PendingTransition> m_pending;
