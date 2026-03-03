@@ -89,7 +89,7 @@ static DXGI_FORMAT MakeSRGBIfNeeded(DXGI_FORMAT fmt, bool srgb)
 
 DescriptorAllocator::Allocation Texture::LoadFromFile_DirectXTex(
     ID3D12Device* device,
-    ID3D12GraphicsCommandList* cmd,
+    CommandList& cl,
     UploadArena& upload,
     uint32_t frameIndex,
     const std::filesystem::path& filePath,
@@ -144,7 +144,9 @@ DescriptorAllocator::Allocation Texture::LoadFromFile_DirectXTex(
         &defaultHeap, D3D12_HEAP_FLAG_NONE, &texDesc,
         D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_resource)
     ), "Texture creation failed");
-
+    
+    CommandList::SetGlobalState(m_resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+    
     m_resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 
     if (debugName) m_resource->SetName(debugName);
@@ -170,12 +172,10 @@ DescriptorAllocator::Allocation Texture::LoadFromFile_DirectXTex(
     auto srcLoc = CD3DX12_TEXTURE_COPY_LOCATION(upload.GetBuffer(frameIndex), footprint);
     srcLoc.PlacedFootprint.Offset = uploadAlloc.offset;
 
-    cmd->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+    cl.CopyTexture(dstLoc, 0, 0, 0, srcLoc, nullptr);
 
     // Transition to Shader Resource
-    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(m_resource.Get(),
-        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    cmd->ResourceBarrier(1, &barrier);
+    cl.Transition(m_resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);    
 
     // INTERNAL SRV ALLOCATION 
     auto allocation = srvHeap.Allocate(1);

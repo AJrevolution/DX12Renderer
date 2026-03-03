@@ -31,6 +31,12 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
         kFrameCount,
         DXGI_FORMAT_R8G8B8A8_UNORM
     );
+
+    for (uint32_t i = 0; i < kFrameCount; ++i)
+    {
+        // Register the swapchain buffer as starting in PRESENT
+        CommandList::SetGlobalState(m_swapChain.GetBuffer(i), D3D12_RESOURCE_STATE_PRESENT);
+    }
     
     m_renderer.Initialize(m_device.GetDevice(), m_swapChain.GetFormat(), kFrameCount);
 
@@ -67,11 +73,7 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
     //Command lists are created in an open state; close until used
     ThrowIfFailed(m_cmdList->Close(), "Close initial command list");
 
-    m_backBufferStates.assign(kFrameCount, D3D12_RESOURCE_STATE_PRESENT);
-
     const auto shaderDir = Paths::ExecutableDir() / L"Shaders" / L"Compiled";
-
-   
 
     return true;
 }
@@ -107,10 +109,6 @@ void Application::HandleResizeIfNeeded()
     
     //Depth Buffer
     m_renderer.OnResize(m_device.GetDevice(), w, h);
-
-
-    // Reset state tracking after resize
-    m_backBufferStates.assign(m_swapChain.BufferCount(), D3D12_RESOURCE_STATE_PRESENT);
 }
 
 void Application::BeginFrame()
@@ -127,8 +125,11 @@ void Application::BeginFrame()
 
     //Reset command allocator
     ThrowIfFailed(frame.allocator->Reset(), "Frame Alloc Reset");
+
     //Open command list, ready to write new commands
     ThrowIfFailed(m_cmdList->Reset(frame.allocator.Get(), nullptr), "CmdList Reset");
+
+    m_cmd.Begin(m_cmdList.Get());
 
 #if defined(_DEBUG)
     const double ms = m_frameTimer.ReadbackMs(m_graphicsQueue.Get(), m_frameIndex);
@@ -138,11 +139,13 @@ void Application::BeginFrame()
 
 void Application::EndFrame()
 {
+    m_cmd.End();
+
     ThrowIfFailed(m_cmdList->Close(), "CmdList Close");
 
     ID3D12CommandList* lists[] = { m_cmdList.Get() };
     m_graphicsQueue.Get()->ExecuteCommandLists(1, lists);
-
+    m_cmd.CommitFinalStates();
     m_swapChain.Present(true);
 
     // Signal AFTER submit; store per-frame fence value
@@ -157,54 +160,27 @@ void Application::Render()
     m_frameTimer.Begin(m_cmdList.Get(), m_frameIndex);
 
     CmdBeginEvent(m_cmdList.Get(), "Frame");
-    CmdBeginEvent(m_cmdList.Get(), "Clear & Setup");
-
 
     //Get buffer to prepare for drawing
-    const uint32_t bbIndex = m_swapChain.GetCurrentBackBufferIndex();
     ID3D12Resource* backBuffer = m_swapChain.GetCurrentBackBuffer();
-
-    //Transition PRESENT -> RENDER_TARGET (manual tracking for now)
-    if (m_backBufferStates[bbIndex] != D3D12_RESOURCE_STATE_RENDER_TARGET)
-    {
-        D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = backBuffer;
-        barrier.Transition.StateBefore = m_backBufferStates[bbIndex];
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET; //Draw mode
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-
-        m_cmdList->ResourceBarrier(1, &barrier);
-        m_backBufferStates[bbIndex] = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    }
-
-    //Clear back buffer
     auto rtv = m_swapChain.GetCurrentRTV();
-    m_cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-    m_cmdList->ClearRenderTargetView(rtv, m_clearColor, 0, nullptr);
     
-    CmdBeginEvent(m_cmdList.Get(), "Triangle Pass");
-    m_renderer.RenderFrame(m_device.GetDevice(), m_cmdList.Get(), m_frameIndex, rtv, m_swapChain.Width(), m_swapChain.Height());
-    CmdEndEvent(m_cmdList.Get()); //triangle pass
+    m_cmd.Transition(backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    
+    CmdBeginEvent(m_cmdList.Get(), "Render Frame");
+    m_renderer.RenderFrame(
+        m_device.GetDevice(),
+        m_cmd,
+        m_frameIndex,
+        rtv,
+        backBuffer,
+        m_swapChain.Width(),
+        m_swapChain.Height()
+    );
+    CmdEndEvent(m_cmdList.Get()); //Render Frame
 
-    CmdEndEvent(m_cmdList.Get()); // End Clear & Setup
+    m_cmd.Transition(backBuffer, D3D12_RESOURCE_STATE_PRESENT);
 
-    CmdBeginEvent(m_cmdList.Get(), "PresentPrep");
-
-    // Transition RENDER_TARGET -> PRESENT
-    {
-        D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = backBuffer;
-        barrier.Transition.StateBefore = m_backBufferStates[bbIndex];
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-
-        m_cmdList->ResourceBarrier(1, &barrier);
-        m_backBufferStates[bbIndex] = D3D12_RESOURCE_STATE_PRESENT;
-    }
-
-    CmdEndEvent(m_cmdList.Get()); // PresentPrep
     CmdEndEvent(m_cmdList.Get()); // Frame
 
     m_frameTimer.End(m_cmdList.Get(), m_frameIndex);

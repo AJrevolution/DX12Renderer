@@ -20,14 +20,15 @@ public:
 
     void RenderFrame(
         ID3D12Device* device,
-        ID3D12GraphicsCommandList* cmd,
+        CommandList& cl,
         uint32_t frameIndex,
         D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv,
+        ID3D12Resource* pBackBuffer,
         uint32_t width,
         uint32_t height
     );
     
-    void SetupResources(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, uint32_t frameIndex);
+    void SetupResources(ID3D12Device* device, CommandList& cl, uint32_t frameIndex);
 
 private:
     D3D12_GPU_VIRTUAL_ADDRESS UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height);
@@ -46,6 +47,8 @@ private:
     DescriptorAllocator::Allocation m_testTextureSrv;
     
     bool m_resourcesReady = false;
+
+    float m_clearColor[4] = { 0.08f, 0.10f, 0.14f, 1.0f };
 
     Mesh     m_quad;
     Material m_material;

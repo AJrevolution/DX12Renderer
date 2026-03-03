@@ -19,7 +19,8 @@ void TrianglePass::Initialize(
     m_initialized = true;
 }
 
-void TrianglePass::Render(ID3D12GraphicsCommandList* cmd, 
+void TrianglePass::Render(
+    CommandList& cl,
     uint32_t width,
     uint32_t height, 
     D3D12_GPU_VIRTUAL_ADDRESS perFrameCb,
@@ -27,6 +28,8 @@ void TrianglePass::Render(ID3D12GraphicsCommandList* cmd,
     const Material& material,
     const Mesh& mesh)
 {
+    auto* cmd = cl.Get();
+
     const D3D12_VIEWPORT vp{ 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f };
     const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
 

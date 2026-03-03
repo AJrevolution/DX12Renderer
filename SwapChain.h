@@ -20,9 +20,11 @@ public:
 
     void Resize(ID3D12Device* device, uint32_t width, uint32_t height);
 
+
     uint32_t GetCurrentBackBufferIndex() const { return m_currentIndex; }
     ID3D12Resource* GetCurrentBackBuffer() const { return m_backBuffers[m_currentIndex].Get(); }
     D3D12_CPU_DESCRIPTOR_HANDLE GetCurrentRTV() const;
+    ID3D12Resource* GetBuffer(uint32_t index) const { return m_backBuffers[index].Get(); }
 
     DXGI_FORMAT GetFormat() const { return m_format; }
     uint32_t Width() const { return m_width; }

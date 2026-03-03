@@ -2,6 +2,7 @@
 #include "Common.h"
 #include "Source/RHI/Resources/GpuBuffer.h"
 #include "Source/RHI/Memory/UploadArena.h"
+#include "Source/RHI/CommandList/CommandList.h"
 
 class Mesh
 {
@@ -15,7 +16,7 @@ public:
 
     void CreateTexturedQuad(
         ID3D12Device* device,
-        ID3D12GraphicsCommandList* cmd,
+        CommandList& cl,
         UploadArena& upload,
         uint32_t frameIndex);
 

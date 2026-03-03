@@ -20,7 +20,7 @@ public:
         const fs::path& shaderDir   );
 
     void Render(
-        ID3D12GraphicsCommandList* cmd,
+        CommandList& cl,
         uint32_t width,
         uint32_t height,
         D3D12_GPU_VIRTUAL_ADDRESS perFrameCb,   // root param 0 (b0)

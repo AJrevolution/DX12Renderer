@@ -27,37 +27,45 @@ void Renderer::BeginFrame(uint32_t frameIndex)
 
 void Renderer::RenderFrame(
     ID3D12Device* device,
-    ID3D12GraphicsCommandList* cmd,
+    CommandList& cl,
     uint32_t frameIndex,
     D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv,
+    ID3D12Resource* pBackBuffer,
     uint32_t width,
     uint32_t height)
 {
-    CmdBeginEvent(cmd, "Renderer");
+    auto* cmdList = cl.Get();
+
+    CmdBeginEvent(cmdList, "Renderer");
 
     //Prepare global data
-    //D3D12_GPU_VIRTUAL_ADDRESS globalCB = UpdateGlobalConstants(frameIndex, width, height);
+
+    if (m_depthReady)
+    {
+        cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    }
 
     if (!m_resourcesReady)
     {
-        SetupResources(device, cmd, frameIndex);
+        SetupResources(device, cl, frameIndex);
         m_resourcesReady = true;
     }
-    
+    cl.FlushBarriers();
     // Depth must already be created by OnResize
+    cmdList->ClearRenderTargetView(backbufferRtv, m_clearColor, 0, nullptr);
     if (m_depthReady)
     {
-        cmd->ClearDepthStencilView(m_depthDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-        cmd->OMSetRenderTargets(1, &backbufferRtv, FALSE, &m_depthDsv);
+        cmdList->ClearDepthStencilView(m_depthDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, &m_depthDsv);
     }
     else
     {
-        cmd->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
+        cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
     }
 
     //Bind the heap before drawing
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
-    cmd->SetDescriptorHeaps(1, heaps);
+    cmdList->SetDescriptorHeaps(1, heaps);
 
     // Per-frame CB (b0)
     const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb = UpdateGlobalConstants(frameIndex, width, height);
@@ -68,23 +76,24 @@ void Renderer::RenderFrame(
         auto* dc = reinterpret_cast<PerDrawConstants*>(drawAlloc.cpu);
 
         using namespace DirectX;
-        const float t = 0.0f; // replace with timer later
+        const float t = 0.0f; // TODO replace with timer later
         XMStoreFloat4x4(&dc->world, XMMatrixIdentity()); // or rotation: XMMatrixRotationZ(t)
 
         dc->materialIndex = 0;
 
-        CmdBeginEvent(cmd, "TexturedQuadPass");
-        m_triangle.Render(cmd, width, height, perFrameCb, drawAlloc.gpu, m_material, m_quad);
-        CmdEndEvent(cmd);
+        CmdBeginEvent(cmdList, "TexturedQuadPass");
+        m_triangle.Render(cl, width, height, perFrameCb, drawAlloc.gpu, m_material, m_quad);
+        CmdEndEvent(cmdList);
     }
 
-    CmdEndEvent(cmd);
+    CmdEndEvent(cmdList);
 }
 
 void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
 {
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
+    CommandList::SetGlobalState(m_depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
     // Allocate the DSV once; reuse handle across recreations
     if (m_depthDsv.ptr == 0)
@@ -117,20 +126,20 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
 }
 
 
-void Renderer::SetupResources(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, uint32_t frameIndex)
+void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t frameIndex)
 {
     // Initialize the PASS (PSO + Root Sig) TODO sort out triangle intialising
     m_triangle.Initialize(device, m_backbufferFormat, Paths::ShaderDir());
 
     // Create mesh GPU resources (DEFAULT heap VB+IB)
-    m_quad.CreateTexturedQuad(device, cmd, m_upload, frameIndex);
+    m_quad.CreateTexturedQuad(device, cl, m_upload, frameIndex);
 
     // Load a real texture from disk 
     const auto content = Paths::ContentDir_DevOnly();
     if (!content.empty())
     {
         m_material.baseColorSrv = m_albedoTex.LoadFromFile_DirectXTex(
-            device, cmd, m_upload, frameIndex,
+            device, cl, m_upload, frameIndex,
             content / L"Textures" / L"checker.png",
             m_srvHeap,
             true,

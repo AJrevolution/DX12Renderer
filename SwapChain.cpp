@@ -1,4 +1,5 @@
 #include "SwapChain.h"
+#include "Source/RHI/CommandList/CommandList.h"
 
 static bool CheckTearingSupport(IDXGIFactory7* factory)
 {
@@ -70,6 +71,7 @@ void SwapChain::CreateBackBuffers(ID3D12Device* device)
     for (uint32_t i = 0; i < m_bufferCount; ++i)
     {
         ThrowIfFailed(m_swapChain->GetBuffer(i, IID_PPV_ARGS(&m_backBuffers[i])), "GetBuffer(backbuffer)");
+        CommandList::SetGlobalState(m_backBuffers[i].Get(), D3D12_RESOURCE_STATE_PRESENT);
         std::wstring name = std::format(L"BackBuffer {}", i);
         SetD3D12ObjectName(m_backBuffers[i].Get(), name.c_str());
 

@@ -7,6 +7,7 @@
 #include "GPUMarkers.h"
 #include "Source/RHI/Diagnostics/GPUTimerSet.h"
 #include "Source/Core/Paths.h"
+#include "Source/RHI/CommandList/CommandList.h"
 
 #include <array>
 #include <vector>
@@ -36,6 +37,8 @@ private:
 
 private:
     Window m_window;
+    
+    CommandList m_cmd;
 
     Device m_device;
     CommandQueue m_graphicsQueue;
@@ -45,11 +48,6 @@ private:
     ComPtr<ID3D12GraphicsCommandList> m_cmdList;
 
     uint32_t m_frameIndex = 0; // derived from swapchain index each frame
-
-    // Backbuffer state tracking (honest size, no magic 3 mismatch)
-    std::vector<D3D12_RESOURCE_STATES> m_backBufferStates;
-
-    float m_clearColor[4] = { 0.08f, 0.10f, 0.14f, 1.0f };
 
 	GPUTimerSet m_frameTimer;
     uint64_t m_frameCounter = 0;

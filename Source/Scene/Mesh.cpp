@@ -3,7 +3,7 @@
 
 void Mesh::CreateTexturedQuad(
     ID3D12Device* device,
-    ID3D12GraphicsCommandList* cmd,
+    CommandList& cl,
     UploadArena& upload,
     uint32_t frameIndex)
 {
@@ -30,37 +30,24 @@ void Mesh::CreateTexturedQuad(
     m_vb.CreateDefaultBuffer(device, vbSize, D3D12_RESOURCE_STATE_COPY_DEST, L"VB: Quad (DEFAULT)");
     m_ib.CreateDefaultBuffer(device, ibSize, D3D12_RESOURCE_STATE_COPY_DEST, L"IB: Quad (DEFAULT)");
 
+    CommandList::SetGlobalState(m_vb.Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+    CommandList::SetGlobalState(m_ib.Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+
     // Stage vertex data
     auto vbAlloc = upload.Allocate(frameIndex, vbSize, 16);
     memcpy(vbAlloc.cpu, verts, vbSize);
 
-    cmd->CopyBufferRegion(m_vb.Get(), 0, upload.GetBuffer(frameIndex), vbAlloc.offset, vbSize);
+    cl.CopyBuffer(m_vb.Get(), 0, upload.GetBuffer(frameIndex), vbAlloc.offset, vbSize);
 
-    // VB barrier
-    {
-        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(
-            m_vb.Get(),
-            D3D12_RESOURCE_STATE_COPY_DEST,
-            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
-        );
-        cmd->ResourceBarrier(1, &b);
-    }
+    cl.Transition(m_vb.Get(), D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
 
     // Stage index data
     auto ibAlloc = upload.Allocate(frameIndex, ibSize, 16);
     memcpy(ibAlloc.cpu, indices, ibSize);
 
-    cmd->CopyBufferRegion(m_ib.Get(), 0, upload.GetBuffer(frameIndex), ibAlloc.offset, ibSize);
+    cl.CopyBuffer(m_ib.Get(), 0, upload.GetBuffer(frameIndex), ibAlloc.offset, ibSize);
 
-    // IB barrier
-    {
-        D3D12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(
-            m_ib.Get(),
-            D3D12_RESOURCE_STATE_COPY_DEST,
-            D3D12_RESOURCE_STATE_INDEX_BUFFER
-        );
-        cmd->ResourceBarrier(1, &b);
-    }
+    cl.Transition(m_ib.Get(), D3D12_RESOURCE_STATE_INDEX_BUFFER);
 
     // Views
     m_vbv.BufferLocation = m_vb.GPUAddress();

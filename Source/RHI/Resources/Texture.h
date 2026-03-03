@@ -3,6 +3,7 @@
 #include "Source/RHI/Memory/UploadArena.h"
 #include "Source/RHI/Memory/DescriptorAllocator.h"
 #include <filesystem>
+#include "Source/RHI/CommandList/CommandList.h"
 
 class Texture
 {
@@ -23,7 +24,7 @@ public:
 
     DescriptorAllocator::Allocation LoadFromFile_DirectXTex(
         ID3D12Device* device,
-        ID3D12GraphicsCommandList* cmd,
+        CommandList& cl,
         UploadArena& upload,
         uint32_t frameIndex,
         const std::filesystem::path& filePath,
