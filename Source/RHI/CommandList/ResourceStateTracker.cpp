@@ -92,10 +92,18 @@ void ResourceStateTracker::FlushPendingBarriers(ID3D12GraphicsCommandList* cmd)
         std::scoped_lock lock(s_globalMutex);
         for (const auto& p : m_pending)
         {
+            auto it = s_globalState.find(p.resource);
+           
+#if defined(_DEBUG) // VALIDATION CODE 
+            if (it == s_globalState.end())
+            {
+                char buf[256];
+                sprintf_s(buf, "[RHI Warning]: Resource %p has no global state entry! Defaulting to COMMON. Did you forget to seed it?\n", p.resource);
+                OutputDebugStringA(buf);
+            }
+#endif
             // Look up where it actually is in the world
-            D3D12_RESOURCE_STATES globalBefore = D3D12_RESOURCE_STATE_COMMON;
-            if (s_globalState.count(p.resource)) globalBefore = s_globalState[p.resource];
-
+            D3D12_RESOURCE_STATES globalBefore = (it != s_globalState.end()) ? it->second : D3D12_RESOURCE_STATE_COMMON;
             if (globalBefore != p.desired)
             {
                 resolved.push_back(CD3DX12_RESOURCE_BARRIER::Transition(p.resource, globalBefore, p.desired));
