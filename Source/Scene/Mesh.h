@@ -9,9 +9,11 @@ class Mesh
 public:
     struct Vertex
     {
-        float px, py, pz;
-        float r, g, b, a;
-        float u, v;
+        float px, py, pz;    // Position
+        float nx, ny, nz;    // Normal
+        float tx, ty, tz;    // Tangent 
+        float r, g, b, a;    // Color
+        float u, v;          // UV
     };
 
     void CreateTexturedQuad(
