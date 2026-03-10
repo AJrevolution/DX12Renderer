@@ -87,13 +87,12 @@ static DXGI_FORMAT MakeSRGBIfNeeded(DXGI_FORMAT fmt, bool srgb)
 }
 
 
-DescriptorAllocator::Allocation Texture::LoadFromFile_DirectXTex(
+void Texture::LoadFromFile_DirectXTex(
     ID3D12Device* device,
     CommandList& cl,
     UploadArena& upload,
     uint32_t frameIndex,
     const std::filesystem::path& filePath,
-    DescriptorAllocator& srvHeap,
     bool treatAsSRGB,
     const wchar_t* debugName)
 {
@@ -127,15 +126,15 @@ DescriptorAllocator::Allocation Texture::LoadFromFile_DirectXTex(
         meta.format = DXGI_FORMAT_R8G8B8A8_UNORM;
     }
 
-    // force RGBA8 for simplicity
     const Image* src = image.GetImage(0, 0, 0);
 
     const uint32_t width = (uint32_t)src->width;
     const uint32_t height = (uint32_t)src->height;
 
     // Determine SRV format based on sRGB intent
-    DXGI_FORMAT srvFormat = treatAsSRGB ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
-    
+    m_srvFormat = treatAsSRGB ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    m_resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+
     // Create Default Resource
     D3D12_RESOURCE_DESC texDesc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, width, height);
     auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
@@ -157,7 +156,7 @@ DescriptorAllocator::Allocation Texture::LoadFromFile_DirectXTex(
     UINT64 rowSize = 0, totalBytes = 0;
     device->GetCopyableFootprints(&texDesc, 0, 1, 0, &footprint, &numRows, &rowSize, &totalBytes);
 
-    // Allocate from Arena (Ensuring we bumped the size to 16MB+ in Renderer!)
+    // Allocate from Arena 
     auto uploadAlloc = upload.Allocate(frameIndex, totalBytes, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
 
     // Copy pixels to upload buffer
@@ -177,15 +176,5 @@ DescriptorAllocator::Allocation Texture::LoadFromFile_DirectXTex(
     // Transition to Shader Resource
     cl.Transition(m_resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);    
 
-    // INTERNAL SRV ALLOCATION 
-    auto allocation = srvHeap.Allocate(1);
-    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = srvFormat;
-    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Texture2D.MipLevels = 1;
-
-    device->CreateShaderResourceView(m_resource.Get(), &srvDesc, allocation.cpu);
-
-    return allocation;
+    return;
 }

@@ -22,20 +22,20 @@ public:
         DXGI_FORMAT format, 
         const wchar_t* name);
 
-    DescriptorAllocator::Allocation LoadFromFile_DirectXTex(
+    void LoadFromFile_DirectXTex(
         ID3D12Device* device,
         CommandList& cl,
         UploadArena& upload,
         uint32_t frameIndex,
         const std::filesystem::path& filePath,
-        DescriptorAllocator& srvHeap,
         bool treatAsSRGB,
         const wchar_t* debugName);
 
     ID3D12Resource* Get() const { return m_resource.Get(); }
     DXGI_FORMAT ResourceFormat() const { return m_resourceFormat; }
-
+    DXGI_FORMAT SrvFormat() const { return m_srvFormat; }
 private:
     ComPtr<ID3D12Resource> m_resource;
+    DXGI_FORMAT m_srvFormat = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT m_resourceFormat = DXGI_FORMAT_UNKNOWN;
 };

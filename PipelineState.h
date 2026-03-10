@@ -12,6 +12,16 @@ public:
         DXGI_FORMAT rtvFormat
     );
 
+    void InitialiseForwardPBR(
+        ID3D12Device* device,
+        ID3D12RootSignature* rootSig,
+        D3D12_SHADER_BYTECODE vs,
+        D3D12_SHADER_BYTECODE ps,
+        DXGI_FORMAT rtvFormat,
+        DXGI_FORMAT dsvFormat
+    );
+
+
     ID3D12PipelineState* Get() const { return m_pso.Get(); }
 
 private:

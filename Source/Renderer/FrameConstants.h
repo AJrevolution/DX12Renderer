@@ -1,13 +1,17 @@
 #pragma once
 #include <DirectXMath.h>
 
-// Note: Using Row-Major (DirectXMath) passed to HLSL. Use mul(pos, ViewProj) in shader.
+
 struct PerFrameConstants
 {
     DirectX::XMFLOAT4X4 viewProj;
     DirectX::XMFLOAT3   cameraPos;
     float      time;
     uint32_t   frameIndex;
-    float      padding[43]; //keep alignment
+    float      padding[3]; 
+
+    // Forward PBR (Commit W):
+    DirectX::XMFLOAT3   lightDir;   float pad1;  
+    DirectX::XMFLOAT3   lightColor; float pad2;
 };
-static_assert((sizeof(PerFrameConstants) % 256) == 0, "CBV size must be 256-byte aligned!");
+static_assert((sizeof(PerFrameConstants) % 16) == 0); 

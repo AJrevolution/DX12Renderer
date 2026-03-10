@@ -11,6 +11,8 @@ public:
         D3D12_GPU_DESCRIPTOR_HANDLE gpu{}; // valid only if heap is shader-visible
         uint32_t index = 0;
         uint32_t count = 1;
+
+        bool IsValid() const { return cpu.ptr != 0; }
     };
 
     void Initialize(

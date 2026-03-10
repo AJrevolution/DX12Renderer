@@ -43,3 +43,42 @@ void PipelineState::InitialiseTriangle(
     ThrowIfFailed(device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_pso)), "CreateGraphicsPipelineState");
     SetD3D12ObjectName(m_pso.Get(), L"PSO: Textured Triangle");
 }
+
+void PipelineState::InitialiseForwardPBR(
+    ID3D12Device* device,
+    ID3D12RootSignature* rootSig,
+    D3D12_SHADER_BYTECODE vs,
+    D3D12_SHADER_BYTECODE ps,
+    DXGI_FORMAT rtvFormat,
+    DXGI_FORMAT dsvFormat)
+{
+    D3D12_INPUT_ELEMENT_DESC layout[] = {
+    { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "TANGENT",  0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 36, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, 52, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+    desc.InputLayout = { layout, _countof(layout) };
+    desc.pRootSignature = rootSig;
+    desc.VS = vs;
+    desc.PS = ps;
+    desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+
+    // Depth Stencil Setup
+    desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    desc.DepthStencilState.DepthEnable = TRUE;
+    desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    desc.DSVFormat = dsvFormat;
+
+    desc.SampleMask = UINT_MAX;
+    desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    desc.NumRenderTargets = 1;
+    desc.RTVFormats[0] = rtvFormat;
+    desc.SampleDesc.Count = 1;
+
+    ThrowIfFailed(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_pso)), "Failed to create ForwardPBR PSO");
+}
