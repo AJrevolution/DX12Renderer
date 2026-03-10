@@ -36,13 +36,13 @@ void TrianglePass::Render(
     cmd->SetPipelineState(m_pso.Get());
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
 
-    // Root params:
+    // Root params: (Old signature)
     // 0: b0 per-frame
     // 1: b1 per-draw
     // 2: descriptor table (space1) for material SRVs
     cmd->SetGraphicsRootConstantBufferView(0, perFrameCb);
     cmd->SetGraphicsRootConstantBufferView(1, perDrawCb);
-    cmd->SetGraphicsRootDescriptorTable(2, material.baseColorSrv.gpu);
+    cmd->SetGraphicsRootDescriptorTable(2, material.table.gpu);
 
     cmd->RSSetViewports(1, &vp);
     cmd->RSSetScissorRects(1, &sc);

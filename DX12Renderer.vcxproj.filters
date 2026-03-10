@@ -90,6 +90,9 @@
     <ClInclude Include="Source\RHI\CommandList\ResourceStateTracker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\ForwardPBRPass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -155,9 +158,14 @@
     <ClCompile Include="Source\RHI\CommandList\ResourceStateTracker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\ForwardPBRPass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
+    <None Include="Assets\Shaders\HLSL\Common.hlsli" />
+    <None Include="Assets\Shaders\HLSL\PBR.hlsli" />
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="Assets\Shaders\HLSL\Triangle_VS.hlsl">
@@ -166,5 +174,7 @@
     <CustomBuild Include="Assets\Shaders\HLSL\Triangle_PS.hlsl">
       <Filter>Source Files</Filter>
     </CustomBuild>
+    <CustomBuild Include="Assets\Shaders\HLSL\ForwardPBR_VS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\ForwardPBR_FS.hlsl" />
   </ItemGroup>
 </Project>

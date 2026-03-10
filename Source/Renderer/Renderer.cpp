@@ -4,6 +4,7 @@
 #include "ThirdParty\DirectX-Headers\include\directx\d3dx12.h"
 #include "DrawConstants.h"
 
+
 void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
 {
     m_backbufferFormat = backbufferFormat;
@@ -16,6 +17,25 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
     
     // Shader-visible SRV heap for textures
     m_srvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 256, true, L"SRV Heap (Shader Visible)");
+
+    // Space 0: Scene Table (t0..t3)
+    static constexpr uint32_t kSceneSrvCount = 4;
+    m_sceneTable = m_srvHeap.Allocate(kSceneSrvCount);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC nullSrv{};
+    nullSrv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    nullSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    nullSrv.Texture2D.MipLevels = 1;
+
+    for (uint32_t i = 0; i < kSceneSrvCount; ++i)
+    {
+        // Manual offset: Base + (index * size)
+        D3D12_CPU_DESCRIPTOR_HANDLE handle = m_sceneTable.cpu;
+        handle.ptr += (SIZE_T)i * m_srvHeap.DescriptorSize();
+
+        device->CreateShaderResourceView(nullptr, &nullSrv, handle);
+    }
 
 }
 
@@ -32,7 +52,8 @@ void Renderer::RenderFrame(
     D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv,
     ID3D12Resource* pBackBuffer,
     uint32_t width,
-    uint32_t height)
+    uint32_t height,
+    float time)
 {
     auto* cmdList = cl.Get();
 
@@ -68,21 +89,35 @@ void Renderer::RenderFrame(
     cmdList->SetDescriptorHeaps(1, heaps);
 
     // Per-frame CB (b0)
-    const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb = UpdateGlobalConstants(frameIndex, width, height);
+    const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb = UpdateGlobalConstants(frameIndex, width, height, time);
 
     // Per-draw CB (b1) allocated from UploadArena, 256-aligned
     {
+        // Per-Draw CB using PBR factors from the material
         auto drawAlloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
         auto* dc = reinterpret_cast<PerDrawConstants*>(drawAlloc.cpu);
+        
+        //temp to observe lighting calulations
+        float oscillation = sinf(time * 1.5f);
+        float rotationAngle = oscillation * 1.1f;
 
-        using namespace DirectX;
-        const float t = 0.0f; // TODO replace with timer later
-        XMStoreFloat4x4(&dc->world, XMMatrixIdentity()); // or rotation: XMMatrixRotationZ(t)
-
+        DirectX::XMMATRIX world = DirectX::XMMatrixRotationY(rotationAngle);
+        DirectX::XMStoreFloat4x4(&dc->world, world);
         dc->materialIndex = 0;
+        dc->baseColorFactor = m_material.baseColorFactor;
+        dc->metallicFactor = m_material.metallicFactor;
+        dc->roughnessFactor = m_material.roughnessFactor;
+        const float t = 0.0f; // TODO replace with timer later
 
         CmdBeginEvent(cmdList, "TexturedQuadPass");
-        m_triangle.Render(cl, width, height, perFrameCb, drawAlloc.gpu, m_material, m_quad);
+        m_forwardPbr.Render(
+            cl, width, height,
+            perFrameCb,     // b0
+            drawAlloc.gpu,  // b1
+            m_sceneTable.gpu, // Space 0
+            m_material,     // Space 1
+            m_quad
+        );
         CmdEndEvent(cmdList);
     }
 
@@ -108,7 +143,7 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_depthReady = true;
 }
 
-D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height)
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height, float time)
 {
     // The 256 alignment is handled by the allocator, but we ensure the size is also a multiple of 256
     constexpr uint32_t cbSize = (sizeof(PerFrameConstants) + 255) & ~255;
@@ -116,11 +151,20 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     auto alloc = m_upload.Allocate(frameIndex, cbSize, 256);
     auto* cb = reinterpret_cast<PerFrameConstants*>(alloc.cpu);
 
-    // Fill the data
-    DirectX::XMStoreFloat4x4(&cb->viewProj, DirectX::XMMatrixIdentity());
-    cb->cameraPos = { 0.0f, 0.0f, 0.0f };
-    cb->time = 0.0f; // Tie this to a timer later
+    float aspect = (float)width / (float)height;
+    DirectX::XMMATRIX view = DirectX::XMMatrixLookAtLH({ 0.0f, 0.0f, -5.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f });
+    DirectX::XMMATRIX proj = DirectX::XMMatrixPerspectiveFovLH(DirectX::XM_PIDIV4, aspect, 0.1f, 100.0f);
+    DirectX::XMMATRIX viewProj = view * proj;
+
+    DirectX::XMStoreFloat4x4(&cb->viewProj, viewProj);
+
+    cb->cameraPos = { 0.0f, 0.0f, -5.0f };
+    cb->time = time; // Tie this to a timer later
     cb->frameIndex = frameIndex;
+
+    //light
+    cb->lightDir = { 0.577f, -0.577f, 0.577f };
+    cb->lightColor = { 1.0f, 1.0f, 1.0f };
 
     return alloc.gpu;
 }
@@ -128,8 +172,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
 
 void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t frameIndex)
 {
-    // Initialize the PASS (PSO + Root Sig) TODO sort out triangle intialising
-    m_triangle.Initialize(device, m_backbufferFormat, Paths::ShaderDir());
+    m_forwardPbr.Initialize(device, m_backbufferFormat, DXGI_FORMAT_D32_FLOAT, Paths::ShaderDir());
 
     // Create mesh GPU resources (DEFAULT heap VB+IB)
     m_quad.CreateTexturedQuad(device, cl, m_upload, frameIndex);
@@ -138,13 +181,21 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
     const auto content = Paths::ContentDir_DevOnly();
     if (!content.empty())
     {
-        m_material.baseColorSrv = m_albedoTex.LoadFromFile_DirectXTex(
-            device, cl, m_upload, frameIndex,
+        m_albedoTex.LoadFromFile_DirectXTex(device, cl, m_upload, frameIndex,
             content / L"Textures" / L"checker.png",
-            m_srvHeap,
-            true,
-            L"Tex: Albedo");
-        m_sceneReady = true;
+             true, L"Tex: Albedo");
+
+        m_normalTex.LoadFromFile_DirectXTex(device, cl, m_upload, frameIndex,
+            content / L"Textures" / L"checker_normal_map.png",
+             false, L"Tex: Normal");
+
+        // Material handles the table allocation and SRV placement
+        m_material.UpdateDescriptorTable(device, m_srvHeap, m_albedoTex, m_normalTex);
+
+        // Fill in PBR factors
+        m_material.baseColorFactor = { 1.0f, 1.0f, 1.0f, 1.0f };
+        m_material.metallicFactor = 0.5f;
+        m_material.roughnessFactor = 0.3f;
     }
     else
     {

@@ -72,3 +72,46 @@ void RootSignature::InitializeMain(ID3D12Device* device)
 
     SetD3D12ObjectName(m_rootSig.Get(), L"RootSig: Main");
 }
+
+void RootSignature::InitializeForwardPBRV2(ID3D12Device* device)
+{
+    // Space 0: Scene-wide (IBL, Sky, Shadows) - t0..t3
+    // Space 1: Material-specific (Albedo, Normal, etc.) - t0..t7
+
+    CD3DX12_ROOT_PARAMETER params[4]{};
+
+    // [0] b0: PerFrame Constants
+    params[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
+    // [1] b1: PerDraw Constants
+    params[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_ALL);
+
+    // [2] Scene SRVs (Space 0, t0..t3)
+    CD3DX12_DESCRIPTOR_RANGE sceneRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0, 0);
+    params[2].InitAsDescriptorTable(1, &sceneRange, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    // [3] Material SRVs (Space 1, t0..t7)
+    CD3DX12_DESCRIPTOR_RANGE materialRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 8, 0, 1);
+    params[3].InitAsDescriptorTable(1, &materialRange, D3D12_SHADER_VISIBILITY_PIXEL);
+
+    // Static Samplers (s0, s1, s2, s3)
+    CD3DX12_STATIC_SAMPLER_DESC samplers[4]{};
+    samplers[0].Init(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP);  // Linear Wrap
+    samplers[1].Init(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP); // Linear Clamp
+    samplers[2].Init(2, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_WRAP, D3D12_TEXTURE_ADDRESS_MODE_WRAP, D3D12_TEXTURE_ADDRESS_MODE_WRAP, 0, 8);
+    samplers[3].Init(3, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);  // Point Clamp
+
+    CD3DX12_ROOT_SIGNATURE_DESC desc{};
+    desc.Init(_countof(params), params, _countof(samplers), samplers,
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+    ComPtr<ID3DBlob> blob, error;
+    HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error);
+    if (FAILED(hr))
+    {
+        if (error) OutputDebugStringA((const char*)error->GetBufferPointer());
+        ThrowIfFailed(hr, "Failed to serialize RootSig V2");
+    }
+
+    ThrowIfFailed(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&m_rootSig)));
+    SetD3D12ObjectName(m_rootSig.Get(), L"RootSig: ForwardPBR v2");
+}

@@ -1,6 +1,7 @@
 #pragma once
 #include "Common.h"
 #include "Source/Renderer/Passes/TrianglePass.h"
+#include "Source/Renderer/Passes/ForwardPBRPass.h"
 #include "GPUMarkers.h"
 #include "Source/RHI/Memory/UploadArena.h"
 #include <filesystem>
@@ -25,17 +26,21 @@ public:
         D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv,
         ID3D12Resource* pBackBuffer,
         uint32_t width,
-        uint32_t height
+        uint32_t height,
+        float time
     );
     
     void SetupResources(ID3D12Device* device, CommandList& cl, uint32_t frameIndex);
 
 private:
-    D3D12_GPU_VIRTUAL_ADDRESS UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height);
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height, float time);
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
+
+    ForwardPBRPass m_forwardPbr;
+    DescriptorAllocator::Allocation m_sceneTable; // Space 0 table (IBL/Globals)
 
     DescriptorAllocator m_dsvHeap;
     Texture m_depth;
@@ -53,5 +58,6 @@ private:
     Mesh     m_quad;
     Material m_material;
     Texture  m_albedoTex;
+    Texture m_normalTex;
     bool     m_sceneReady = false;
 };

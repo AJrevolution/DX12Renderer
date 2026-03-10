@@ -6,6 +6,7 @@ class RootSignature
 public:
     void InitializeEmpty(ID3D12Device* device);
     void InitializeMain(ID3D12Device* device);
+    void InitializeForwardPBRV2(ID3D12Device* device);
 
     ID3D12RootSignature* Get() const { return m_rootSig.Get(); }
 

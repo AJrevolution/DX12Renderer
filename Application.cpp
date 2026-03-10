@@ -2,7 +2,7 @@
 #include "Source/Renderer/Passes/TrianglePass.h"
 #include "Source/Core/Paths.h"
 #include "Source/Renderer/Renderer.h"
-
+//#include <chrono>
 
 Renderer m_renderer;
 
@@ -155,6 +155,11 @@ void Application::EndFrame()
 
 void Application::Render()
 {
+	// temp bodge to get a timer running; replace with proper GPU timer later
+    static auto startTime = std::chrono::high_resolution_clock::now();
+    auto currentTime = std::chrono::high_resolution_clock::now();
+    float totalTime = std::chrono::duration<float>(currentTime - startTime).count();
+
     BeginFrame(); 
 
     m_frameTimer.Begin(m_cmdList.Get(), m_frameIndex);
@@ -175,7 +180,8 @@ void Application::Render()
         rtv,
         backBuffer,
         m_swapChain.Width(),
-        m_swapChain.Height()
+        m_swapChain.Height(),
+        totalTime
     );
     CmdEndEvent(m_cmdList.Get()); //Render Frame
 
