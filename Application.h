@@ -8,6 +8,7 @@
 #include "Source/RHI/Diagnostics/GPUTimerSet.h"
 #include "Source/Core/Paths.h"
 #include "Source/RHI/CommandList/CommandList.h"
+#include "Source/Core/Timer.h"
 
 #include <array>
 #include <vector>
@@ -52,4 +53,6 @@ private:
 	GPUTimerSet m_frameTimer;
     uint64_t m_frameCounter = 0;
     double m_lastGpuMs = -1.0;
+
+    Timer m_timer;
 };
