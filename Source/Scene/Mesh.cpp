@@ -9,11 +9,11 @@ void Mesh::CreateTexturedQuad(
 {
     const Vertex verts[] =
     {
-        // Pos                Normal (N)      Tangent (T)     Color       UV
-        { -0.5f,  0.5f, 0.0f,  0, 0, -1,      1, 0, 0,        1,1,1,1,    0,0 }, // TL
-        {  0.5f,  0.5f, 0.0f,  0, 0, -1,      1, 0, 0,        1,1,1,1,    1,0 }, // TR
-        {  0.5f, -0.5f, 0.0f,  0, 0, -1,      1, 0, 0,        1,1,1,1,    1,1 }, // BR
-        { -0.5f, -0.5f, 0.0f,  0, 0, -1,      1, 0, 0,        1,1,1,1,    0,1 }, // BL
+        // Position            Normal         Tangent(xyz,w)      Color         UV
+        { -0.5f,  0.5f, 0.0f,  0,0,-1,       1,0,0, 1,           1,1,1,1,      0,0 }, // 0: Top-Left
+        {  0.5f,  0.5f, 0.0f,  0,0,-1,       1,0,0, 1,           1,1,1,1,      1,0 }, // 1: Top-Right
+        {  0.5f, -0.5f, 0.0f,  0,0,-1,       1,0,0, 1,           1,1,1,1,      1,1 }, // 2: Bottom-Right
+        { -0.5f, -0.5f, 0.0f,  0,0,-1,       1,0,0, 1,           1,1,1,1,      0,1 }, // 3: Bottom-Left
     };
 
     const uint16_t indices[] =

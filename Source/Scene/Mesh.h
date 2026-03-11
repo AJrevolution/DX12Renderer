@@ -11,7 +11,7 @@ public:
     {
         float px, py, pz;    // Position
         float nx, ny, nz;    // Normal
-        float tx, ty, tz;    // Tangent 
+        float tx, ty, tz, tw;    // Tangent.xyz + handedness.w
         float r, g, b, a;    // Color
         float u, v;          // UV
     };

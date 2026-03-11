@@ -144,9 +144,11 @@
     <ClInclude Include="Application.h" />
     <ClInclude Include="CommandQueue.h" />
     <ClInclude Include="Common.h" />
+    <ClInclude Include="Source\Core\Timer.h" />
     <ClInclude Include="Source\Renderer\DrawConstants.h" />
     <ClInclude Include="Source\Renderer\FrameConstants.h" />
     <ClInclude Include="Source\Renderer\Passes\ForwardPBRPass.h" />
+    <ClInclude Include="Source\Renderer\SceneResources.h" />
     <ClInclude Include="Source\RHI\CommandList\ResourceStateTracker.h" />
     <ClInclude Include="Source\RHI\Memory\DescriptorAllocator.h" />
     <ClInclude Include="Device.h" />
@@ -171,6 +173,7 @@
   <ItemGroup>
     <ClCompile Include="Application.cpp" />
     <ClCompile Include="CommandQueue.cpp" />
+    <ClCompile Include="Source\Core\Timer.cpp" />
     <ClCompile Include="Source\Renderer\Passes\ForwardPBRPass.cpp" />
     <ClCompile Include="Source\RHI\CommandList\ResourceStateTracker.cpp" />
     <ClCompile Include="Source\RHI\Memory\DescriptorAllocator.cpp" />
