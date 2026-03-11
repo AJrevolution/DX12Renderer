@@ -30,7 +30,7 @@ struct VSIn
 {
     float3 pos : POSITION;
     float3 nrm : NORMAL; 
-    float3 tan : TANGENT; 
+    float4 tan : TANGENT; 
     float4 col : COLOR;
     float2 uv : TEXCOORD;
 };
@@ -38,27 +38,26 @@ struct VSIn
 struct VSOut
 {
     float4 pos : SV_Position;
-    float3 wpos : TEXCOORD0;
-    float3 nrm : NORMAL; 
-    float3 tan : TANGENT;
-    float2 uv : TEXCOORD2;
-    float4 col : COLOR;
+    float3 worldPos : TEXCOORD0;
+    float3 worldN : TEXCOORD1;
+    float4 worldT : TEXCOORD2; // xyz tangent, w handedness
+    float2 uv : TEXCOORD3;
+    float4 color : COLOR;
 };
 
 VSOut main(VSIn i)
 {
     VSOut o;
 
-    float4 wpos4 = mul(World, float4(i.pos, 1.0f));
-    o.wpos = wpos4.xyz;
+    float4 wpos = mul(float4(i.pos, 1.0f), World);
+    o.worldPos = wpos.xyz;
 
- 
-    // Transform N and T by World matrix (Direction only, so w=0)
-    o.nrm = normalize(mul((float3x3) World, i.nrm)); // World space Normal
-    o.tan = normalize(mul((float3x3) World, i.tan));
+    o.worldN = normalize(mul(float4(i.nrm, 0.0f), World).xyz);
+    o.worldT.xyz = normalize(mul(float4(i.tan.xyz, 0.0f), World).xyz);
+    o.worldT.w = i.tan.w;
 
-    o.pos = mul(ViewProj, wpos4);
+    o.pos = mul(wpos, ViewProj);
     o.uv = i.uv;
-    o.col = i.col;
+    o.color = i.col;
     return o;
 }
