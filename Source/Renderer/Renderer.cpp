@@ -20,22 +20,23 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
 
     // Space 0: Scene Table (t0..t3)
     static constexpr uint32_t kSceneSrvCount = 4;
-    m_sceneTable = m_srvHeap.Allocate(kSceneSrvCount);
+    //m_sceneTable = m_srvHeap.Allocate(kSceneSrvCount);
+    CreateNullSceneTable(device);
 
-    D3D12_SHADER_RESOURCE_VIEW_DESC nullSrv{};
-    nullSrv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    nullSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    nullSrv.Texture2D.MipLevels = 1;
+    //D3D12_SHADER_RESOURCE_VIEW_DESC nullSrv{};
+    //nullSrv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    //nullSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    //nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    //nullSrv.Texture2D.MipLevels = 1;
 
-    for (uint32_t i = 0; i < kSceneSrvCount; ++i)
-    {
-        // Manual offset: Base + (index * size)
-        D3D12_CPU_DESCRIPTOR_HANDLE handle = m_sceneTable.cpu;
-        handle.ptr += (SIZE_T)i * m_srvHeap.DescriptorSize();
-
-        device->CreateShaderResourceView(nullptr, &nullSrv, handle);
-    }
+    //for (uint32_t i = 0; i < kSceneSrvCount; ++i)
+    //{
+    //    // Manual offset: Base + (index * size)
+    //    D3D12_CPU_DESCRIPTOR_HANDLE handle = m_sceneTable.cpu;
+    //    handle.ptr += (SIZE_T)i * m_srvHeap.DescriptorSize();
+    //
+    //    device->CreateShaderResourceView(nullptr, &nullSrv, handle);
+    //}
 
 }
 
@@ -114,7 +115,7 @@ void Renderer::RenderFrame(
             cl, width, height,
             perFrameCb,     // b0
             drawAlloc.gpu,  // b1
-            m_sceneTable.gpu, // Space 0
+            m_scene.table.gpu, // Space 0
             m_material,     // Space 1
             m_quad
         );
@@ -152,14 +153,14 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     auto* cb = reinterpret_cast<PerFrameConstants*>(alloc.cpu);
 
     float aspect = (float)width / (float)height;
-    DirectX::XMMATRIX view = DirectX::XMMatrixLookAtLH({ 0.0f, 0.0f, -5.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f });
+    DirectX::XMMATRIX view = DirectX::XMMatrixLookAtLH({ 0.0f, 0.0f, -2.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }); //TODO REMOVE HARDCODE
     DirectX::XMMATRIX proj = DirectX::XMMatrixPerspectiveFovLH(DirectX::XM_PIDIV4, aspect, 0.1f, 100.0f);
     DirectX::XMMATRIX viewProj = view * proj;
 
     DirectX::XMStoreFloat4x4(&cb->viewProj, viewProj);
 
-    cb->cameraPos = { 0.0f, 0.0f, -5.0f };
-    cb->time = time; // Tie this to a timer later
+    cb->cameraPos = { 0.0f, 0.0f, -2.0f }; //TODO FIX THIS TO USE A MEMBERVARIABLE AND MATCH VIEW PROJECTION
+    cb->time = time; 
     cb->frameIndex = frameIndex;
 
     //light
@@ -189,8 +190,13 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
             content / L"Textures" / L"checker_normal_map.png",
              false, L"Tex: Normal");
 
+        m_metalRoughTex.LoadFromFile_DirectXTex(device, cl, m_upload, frameIndex,
+            content / L"Textures" / L"checker_ORM_map.png",
+            false,
+            L"Tex: MetalRough");
+
         // Material handles the table allocation and SRV placement
-        m_material.UpdateDescriptorTable(device, m_srvHeap, m_albedoTex, m_normalTex);
+        m_material.UpdateDescriptorTable(device, m_srvHeap, m_albedoTex, m_normalTex, m_metalRoughTex);
 
         // Fill in PBR factors
         m_material.baseColorFactor = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -202,5 +208,24 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         DebugOutput("Renderer::SetupResources: ContentDir not found.");
 
         m_sceneReady = true; // false if want to hard-fail
+    }
+}
+
+void Renderer::CreateNullSceneTable(ID3D12Device* device)
+{
+    if (!m_scene.IsValid())
+        m_scene.table = m_srvHeap.Allocate(SceneResources::COUNT);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC nullSrv{};
+    nullSrv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    nullSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    nullSrv.Texture2D.MipLevels = 1;
+
+    for (uint32_t i = 0; i < SceneResources::COUNT; ++i)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_scene.table.cpu;
+        h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
+        device->CreateShaderResourceView(nullptr, &nullSrv, h);
     }
 }

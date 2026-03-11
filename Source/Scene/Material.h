@@ -22,7 +22,7 @@ struct Material
     static constexpr uint32_t kDescriptorCount = 8; //total space reserved
 
     void UpdateDescriptorTable(ID3D12Device* device, DescriptorAllocator& heap,
-        const Texture& albedo, const Texture& normal)
+        const Texture& albedo, const Texture& normal, const Texture& metalRough)
     {
         // Allocate the contiguous block if we haven't already
         if (!table.IsValid())
@@ -49,11 +49,9 @@ struct Material
         // Slot 1: Normal
         srvDesc.Format = normal.SrvFormat();
         device->CreateShaderResourceView(normal.Get(), &srvDesc, GetCpuHandle(kNormalSlot));
-
         // Slot 2: Metallic/Roughness
-        /*
         srvDesc.Format = metalRough.SrvFormat();
         device->CreateShaderResourceView(metalRough.Get(), &srvDesc, GetCpuHandle(kMetalRoughSlot));
-        */
+        
     }
 };

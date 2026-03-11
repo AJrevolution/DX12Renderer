@@ -9,6 +9,7 @@
 #include "Source/RHI/Resources/Texture.h"
 #include "Source/Scene/Mesh.h"
 #include "Source/Scene/Material.h"
+#include "Source/Renderer/SceneResources.h" 
 
 class Renderer
 {
@@ -34,13 +35,15 @@ public:
 
 private:
     D3D12_GPU_VIRTUAL_ADDRESS UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height, float time);
+    void CreateNullSceneTable(ID3D12Device* device);
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
 
     ForwardPBRPass m_forwardPbr;
-    DescriptorAllocator::Allocation m_sceneTable; // Space 0 table (IBL/Globals)
+    //DescriptorAllocator::Allocation m_sceneTable; // Space 0 table (IBL/Globals)
+    SceneResources m_scene;
 
     DescriptorAllocator m_dsvHeap;
     Texture m_depth;
@@ -59,5 +62,6 @@ private:
     Material m_material;
     Texture  m_albedoTex;
     Texture m_normalTex;
+    Texture m_metalRoughTex;
     bool     m_sceneReady = false;
 };
