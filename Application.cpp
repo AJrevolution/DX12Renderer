@@ -20,6 +20,8 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
     //Timing
     m_frameTimer.Initialize(m_device.GetDevice(), kFrameCount);
 
+    m_timer.Reset();
+
     //Swap Chain
     m_swapChain.Initialize(
         m_device.GetFactory(),
@@ -133,6 +135,11 @@ void Application::BeginFrame()
 #if defined(_DEBUG)
     const double ms = m_frameTimer.ReadbackMs(m_graphicsQueue.Get(), m_frameIndex);
     if (ms >= 0.0) m_lastGpuMs = ms;
+
+    if ((++m_frameCounter % 60ull) == 0ull && m_lastGpuMs >= 0.0)
+    {
+        DebugOutput(std::format("GPU frame time: {:.3f} ms", m_lastGpuMs));
+    }
 #endif
 }
 

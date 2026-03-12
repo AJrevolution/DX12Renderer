@@ -10,6 +10,7 @@
 #include "Source/Scene/Mesh.h"
 #include "Source/Scene/Material.h"
 #include "Source/Renderer/SceneResources.h" 
+#include "Source/Renderer/SceneData.h"
 
 class Renderer
 {
@@ -44,6 +45,7 @@ private:
     ForwardPBRPass m_forwardPbr;
     //DescriptorAllocator::Allocation m_sceneTable; // Space 0 table (IBL/Globals)
     SceneResources m_scene;
+    SceneData m_sceneData;
 
     DescriptorAllocator m_dsvHeap;
     Texture m_depth;

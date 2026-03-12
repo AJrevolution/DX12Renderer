@@ -10,7 +10,11 @@ void Texture::CreateDepth(
     DXGI_FORMAT dsvFormat,
     const wchar_t* name)
 {
+    m_width = width;
+    m_height = height;
+    m_mipCount = 1;
     m_resourceFormat = resourceFormat;
+    m_srvFormat = DXGI_FORMAT_UNKNOWN;
 
     D3D12_CLEAR_VALUE clear{};
     clear.Format = dsvFormat;
@@ -47,7 +51,11 @@ void Texture::CreateDepth(
 
 void Texture::Create2D(ID3D12Device* device, uint32_t width, uint32_t height, DXGI_FORMAT format, const wchar_t* name)
 {
+    m_width = width;
+    m_height = height;
+    m_mipCount = 1;
     m_resourceFormat = format;
+    m_srvFormat = format;
 
     D3D12_RESOURCE_DESC desc = {};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -127,16 +135,17 @@ void Texture::LoadFromFile_DirectXTex(
     }
 
     const Image* src = image.GetImage(0, 0, 0);
+    if (!src || !src->pixels)
+        throw std::runtime_error("DirectXTex: missing image pixels.");
 
-    const uint32_t width = (uint32_t)src->width;
-    const uint32_t height = (uint32_t)src->height;
-
-    // Determine SRV format based on sRGB intent
-    m_srvFormat = treatAsSRGB ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    m_width = static_cast<uint32_t>(src->width);
+    m_height = static_cast<uint32_t>(src->height);
+    m_mipCount = 1;
     m_resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    m_srvFormat = MakeSRGBIfNeeded(m_resourceFormat, treatAsSRGB);
 
     // Create Default Resource
-    D3D12_RESOURCE_DESC texDesc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, width, height);
+    D3D12_RESOURCE_DESC texDesc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, m_width, m_height);
     auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
 
     ThrowIfFailed(device->CreateCommittedResource(
@@ -162,8 +171,10 @@ void Texture::LoadFromFile_DirectXTex(
     // Copy pixels to upload buffer
     for (UINT y = 0; y < numRows; ++y)
     {
-        memcpy(uploadAlloc.cpu + (y * footprint.Footprint.RowPitch),
-            src->pixels + (y * src->rowPitch), rowSize);
+        memcpy(
+            uploadAlloc.cpu + (y * footprint.Footprint.RowPitch),
+            src->pixels + (y * src->rowPitch),
+            static_cast<size_t>(rowSize));
     }
 
     // Execute Copy

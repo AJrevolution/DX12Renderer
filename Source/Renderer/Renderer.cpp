@@ -3,6 +3,7 @@
 #include "Source/Renderer/FrameConstants.h"
 #include "ThirdParty\DirectX-Headers\include\directx\d3dx12.h"
 #include "DrawConstants.h"
+#include "Source/RHI/Resources/NullSrvHelpers.h"
 
 
 void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
@@ -152,20 +153,35 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     auto alloc = m_upload.Allocate(frameIndex, cbSize, 256);
     auto* cb = reinterpret_cast<PerFrameConstants*>(alloc.cpu);
 
-    float aspect = (float)width / (float)height;
-    DirectX::XMMATRIX view = DirectX::XMMatrixLookAtLH({ 0.0f, 0.0f, -2.0f }, { 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }); //TODO REMOVE HARDCODE
-    DirectX::XMMATRIX proj = DirectX::XMMatrixPerspectiveFovLH(DirectX::XM_PIDIV4, aspect, 0.1f, 100.0f);
+    const float aspect = static_cast<float>(width) / static_cast<float>(height);
+    
+    const auto& cam = m_sceneData.camera;
+    const auto& sun = m_sceneData.sun;
+
+    DirectX::XMMATRIX view = DirectX::XMMatrixLookAtLH(
+        XMLoadFloat3(&cam.position),
+        XMLoadFloat3(&cam.target),
+        XMVectorSet(0, 1, 0, 0));
+
+    DirectX::XMMATRIX proj = DirectX::XMMatrixPerspectiveFovLH(cam.fovY, aspect, cam.nearZ, cam.farZ);
     DirectX::XMMATRIX viewProj = view * proj;
 
     DirectX::XMStoreFloat4x4(&cb->viewProj, viewProj);
 
-    cb->cameraPos = { 0.0f, 0.0f, -2.0f }; //TODO FIX THIS TO USE A MEMBERVARIABLE AND MATCH VIEW PROJECTION
+    cb->cameraPos = cam.position;
     cb->time = time; 
     cb->frameIndex = frameIndex;
+    cb->padding[0] = cb->padding[1] = cb->padding[2] = 0.0f;
 
     //light
-    cb->lightDir = { 0.577f, -0.577f, 0.577f };
-    cb->lightColor = { 1.0f, 1.0f, 1.0f };
+    cb->lightDir = sun.direction;
+    cb->pad1 = 0.0f;
+    cb->lightColor = {
+        sun.color.x * sun.intensity,
+        sun.color.y * sun.intensity,
+        sun.color.z * sun.intensity
+    };
+    cb->pad2 = 0.0f;
 
     return alloc.gpu;
 }
@@ -196,7 +212,7 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
             L"Tex: MetalRough");
 
         // Material handles the table allocation and SRV placement
-        m_material.UpdateDescriptorTable(device, m_srvHeap, m_albedoTex, m_normalTex, m_metalRoughTex);
+        m_material.UpdateDescriptorTable(device, m_srvHeap, &m_albedoTex, &m_normalTex, &m_metalRoughTex);
 
         // Fill in PBR factors
         m_material.baseColorFactor = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -216,16 +232,10 @@ void Renderer::CreateNullSceneTable(ID3D12Device* device)
     if (!m_scene.IsValid())
         m_scene.table = m_srvHeap.Allocate(SceneResources::COUNT);
 
-    D3D12_SHADER_RESOURCE_VIEW_DESC nullSrv{};
-    nullSrv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    nullSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    nullSrv.Texture2D.MipLevels = 1;
-
     for (uint32_t i = 0; i < SceneResources::COUNT; ++i)
     {
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_scene.table.cpu;
         h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
-        device->CreateShaderResourceView(nullptr, &nullSrv, h);
+        CreateNullTexture2DSRV(device, h, DXGI_FORMAT_R8G8B8A8_UNORM);
     }
 }
