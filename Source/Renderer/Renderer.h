@@ -26,7 +26,6 @@ public:
         CommandList& cl,
         uint32_t frameIndex,
         D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv,
-        ID3D12Resource* pBackBuffer,
         uint32_t width,
         uint32_t height,
         float time
@@ -37,6 +36,7 @@ public:
 private:
     D3D12_GPU_VIRTUAL_ADDRESS UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height, float time);
     void CreateNullSceneTable(ID3D12Device* device);
+    void UpdateSceneTable(ID3D12Device* device);
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -65,5 +65,6 @@ private:
     Texture  m_albedoTex;
     Texture m_normalTex;
     Texture m_metalRoughTex;
+    Texture  m_brdfLutTex;
     bool     m_sceneReady = false;
 };

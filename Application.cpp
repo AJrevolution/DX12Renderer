@@ -181,7 +181,6 @@ void Application::Render()
         m_cmd,
         m_frameIndex,
         rtv,
-        backBuffer,
         m_swapChain.Width(),
         m_swapChain.Height(),
         m_timer.TotalSeconds()

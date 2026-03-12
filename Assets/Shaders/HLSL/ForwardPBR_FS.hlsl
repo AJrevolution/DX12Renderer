@@ -1,6 +1,14 @@
 #include "Common.hlsli"
 #include "PBR.hlsli"
 
+// IBL diffuse/specular slots are reserved but currently use constant fallback env colors.
+// This keeps the binding model stable until real env assets are added.
+
+Texture2D g_BRDFLut : register(t0, space0);
+Texture2D g_IBLDiffuse : register(t1, space0); // placeholder
+Texture2D g_IBLSpecular : register(t2, space0); // placeholder
+Texture2D g_ShadowMap : register(t3, space0); // placeholder
+
 Texture2D g_BaseColor : register(t0, space1);
 Texture2D g_NormalMap : register(t1, space1);
 Texture2D g_MetalRough : register(t2, space1); 
@@ -70,20 +78,41 @@ float4 main(PSIn i) : SV_Target
     float roughness = saturate(mr.x * RoughnessFactor); // G
     float metallic = saturate(mr.y * MetallicFactor); // B
     
+    float3 V = SafeNormalize(CameraPos - i.worldPos);
+    float3 L = SafeNormalize(-LightDir);
+    
     PbrInputs p;
     p.N = worldNormal;
-    p.V = SafeNormalize(CameraPos - i.worldPos);
-    p.L = SafeNormalize(-LightDir);
+    p.V = V;
+    p.L = L;
     p.albedo = base;
     p.metallic = metallic;
     p.roughness = roughness;
+     
+    // Direct light
+    float3 direct = EvalDirectPBR(p, LightColor);
 
-    float3 lit = EvalDirectPBR(p, LightColor);
+    // Minimal IBL approximation using BRDF LUT + constant env color
+    float NdotV = saturate(dot(worldNormal, V));
+    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
+    
+    float2 brdf = g_BRDFLut.Sample(g_LinearClamp, float2(NdotV, roughness)).rg;
+
+    // Placeholder environment colors until cubemaps are added
+    float3 diffuseEnvColor = float3(0.03f, 0.04f, 0.05f);
+    float3 specularEnvColor = float3(0.04f, 0.04f, 0.04f);
+    
+    float3 F = F_Schlick(NdotV, F0);
+    float3 kd = (1.0f - F) * (1.0f - metallic);
+
+    float3 iblDiffuse = kd * base * diffuseEnvColor;
+    float3 iblSpec = specularEnvColor * (F0 * brdf.x + brdf.y);
+    
+    float3 lit = direct + iblDiffuse + iblSpec;
 
     // Temporary output transform since swapchain is UNORM (not SRGB)
     float3 outColor = LinearToSRGB(lit);
-    //return float4(i.worldT.www, 1.0f);
-    //return float4(N * 0.5f + 0.5f, 1.0f);
+
     return float4(outColor, 1.0f);
 
 }

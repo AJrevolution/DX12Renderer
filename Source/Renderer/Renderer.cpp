@@ -52,7 +52,6 @@ void Renderer::RenderFrame(
     CommandList& cl,
     uint32_t frameIndex,
     D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv,
-    ID3D12Resource* pBackBuffer,
     uint32_t width,
     uint32_t height,
     float time)
@@ -111,7 +110,7 @@ void Renderer::RenderFrame(
         dc->roughnessFactor = m_material.roughnessFactor;
         const float t = 0.0f; // TODO replace with timer later
 
-        CmdBeginEvent(cmdList, "TexturedQuadPass");
+        CmdBeginEvent(cmdList, "ForwardPBRPass");
         m_forwardPbr.Render(
             cl, width, height,
             perFrameCb,     // b0
@@ -211,9 +210,26 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
             false,
             L"Tex: MetalRough");
 
+      
+        if (std::filesystem::exists(content / L"Textures" / L"ibl_brdf_lut.png"))
+        {
+            m_brdfLutTex.LoadFromFile_DirectXTex(
+                device, cl, m_upload, frameIndex,
+                content / L"Textures" / L"ibl_brdf_lut.png",
+                false,
+                L"Tex: BRDF LUT");
+
+        }
+        else
+        {
+            // Log a warning and leave m_brdfLutTex as 'Invalid'
+            DebugOutput("Warning: ibl_brdf_lut.png missing. PBR will look incorrect.");
+        }
         // Material handles the table allocation and SRV placement
         m_material.UpdateDescriptorTable(device, m_srvHeap, &m_albedoTex, &m_normalTex, &m_metalRoughTex);
-
+        
+        UpdateSceneTable(device);
+        
         // Fill in PBR factors
         m_material.baseColorFactor = { 1.0f, 1.0f, 1.0f, 1.0f };
         m_material.metallicFactor = 0.5f;
@@ -238,4 +254,42 @@ void Renderer::CreateNullSceneTable(ID3D12Device* device)
         h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
         CreateNullTexture2DSRV(device, h, DXGI_FORMAT_R8G8B8A8_UNORM);
     }
+}
+
+void Renderer::UpdateSceneTable(ID3D12Device* device)
+{
+    if (!m_scene.IsValid())
+        return;
+
+    const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
+
+    auto SceneCpuHandle = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_scene.table.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    // Start from deterministic null descriptors.
+    for (uint32_t i = 0; i < SceneResources::COUNT; ++i)
+        CreateNullTexture2DSRV(device, SceneCpuHandle(i), DXGI_FORMAT_R8G8B8A8_UNORM);
+
+    // Slot 0: BRDF LUT
+    if (m_brdfLutTex.IsValid())
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = m_brdfLutTex.SrvFormat();
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels = m_brdfLutTex.MipCount();
+        srv.Texture2D.MostDetailedMip = 0;
+
+        device->CreateShaderResourceView(
+            m_brdfLutTex.Get(),
+            &srv,
+            SceneCpuHandle(SceneResources::BRDF_LUT));
+    }
+
+    // Slots 1..3 remain null placeholders for now:
+    // IBL_DIFFUSE, IBL_SPECULAR, SHADOW_MAP
 }
