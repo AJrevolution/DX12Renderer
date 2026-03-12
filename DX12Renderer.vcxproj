@@ -148,6 +148,7 @@
     <ClInclude Include="Source\Renderer\DrawConstants.h" />
     <ClInclude Include="Source\Renderer\FrameConstants.h" />
     <ClInclude Include="Source\Renderer\Passes\ForwardPBRPass.h" />
+    <ClInclude Include="Source\Renderer\SceneData.h" />
     <ClInclude Include="Source\Renderer\SceneResources.h" />
     <ClInclude Include="Source\RHI\CommandList\ResourceStateTracker.h" />
     <ClInclude Include="Source\RHI\Memory\DescriptorAllocator.h" />
@@ -162,6 +163,7 @@
     <ClInclude Include="Source\RHI\Diagnostics\GPUTimerSet.h" />
     <ClInclude Include="Source\RHI\Pipeline\RootSignature.h" />
     <ClInclude Include="Source\RHI\Pipeline\Shader.h" />
+    <ClInclude Include="Source\RHI\Resources\NullSrvHelpers.h" />
     <ClInclude Include="Source\RHI\Resources\Texture.h" />
     <ClInclude Include="Source\Scene\Material.h" />
     <ClInclude Include="Source\Scene\Mesh.h" />
