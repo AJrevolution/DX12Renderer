@@ -164,6 +164,7 @@
     <ClInclude Include="Source\RHI\Pipeline\RootSignature.h" />
     <ClInclude Include="Source\RHI\Pipeline\Shader.h" />
     <ClInclude Include="Source\RHI\Resources\NullSrvHelpers.h" />
+    <ClInclude Include="Source\RHI\Resources\RenderTarget.h" />
     <ClInclude Include="Source\RHI\Resources\Texture.h" />
     <ClInclude Include="Source\Scene\Material.h" />
     <ClInclude Include="Source\Scene\Mesh.h" />
@@ -189,6 +190,7 @@
     <ClCompile Include="Source\Renderer\Renderer.cpp" />
     <ClCompile Include="Source\RHI\Diagnostics\GPUTimerSet.cpp" />
     <ClCompile Include="Source\RHI\Pipeline\Shader.cpp" />
+    <ClCompile Include="Source\RHI\Resources\RenderTarget.cpp" />
     <ClCompile Include="Source\Scene\Material.cpp" />
     <ClCompile Include="Source\Scene\Mesh.cpp" />
     <ClCompile Include="SwapChain.cpp" />

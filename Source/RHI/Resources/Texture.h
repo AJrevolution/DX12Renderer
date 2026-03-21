@@ -31,6 +31,14 @@ public:
         bool treatAsSRGB,
         const wchar_t* debugName);
 
+    void CreateRenderTarget(
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height,
+        DXGI_FORMAT format,
+        const float clearColor[4],
+        const wchar_t* name);
+
     ID3D12Resource* Get() const { return m_resource.Get(); }
     DXGI_FORMAT ResourceFormat() const { return m_resourceFormat; }
     DXGI_FORMAT SrvFormat() const { return m_srvFormat; }

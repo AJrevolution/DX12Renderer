@@ -112,29 +112,39 @@ void Texture::LoadFromFile_DirectXTex(
     const std::wstring wpath = filePath.wstring();
     HRESULT hr = S_OK;
 
-    // Load the raw data 
+    // Load the raw data (WIC handles PNG/JPG/BMP/TIF)
     if (filePath.extension() == L".dds" || filePath.extension() == L".DDS")
         hr = LoadFromDDSFile(wpath.c_str(), DDS_FLAGS_NONE, &meta, image);
     else
         hr = LoadFromWICFile(wpath.c_str(), WIC_FLAGS_NONE, &meta, image);
-
-    // Ensure we have R8G8B8A8_UNORM for simplicity
-    //// TODO: support Mip chains, BC compression, and native formats.
+    
+    const Image* src = image.GetImage(0, 0, 0);
+    // BODGE: Force conversion to R8G8B8A8_UNORM for now
+	//TODO add either separate function for other types of resources like HDR or add support for more formats in this function.
     if (meta.format != DXGI_FORMAT_R8G8B8A8_UNORM)
     {
+        // Check if the format is compressed (BC1-BC7)
+        if (DirectX::IsCompressed(meta.format))
+        {
+            // For now don't support loading compressed textures into this 8-bit path.
+            // fix later: call DirectX::Decompress() here.
+            throw std::runtime_error("DirectXTex: Compressed DDS not supported in this 8-bit bodge path.");
+        }
         ScratchImage converted;
         hr = Convert(
             image.GetImages(), image.GetImageCount(), meta,
             DXGI_FORMAT_R8G8B8A8_UNORM, TEX_FILTER_DEFAULT, TEX_THRESHOLD_DEFAULT,
             converted
         );
-        ThrowIfFailed(hr, "DirectXTex: Failed to convert to RGBA8");
+        
+        ThrowIfFailed(hr, "DirectXTex: Failed to convert/downsample to RGBA8");
 
         image = std::move(converted);
         meta.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        src = image.GetImage(0, 0, 0);
     }
 
-    const Image* src = image.GetImage(0, 0, 0);
+   
     if (!src || !src->pixels)
         throw std::runtime_error("DirectXTex: missing image pixels.");
 
@@ -188,4 +198,47 @@ void Texture::LoadFromFile_DirectXTex(
     cl.Transition(m_resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);    
 
     return;
+}
+
+void Texture::CreateRenderTarget(
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height,
+    DXGI_FORMAT format,
+    const float clearColor[4],
+    const wchar_t* name)
+{
+    m_width = width;
+    m_height = height;
+    m_mipCount = 1;
+    m_resourceFormat = format;
+    m_srvFormat = format;
+
+    //create heap 
+    CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+    D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Tex2D(format, width, height, 1, 1);
+    desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = format;
+    clear.Color[0] = clearColor[0];
+    clear.Color[1] = clearColor[1];
+    clear.Color[2] = clearColor[2];
+    clear.Color[3] = clearColor[3];
+
+    ThrowIfFailed(
+        device->CreateCommittedResource(
+            &heap,
+            D3D12_HEAP_FLAG_NONE,
+            &desc,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,
+            &clear,
+            IID_PPV_ARGS(&m_resource)),
+        "CreateCommittedResource(RenderTarget)"
+    );
+
+    CommandList::SetGlobalState(m_resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+    if (name)
+        SetD3D12ObjectName(m_resource.Get(), name);
 }

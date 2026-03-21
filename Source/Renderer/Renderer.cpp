@@ -10,8 +10,7 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
 {
     m_backbufferFormat = backbufferFormat;
 
-    //1 MB per frame for now, increase later for textures.
-    m_upload.Initialize(device, frameCount, 16 * 1024 * 1024);
+    m_upload.Initialize(device, frameCount, 64 * 1024 * 1024);
 
     // CPU-only DSV heap
     m_dsvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 16, false, L"DSV Heap (CPU)");
@@ -24,20 +23,7 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
     //m_sceneTable = m_srvHeap.Allocate(kSceneSrvCount);
     CreateNullSceneTable(device);
 
-    //D3D12_SHADER_RESOURCE_VIEW_DESC nullSrv{};
-    //nullSrv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    //nullSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    //nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    //nullSrv.Texture2D.MipLevels = 1;
-
-    //for (uint32_t i = 0; i < kSceneSrvCount; ++i)
-    //{
-    //    // Manual offset: Base + (index * size)
-    //    D3D12_CPU_DESCRIPTOR_HANDLE handle = m_sceneTable.cpu;
-    //    handle.ptr += (SIZE_T)i * m_srvHeap.DescriptorSize();
-    //
-    //    device->CreateShaderResourceView(nullptr, &nullSrv, handle);
-    //}
+    m_rtvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 64, false, L"RTV Heap (CPU)");
 
 }
 
@@ -142,6 +128,8 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     device->CreateDepthStencilView(m_depth.Get(), &dsv, m_depthDsv);
 
     m_depthReady = true;
+
+    //CreateOrResizeGBuffers(device, width, height);
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height, float time)
@@ -170,8 +158,9 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     cb->cameraPos = cam.position;
     cb->time = time; 
     cb->frameIndex = frameIndex;
-    cb->padding[0] = cb->padding[1] = cb->padding[2] = 0.0f;
-
+    //cb->padding[0] = cb->padding[1] = cb->padding[2] = 0.0f;
+    cb->hasBRDFLut = m_brdfLutTex.IsValid() ? 1 : 0;
+    cb->hasIBL = (m_iblDiffuseTex.IsValid() && m_iblSpecularTex.IsValid()) ? 1 : 0;
     //light
     cb->lightDir = sun.direction;
     cb->pad1 = 0.0f;
@@ -225,11 +214,40 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
             // Log a warning and leave m_brdfLutTex as 'Invalid'
             DebugOutput("Warning: ibl_brdf_lut.png missing. PBR will look incorrect.");
         }
+
+        if (std::filesystem::exists(content / L"Textures" / L"lilienstein_2kblurred.png"))
+        {
+            m_iblDiffuseTex.LoadFromFile_DirectXTex(
+                device, cl, m_upload, frameIndex,
+                content / L"Textures" / L"lilienstein_2kblurred.png",
+                false,
+                L"Tex: IBL Diffuse");
+        }
+        else
+        {
+            DebugOutput("Warning: lilienstein_2kblurred.png missing. Using null scene slot.");
+        }
+
+        if (std::filesystem::exists(content / L"Textures" / L"lilienstein_2k.png"))
+        {
+            m_iblSpecularTex.LoadFromFile_DirectXTex(
+                device, cl, m_upload, frameIndex,
+                content / L"Textures" / L"lilienstein_2k.png",
+                false,
+                L"Tex: IBL Specular");
+        }
+        else
+        {
+            DebugOutput("Warning: lilienstein_2k.png missing. Using null scene slot.");
+        }
+
         // Material handles the table allocation and SRV placement
         m_material.UpdateDescriptorTable(device, m_srvHeap, &m_albedoTex, &m_normalTex, &m_metalRoughTex);
         
+        CmdBeginEvent(cl.Get(), "UpdateSceneTable");
         UpdateSceneTable(device);
-        
+        CmdEndEvent(cl.Get());
+
         // Fill in PBR factors
         m_material.baseColorFactor = { 1.0f, 1.0f, 1.0f, 1.0f };
         m_material.metallicFactor = 0.5f;
@@ -274,15 +292,16 @@ void Renderer::UpdateSceneTable(ID3D12Device* device)
     for (uint32_t i = 0; i < SceneResources::COUNT; ++i)
         CreateNullTexture2DSRV(device, SceneCpuHandle(i), DXGI_FORMAT_R8G8B8A8_UNORM);
 
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    srv.Texture2D.MostDetailedMip = 0;
+
     // Slot 0: BRDF LUT
     if (m_brdfLutTex.IsValid())
     {
-        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
         srv.Format = m_brdfLutTex.SrvFormat();
-        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srv.Texture2D.MipLevels = m_brdfLutTex.MipCount();
-        srv.Texture2D.MostDetailedMip = 0;
 
         device->CreateShaderResourceView(
             m_brdfLutTex.Get(),
@@ -290,6 +309,26 @@ void Renderer::UpdateSceneTable(ID3D12Device* device)
             SceneCpuHandle(SceneResources::BRDF_LUT));
     }
 
-    // Slots 1..3 remain null placeholders for now:
-    // IBL_DIFFUSE, IBL_SPECULAR, SHADOW_MAP
+    // Slot 1: IBL diffuse latlong
+    if (m_iblDiffuseTex.IsValid())
+    {
+        srv.Format = m_iblDiffuseTex.SrvFormat();
+        device->CreateShaderResourceView(
+            m_iblDiffuseTex.Get(),
+            &srv,
+            SceneCpuHandle(SceneResources::IBL_DIFFUSE));
+    }
+
+    // Slot 2: IBL specular latlong
+    if (m_iblSpecularTex.IsValid())
+    {
+        srv.Format = m_iblSpecularTex.SrvFormat();
+        device->CreateShaderResourceView(
+            m_iblSpecularTex.Get(),
+            &srv,
+            SceneCpuHandle(SceneResources::IBL_SPECULAR));
+    }
+
+    // Slot 3: SHADOW_MAP stays null for now TODO implement
 }
+

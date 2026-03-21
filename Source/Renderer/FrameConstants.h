@@ -8,7 +8,9 @@ struct PerFrameConstants
     DirectX::XMFLOAT3   cameraPos;
     float      time;
     uint32_t   frameIndex;
-    float      padding[3]; 
+    uint32_t    hasBRDFLut; // 1 if loaded, 0 if null
+    uint32_t    hasIBL;     // 1 if diffuse/specular loaded, 0 if null
+    uint32_t    _pad0;      // keep one for alignment
 
 
     DirectX::XMFLOAT3   lightDir;   float pad1;  

@@ -11,6 +11,7 @@
 #include "Source/Scene/Material.h"
 #include "Source/Renderer/SceneResources.h" 
 #include "Source/Renderer/SceneData.h"
+#include "Source/RHI/Resources/RenderTarget.h"
 
 class Renderer
 {
@@ -37,6 +38,8 @@ private:
     D3D12_GPU_VIRTUAL_ADDRESS UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height, float time);
     void CreateNullSceneTable(ID3D12Device* device);
     void UpdateSceneTable(ID3D12Device* device);
+    void CreateOrResizeGBuffers(ID3D12Device* device, uint32_t w, uint32_t h);
+    void UpdateSceneTableForDeferred(ID3D12Device* device);
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -56,15 +59,26 @@ private:
     Texture m_testTexture;
     DescriptorAllocator::Allocation m_testTextureSrv;
     
+    DescriptorAllocator m_rtvHeap;
+
+    RenderTarget m_gbuffer0;
+    RenderTarget m_gbuffer1;
+    RenderTarget m_gbuffer2;
+    bool m_gbufferReady = false;
+
+    bool m_useDeferred = false;
+
     bool m_resourcesReady = false;
 
     float m_clearColor[4] = { 0.08f, 0.10f, 0.14f, 1.0f };
 
-    Mesh     m_quad;
-    Material m_material;
-    Texture  m_albedoTex;
-    Texture m_normalTex;
-    Texture m_metalRoughTex;
-    Texture  m_brdfLutTex;
-    bool     m_sceneReady = false;
+    Mesh        m_quad;
+    Material    m_material;
+    Texture     m_albedoTex;
+    Texture     m_normalTex;
+    Texture     m_metalRoughTex;
+    Texture     m_brdfLutTex;
+    Texture     m_iblDiffuseTex;
+    Texture     m_iblSpecularTex;
+    bool        m_sceneReady = false;
 };
