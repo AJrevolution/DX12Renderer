@@ -12,3 +12,23 @@ void RenderTarget::Create(
     m_tex.CreateRenderTarget(device, width, height, format, m_clear, name);
 }
 
+void RenderTarget::CreateRTV(
+    ID3D12Device* device,
+    DescriptorAllocator& rtvHeap,
+    const wchar_t* rtvName)
+{
+    if (!m_rtv.ptr)
+    {
+        auto alloc = rtvHeap.Allocate(1);
+        m_rtv = alloc.cpu;
+    }
+
+    D3D12_RENDER_TARGET_VIEW_DESC rtv{};
+    rtv.Format = m_tex.ResourceFormat();
+    rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+
+    device->CreateRenderTargetView(m_tex.Get(), &rtv, m_rtv);
+
+    if (rtvName)
+        SetD3D12ObjectName(m_tex.Get(), rtvName);
+}

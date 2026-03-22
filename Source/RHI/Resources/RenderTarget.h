@@ -14,6 +14,10 @@ public:
         const float clearColor[4],
         const wchar_t* name);
 
+    void CreateRTV(
+        ID3D12Device* device,
+        DescriptorAllocator& rtvHeap,
+        const wchar_t* rtvName);
 
     Texture& Tex() { return m_tex; }
     const Texture& Tex() const { return m_tex; }

@@ -108,6 +108,12 @@
     <ClInclude Include="Source\RHI\Resources\RenderTarget.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\GBufferPass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\DeferredLightingPass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -182,6 +188,12 @@
     <ClCompile Include="Source\RHI\Resources\RenderTarget.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\GBufferPass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\DeferredLightingPass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -197,5 +209,9 @@
     </CustomBuild>
     <CustomBuild Include="Assets\Shaders\HLSL\ForwardPBR_VS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\ForwardPBR_FS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\DeferredLight_PS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\DeferredLight_VS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\GBuffer_PS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\GBuffer_VS.hlsl" />
   </ItemGroup>
 </Project>
