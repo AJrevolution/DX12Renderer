@@ -14,7 +14,8 @@ void Texture::CreateDepth(
     m_height = height;
     m_mipCount = 1;
     m_resourceFormat = resourceFormat;
-    m_srvFormat = DXGI_FORMAT_UNKNOWN;
+    m_dsvFormat = dsvFormat;
+    m_srvFormat = DXGI_FORMAT_R32_FLOAT;
 
     D3D12_CLEAR_VALUE clear{};
     clear.Format = dsvFormat;
@@ -44,6 +45,8 @@ void Texture::CreateDepth(
             IID_PPV_ARGS(&m_resource)),
         "CreateCommittedResource(Depth)"
     );
+
+    CommandList::SetGlobalState(m_resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
     if (name)
         SetD3D12ObjectName(m_resource.Get(), name);

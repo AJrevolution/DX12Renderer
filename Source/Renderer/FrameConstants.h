@@ -5,8 +5,11 @@
 struct PerFrameConstants
 {
     DirectX::XMFLOAT4X4 viewProj;
+    DirectX::XMFLOAT4X4 invViewProj;
+
     DirectX::XMFLOAT3   cameraPos;
     float      time;
+
     uint32_t   frameIndex;
     uint32_t    hasBRDFLut; // 1 if loaded, 0 if null
     uint32_t    hasIBL;     // 1 if diffuse/specular loaded, 0 if null

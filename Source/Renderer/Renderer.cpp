@@ -116,6 +116,8 @@ void Renderer::RenderFrame(
         cl.Transition(m_gbuffer0.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         cl.Transition(m_gbuffer1.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         cl.Transition(m_gbuffer2.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        if (m_depthReady)
+            cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         cl.FlushBarriers();
 
         // LIGHTING PASS
@@ -200,15 +202,19 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
 
     DirectX::XMMATRIX proj = DirectX::XMMatrixPerspectiveFovLH(cam.fovY, aspect, cam.nearZ, cam.farZ);
     DirectX::XMMATRIX viewProj = view * proj;
+    XMMATRIX invViewProj = XMMatrixInverse(nullptr, viewProj);
 
     DirectX::XMStoreFloat4x4(&cb->viewProj, viewProj);
+    DirectX::XMStoreFloat4x4(&cb->invViewProj, invViewProj);
 
     cb->cameraPos = cam.position;
     cb->time = time; 
     cb->frameIndex = frameIndex;
-    //cb->padding[0] = cb->padding[1] = cb->padding[2] = 0.0f;
+
     cb->hasBRDFLut = m_brdfLutTex.IsValid() ? 1 : 0;
     cb->hasIBL = (m_iblDiffuseTex.IsValid() && m_iblSpecularTex.IsValid()) ? 1 : 0;
+    cb->_pad0 = 0u;
+    
     //light
     cb->lightDir = sun.direction;
     cb->pad1 = 0.0f;
@@ -430,6 +436,10 @@ void Renderer::UpdateSceneTableForDeferred(ID3D12Device* device)
         h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
         return h;
     };
+    //   t0 = GBuffer0 (BaseColor)
+    //   t1 = GBuffer1 (Normal)
+    //   t2 = GBuffer2 (MRAO)
+    //   t3 = Depth SRV
 
     for (uint32_t i = 0; i < SceneResources::COUNT; ++i)
         CreateNullTexture2DSRV(device, SceneCpuHandle(i), DXGI_FORMAT_R8G8B8A8_UNORM);
@@ -458,5 +468,9 @@ void Renderer::UpdateSceneTableForDeferred(ID3D12Device* device)
         device->CreateShaderResourceView(m_gbuffer2.Tex().Get(), &srv, SceneCpuHandle(SceneResources::IBL_SPECULAR)); // t2
     }
 
-    // t3 stays null
+    if (m_depth.IsValid())
+    {
+        srv.Format = m_depth.SrvFormat(); // DXGI_FORMAT_R32_FLOAT
+        device->CreateShaderResourceView(m_depth.Get(), &srv, SceneCpuHandle(SceneResources::SHADOW_MAP)); //t3
+    }
 }

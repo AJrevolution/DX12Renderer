@@ -2,7 +2,9 @@
 
 cbuffer PerFrameConstants : register(b0)
 {
-    float4x4 ViewProj;
+    row_major float4x4 ViewProj;
+    row_major float4x4 InvViewProj;
+    
     float3 CameraPos;
     float Time;
     uint FrameIndex;
