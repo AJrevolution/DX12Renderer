@@ -21,6 +21,25 @@ public:
         DXGI_FORMAT dsvFormat
     );
 
+    void InitialiseGBuffer(
+        ID3D12Device* device,
+        ID3D12RootSignature* rootSig,
+        D3D12_SHADER_BYTECODE vs,
+        D3D12_SHADER_BYTECODE ps,
+        DXGI_FORMAT rt0,
+        DXGI_FORMAT rt1,
+        DXGI_FORMAT rt2,
+        DXGI_FORMAT dsvFormat
+    );
+
+    void InitialiseDeferredLight(
+        ID3D12Device* device,
+        ID3D12RootSignature* rootSig,
+        D3D12_SHADER_BYTECODE vs,
+        D3D12_SHADER_BYTECODE ps,
+        DXGI_FORMAT rtvFormat
+    );
+
 
     ID3D12PipelineState* Get() const { return m_pso.Get(); }
 

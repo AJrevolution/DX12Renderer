@@ -118,17 +118,6 @@ float4 main(PSIn i) : SV_Target
         // This keeps specular highlights visible but they won't be "physically correct."
         brdf = float2(1.0f, 0.0f);
     }
-    //float2 diffuseUV = DirToLatLongUV(worldNormal);
-    //float3 diffuseEnv = g_IBLDiffuse.Sample(g_LinearClamp, diffuseUV).rgb;
-    
-    //float3 R = reflect(-V, worldNormal);
-    //float3 Rrough = normalize(lerp(R, worldNormal, roughness * roughness));
-    
-    //float2 specUV0 = DirToLatLongUV(R);
-    //float2 specUV1 = DirToLatLongUV(Rrough);
-    
-    //float3 specularEnvSharp = g_IBLSpecular.Sample(g_LinearClamp, specUV0).rgb;
-    //float3 specularEnvBlur = g_IBLSpecular.Sample(g_LinearClamp, specUV1).rgb;
     
     // Temporary roughness approximation until proper prefilter+mips/cubemaps
     float3 diffuseEnv;

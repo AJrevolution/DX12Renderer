@@ -46,29 +46,10 @@ void Renderer::RenderFrame(
 
     CmdBeginEvent(cmdList, "Renderer");
 
-    //Prepare global data
-
-    if (m_depthReady)
-    {
-        cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    }
-
     if (!m_resourcesReady)
     {
         SetupResources(device, cl, frameIndex);
         m_resourcesReady = true;
-    }
-    cl.FlushBarriers();
-    // Depth must already be created by OnResize
-    cmdList->ClearRenderTargetView(backbufferRtv, m_clearColor, 0, nullptr);
-    if (m_depthReady)
-    {
-        cmdList->ClearDepthStencilView(m_depthDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-        cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, &m_depthDsv);
-    }
-    else
-    {
-        cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
     }
 
     //Bind the heap before drawing
@@ -77,34 +58,101 @@ void Renderer::RenderFrame(
 
     // Per-frame CB (b0)
     const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb = UpdateGlobalConstants(frameIndex, width, height, time);
+    
+    // Per-Draw CB using PBR factors from the material
+    auto drawAlloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
+    auto* dc = reinterpret_cast<PerDrawConstants*>(drawAlloc.cpu);
+    //temp to observe lighting calulations
+    float oscillation = sinf(time * 1.5f);
+    float rotationAngle = oscillation * 1.1f;
 
-    // Per-draw CB (b1) allocated from UploadArena, 256-aligned
+    DirectX::XMMATRIX world = DirectX::XMMatrixRotationY(rotationAngle);
+    DirectX::XMStoreFloat4x4(&dc->world, world);
+    dc->materialIndex = 0;
+    dc->baseColorFactor = m_material.baseColorFactor;
+    dc->metallicFactor = m_material.metallicFactor;
+    dc->roughnessFactor = m_material.roughnessFactor;
+
+    if (m_useDeferred && m_gbufferReady)
     {
-        // Per-Draw CB using PBR factors from the material
-        auto drawAlloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
-        auto* dc = reinterpret_cast<PerDrawConstants*>(drawAlloc.cpu);
+        CmdBeginEvent(cmdList, "DeferredPath");
+
+        // GBUFFER PASS 
+        // Transitions
+        cl.Transition(m_gbuffer0.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cl.Transition(m_gbuffer1.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cl.Transition(m_gbuffer2.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+        if (m_depthReady) 
+            cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        cl.FlushBarriers();
+
+        // Clear GBuffer RTs and Depth
+        cmdList->ClearRenderTargetView(m_gbuffer0.RTV(), m_gbuffer0.ClearColor(), 0, nullptr);
+        cmdList->ClearRenderTargetView(m_gbuffer1.RTV(), m_gbuffer1.ClearColor(), 0, nullptr);
+        cmdList->ClearRenderTargetView(m_gbuffer2.RTV(), m_gbuffer2.ClearColor(), 0, nullptr);
+        if (m_depthReady) 
+            cmdList->ClearDepthStencilView(m_depthDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+        // Bind MRTs (Multiple Render Targets)
+        D3D12_CPU_DESCRIPTOR_HANDLE mrt[3] = 
+        { 
+            m_gbuffer0.RTV(), 
+            m_gbuffer1.RTV(), 
+            m_gbuffer2.RTV() 
+        };
+        cmdList->OMSetRenderTargets(3, mrt, FALSE, m_depthReady ? &m_depthDsv : nullptr);
         
-        //temp to observe lighting calulations
-        float oscillation = sinf(time * 1.5f);
-        float rotationAngle = oscillation * 1.1f;
+        CmdBeginEvent(cmdList, "GBufferPass");
+        m_gbufferPass.Render(cl, width, height, perFrameCb, drawAlloc.gpu, m_scene.table.gpu, m_material, m_quad);
+        CmdEndEvent(cmdList);
 
-        DirectX::XMMATRIX world = DirectX::XMMatrixRotationY(rotationAngle);
-        DirectX::XMStoreFloat4x4(&dc->world, world);
-        dc->materialIndex = 0;
-        dc->baseColorFactor = m_material.baseColorFactor;
-        dc->metallicFactor = m_material.metallicFactor;
-        dc->roughnessFactor = m_material.roughnessFactor;
-        const float t = 0.0f; // TODO replace with timer later
+        // LIGHTING PASS PREP 
+        // Remap the Scene Table 
+        CmdBeginEvent(cmdList, "UpdateSceneTableForDeferred");
+        UpdateSceneTableForDeferred(device);
+        CmdEndEvent(cmdList);
 
-        CmdBeginEvent(cmdList, "ForwardPBRPass");
-        m_forwardPbr.Render(
-            cl, width, height,
-            perFrameCb,     // b0
-            drawAlloc.gpu,  // b1
-            m_scene.table.gpu, // Space 0
-            m_material,     // Space 1
-            m_quad
-        );
+        // Transition GBuffers to Shader Resource so the lighting pass can read them
+        cl.Transition(m_gbuffer0.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cl.Transition(m_gbuffer1.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cl.Transition(m_gbuffer2.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cl.FlushBarriers();
+
+        // LIGHTING PASS
+        cmdList->ClearRenderTargetView(backbufferRtv, m_clearColor, 0, nullptr);
+        cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr); // No depth for lighting quad
+        
+        CmdBeginEvent(cmdList, "DeferredLightingPass");
+        m_deferredLightPass.Render(cl, width, height, perFrameCb, m_scene.table.gpu);
+        CmdEndEvent(cmdList);
+
+        CmdEndEvent(cmdList);
+    }
+    else
+    {
+        CmdBeginEvent(cmdList, "ForwardPath");
+        CmdBeginEvent(cmdList, "UpdateSceneTableForward");
+        UpdateSceneTable(device);
+        CmdEndEvent(cmdList);
+
+        // Normal Forward Setup
+        if (m_depthReady) 
+            cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        cl.FlushBarriers();
+
+        cmdList->ClearRenderTargetView(backbufferRtv, m_clearColor, 0, nullptr);
+        if (m_depthReady)
+        {
+            cmdList->ClearDepthStencilView(m_depthDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, &m_depthDsv);
+        }
+        else
+        {
+            cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
+        }
+        CmdEndEvent(cmdList);
+        m_forwardPbr.Render(cl, width, height, perFrameCb, drawAlloc.gpu, m_scene.table.gpu, m_material, m_quad);
+        CmdEndEvent(cmdList);
         CmdEndEvent(cmdList);
     }
 
@@ -129,7 +177,7 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
 
     m_depthReady = true;
 
-    //CreateOrResizeGBuffers(device, width, height);
+    CreateOrResizeGBuffers(device, width, height);
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height, float time)
@@ -259,6 +307,19 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
 
         m_sceneReady = true; // false if want to hard-fail
     }
+
+    m_gbufferPass.Initialize(
+        device,
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_D32_FLOAT,
+        Paths::ShaderDir());
+
+    m_deferredLightPass.Initialize(
+        device,
+        m_backbufferFormat,
+        Paths::ShaderDir());
 }
 
 void Renderer::CreateNullSceneTable(ID3D12Device* device)
@@ -332,3 +393,70 @@ void Renderer::UpdateSceneTable(ID3D12Device* device)
     // Slot 3: SHADOW_MAP stays null for now TODO implement
 }
 
+void Renderer::CreateOrResizeGBuffers(ID3D12Device* device, uint32_t w, uint32_t h)
+{
+    //clear values
+    const float c0[4] = { 0, 0, 0, 0 };
+    const float c1[4] = { 0, 0, 0, 0 };
+    const float c2[4] = { 0, 0, 0, 0 };
+
+    // NOTE: Deferred pass reuses Scene SRV slots for GBuffer binding:
+    // t0 (BRDF_LUT)      > GBuffer0 (BaseColor)
+    // t1 (IBL_DIFFUSE)   > GBuffer1 (Normal)
+    // t2 (IBL_SPECULAR)  > GBuffer2 (MRAO)
+    // This avoids needing a separate root signature   
+
+    m_gbuffer0.Create(device, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, c0, L"GBuffer0 BaseColor");
+    m_gbuffer1.Create(device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, c1, L"GBuffer1 Normal");
+    m_gbuffer2.Create(device, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, c2, L"GBuffer2 MRAO");
+
+    m_gbuffer0.CreateRTV(device, m_rtvHeap, L"GBuffer0 RTV");
+    m_gbuffer1.CreateRTV(device, m_rtvHeap, L"GBuffer1 RTV");
+    m_gbuffer2.CreateRTV(device, m_rtvHeap, L"GBuffer2 RTV");
+
+    m_gbufferReady = true;
+}
+
+void Renderer::UpdateSceneTableForDeferred(ID3D12Device* device)
+{
+    if (!m_scene.IsValid())
+        return;
+
+    const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
+
+    auto SceneCpuHandle = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_scene.table.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    for (uint32_t i = 0; i < SceneResources::COUNT; ++i)
+        CreateNullTexture2DSRV(device, SceneCpuHandle(i), DXGI_FORMAT_R8G8B8A8_UNORM);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    srv.Texture2D.MostDetailedMip = 0;
+
+    if (m_gbuffer0.Tex().IsValid())
+    {
+        srv.Format = m_gbuffer0.Tex().SrvFormat();
+        device->CreateShaderResourceView(m_gbuffer0.Tex().Get(), &srv, SceneCpuHandle(SceneResources::BRDF_LUT)); // t0
+    }
+
+    if (m_gbuffer1.Tex().IsValid())
+    {
+        srv.Format = m_gbuffer1.Tex().SrvFormat();
+        device->CreateShaderResourceView(m_gbuffer1.Tex().Get(), &srv, SceneCpuHandle(SceneResources::IBL_DIFFUSE)); // t1
+    }
+
+    if (m_gbuffer2.Tex().IsValid())
+    {
+        srv.Format = m_gbuffer2.Tex().SrvFormat();
+        device->CreateShaderResourceView(m_gbuffer2.Tex().Get(), &srv, SceneCpuHandle(SceneResources::IBL_SPECULAR)); // t2
+    }
+
+    // t3 stays null
+}

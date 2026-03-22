@@ -12,6 +12,8 @@
 #include "Source/Renderer/SceneResources.h" 
 #include "Source/Renderer/SceneData.h"
 #include "Source/RHI/Resources/RenderTarget.h"
+#include "Source/Renderer/Passes/GBufferPass.h"
+#include "Source/Renderer/Passes/DeferredLightingPass.h"
 
 class Renderer
 {
@@ -50,6 +52,10 @@ private:
     SceneResources m_scene;
     SceneData m_sceneData;
 
+    GBufferPass m_gbufferPass;
+    DeferredLightingPass m_deferredLightPass;
+    bool m_useDeferred = false;
+
     DescriptorAllocator m_dsvHeap;
     Texture m_depth;
     D3D12_CPU_DESCRIPTOR_HANDLE m_depthDsv{};
@@ -66,7 +72,6 @@ private:
     RenderTarget m_gbuffer2;
     bool m_gbufferReady = false;
 
-    bool m_useDeferred = false;
 
     bool m_resourcesReady = false;
 
