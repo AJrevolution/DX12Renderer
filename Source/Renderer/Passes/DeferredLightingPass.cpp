@@ -18,7 +18,8 @@ void DeferredLightingPass::Render(
     uint32_t width,
     uint32_t height,
     D3D12_GPU_VIRTUAL_ADDRESS perFrameCb,
-    D3D12_GPU_DESCRIPTOR_HANDLE sceneTable)
+    D3D12_GPU_DESCRIPTOR_HANDLE sceneTable,
+    D3D12_GPU_DESCRIPTOR_HANDLE deferredInputTable)
 {
     auto* cmd = cl.Get();
 
@@ -28,8 +29,14 @@ void DeferredLightingPass::Render(
     cmd->SetPipelineState(m_pso.Get());
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
 
+    // RootSig v2:
+    // 0 = b0 per-frame
+    // 2 = scene table (space0)
+    // 3 = deferred input table (space1)
+
     cmd->SetGraphicsRootConstantBufferView(0, perFrameCb);
     cmd->SetGraphicsRootDescriptorTable(2, sceneTable);
+    cmd->SetGraphicsRootDescriptorTable(3, deferredInputTable);
 
     cmd->RSSetViewports(1, &vp);
     cmd->RSSetScissorRects(1, &sc);

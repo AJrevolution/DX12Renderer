@@ -22,6 +22,8 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
     static constexpr uint32_t kSceneSrvCount = 4;
     //m_sceneTable = m_srvHeap.Allocate(kSceneSrvCount);
     CreateNullSceneTable(device);
+    
+    CreateNullDeferredInputTable(device);
 
     m_rtvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 64, false, L"RTV Heap (CPU)");
 
@@ -77,6 +79,11 @@ void Renderer::RenderFrame(
     {
         CmdBeginEvent(cmdList, "DeferredPath");
 
+        // Scene table stays the true scene contract in deferred too
+        CmdBeginEvent(cmdList, "UpdateSceneTable");
+        UpdateSceneTable(device);
+        CmdEndEvent(cmdList);
+
         // GBUFFER PASS 
         // Transitions
         cl.Transition(m_gbuffer0.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -108,9 +115,10 @@ void Renderer::RenderFrame(
 
         // LIGHTING PASS PREP 
         // Remap the Scene Table 
-        CmdBeginEvent(cmdList, "UpdateSceneTableForDeferred");
-        UpdateSceneTableForDeferred(device);
-        CmdEndEvent(cmdList);
+        //CmdBeginEvent(cmdList, "UpdateDeferredInputTable");
+        ////UpdateSceneTableForDeferred(device);
+		//UpdateDeferredInputTable(device);
+        //CmdEndEvent(cmdList);
 
         // Transition GBuffers to Shader Resource so the lighting pass can read them
         cl.Transition(m_gbuffer0.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -125,7 +133,7 @@ void Renderer::RenderFrame(
         cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr); // No depth for lighting quad
         
         CmdBeginEvent(cmdList, "DeferredLightingPass");
-        m_deferredLightPass.Render(cl, width, height, perFrameCb, m_scene.table.gpu);
+        m_deferredLightPass.Render(cl, width, height, perFrameCb, m_scene.table.gpu, m_deferredInputTable.gpu);
         CmdEndEvent(cmdList);
 
         CmdEndEvent(cmdList);
@@ -420,29 +428,47 @@ void Renderer::CreateOrResizeGBuffers(ID3D12Device* device, uint32_t w, uint32_t
     m_gbuffer1.CreateRTV(device, m_rtvHeap, L"GBuffer1 RTV");
     m_gbuffer2.CreateRTV(device, m_rtvHeap, L"GBuffer2 RTV");
 
+    if (m_deferredInputTableReady)
+    {
+        UpdateDeferredInputTable(device);
+    }
+
     m_gbufferReady = true;
 }
 
-void Renderer::UpdateSceneTableForDeferred(ID3D12Device* device)
+
+void Renderer::CreateNullDeferredInputTable(ID3D12Device* device)
 {
-    if (!m_scene.IsValid())
+    if (!m_deferredInputTable.IsValid())
+        m_deferredInputTable = m_srvHeap.Allocate(8);
+
+    for (uint32_t i = 0; i < 8; ++i)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_deferredInputTable.cpu;
+        h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
+        CreateNullTexture2DSRV(device, h, DXGI_FORMAT_R8G8B8A8_UNORM);
+    }
+
+    m_deferredInputTableReady = true;
+}
+
+void Renderer::UpdateDeferredInputTable(ID3D12Device* device)
+{
+    if (!m_deferredInputTable.IsValid())
         return;
 
     const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
 
-    auto SceneCpuHandle = [&](uint32_t slot)
+    auto DeferredCpuHandle = [&](uint32_t slot)
     {
-        D3D12_CPU_DESCRIPTOR_HANDLE h = m_scene.table.cpu;
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_deferredInputTable.cpu;
         h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
         return h;
     };
-    //   t0 = GBuffer0 (BaseColor)
-    //   t1 = GBuffer1 (Normal)
-    //   t2 = GBuffer2 (MRAO)
-    //   t3 = Depth SRV
 
-    for (uint32_t i = 0; i < SceneResources::COUNT; ++i)
-        CreateNullTexture2DSRV(device, SceneCpuHandle(i), DXGI_FORMAT_R8G8B8A8_UNORM);
+    // Start from deterministic nulls
+    for (uint32_t i = 0; i < 8; ++i)
+        CreateNullTexture2DSRV(device, DeferredCpuHandle(i), DXGI_FORMAT_R8G8B8A8_UNORM);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -450,27 +476,31 @@ void Renderer::UpdateSceneTableForDeferred(ID3D12Device* device)
     srv.Texture2D.MipLevels = 1;
     srv.Texture2D.MostDetailedMip = 0;
 
+    // t0 = GBuffer0
     if (m_gbuffer0.Tex().IsValid())
     {
         srv.Format = m_gbuffer0.Tex().SrvFormat();
-        device->CreateShaderResourceView(m_gbuffer0.Tex().Get(), &srv, SceneCpuHandle(SceneResources::BRDF_LUT)); // t0
+        device->CreateShaderResourceView(m_gbuffer0.Tex().Get(), &srv, DeferredCpuHandle(0));
     }
 
+    // t1 = GBuffer1
     if (m_gbuffer1.Tex().IsValid())
     {
         srv.Format = m_gbuffer1.Tex().SrvFormat();
-        device->CreateShaderResourceView(m_gbuffer1.Tex().Get(), &srv, SceneCpuHandle(SceneResources::IBL_DIFFUSE)); // t1
+        device->CreateShaderResourceView(m_gbuffer1.Tex().Get(), &srv, DeferredCpuHandle(1));
     }
 
+    // t2 = GBuffer2
     if (m_gbuffer2.Tex().IsValid())
     {
         srv.Format = m_gbuffer2.Tex().SrvFormat();
-        device->CreateShaderResourceView(m_gbuffer2.Tex().Get(), &srv, SceneCpuHandle(SceneResources::IBL_SPECULAR)); // t2
+        device->CreateShaderResourceView(m_gbuffer2.Tex().Get(), &srv, DeferredCpuHandle(2));
     }
 
+    // t3 = Depth
     if (m_depth.IsValid())
     {
         srv.Format = m_depth.SrvFormat(); // DXGI_FORMAT_R32_FLOAT
-        device->CreateShaderResourceView(m_depth.Get(), &srv, SceneCpuHandle(SceneResources::SHADOW_MAP)); //t3
+        device->CreateShaderResourceView(m_depth.Get(), &srv, DeferredCpuHandle(3));
     }
 }

@@ -41,20 +41,23 @@ private:
     void CreateNullSceneTable(ID3D12Device* device);
     void UpdateSceneTable(ID3D12Device* device);
     void CreateOrResizeGBuffers(ID3D12Device* device, uint32_t w, uint32_t h);
-    void UpdateSceneTableForDeferred(ID3D12Device* device);
+    void CreateNullDeferredInputTable(ID3D12Device* device);
+    void UpdateDeferredInputTable(ID3D12Device* device);
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
 
     ForwardPBRPass m_forwardPbr;
-    //DescriptorAllocator::Allocation m_sceneTable; // Space 0 table (IBL/Globals)
     SceneResources m_scene;
     SceneData m_sceneData;
 
+    DescriptorAllocator::Allocation m_deferredInputTable; // space1 for deferred lighting only
+    bool m_deferredInputTableReady = false;
+
     GBufferPass m_gbufferPass;
     DeferredLightingPass m_deferredLightPass;
-    bool m_useDeferred = false;
+    bool m_useDeferred = true;
 
     DescriptorAllocator m_dsvHeap;
     Texture m_depth;
@@ -72,8 +75,8 @@ private:
     RenderTarget m_gbuffer2;
     bool m_gbufferReady = false;
 
-
     bool m_resourcesReady = false;
+
 
     float m_clearColor[4] = { 0.08f, 0.10f, 0.14f, 1.0f };
 

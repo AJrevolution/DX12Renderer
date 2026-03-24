@@ -18,7 +18,8 @@ public:
         uint32_t width,
         uint32_t height,
         D3D12_GPU_VIRTUAL_ADDRESS perFrameCb,
-        D3D12_GPU_DESCRIPTOR_HANDLE sceneTable);
+        D3D12_GPU_DESCRIPTOR_HANDLE sceneTable,
+        D3D12_GPU_DESCRIPTOR_HANDLE deferredInputTable);
 
 private:
     bool m_initialized = false;
