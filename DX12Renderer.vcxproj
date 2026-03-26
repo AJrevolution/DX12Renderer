@@ -150,6 +150,7 @@
     <ClInclude Include="Source\Renderer\Passes\DeferredLightingPass.h" />
     <ClInclude Include="Source\Renderer\Passes\ForwardPBRPass.h" />
     <ClInclude Include="Source\Renderer\Passes\GBufferPass.h" />
+    <ClInclude Include="Source\Renderer\Passes\ShadowPass.h" />
     <ClInclude Include="Source\Renderer\SceneData.h" />
     <ClInclude Include="Source\Renderer\SceneResources.h" />
     <ClInclude Include="Source\RHI\CommandList\ResourceStateTracker.h" />
@@ -182,6 +183,7 @@
     <ClCompile Include="Source\Renderer\Passes\DeferredLightingPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\ForwardPBRPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\GBufferPass.cpp" />
+    <ClCompile Include="Source\Renderer\Passes\ShadowPass.cpp" />
     <ClCompile Include="Source\RHI\CommandList\ResourceStateTracker.cpp" />
     <ClCompile Include="Source\RHI\Memory\DescriptorAllocator.cpp" />
     <ClCompile Include="Device.cpp" />
@@ -299,6 +301,17 @@
 ) else (
   dxc.exe -T vs_6_0 -E main -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\GBuffer_VS.cso" "$(ProjectDir)Assets\Shaders\HLSL\GBuffer_VS.hlsl"
 )</Command>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="Assets\Shaders\HLSL\Shadow_VS.hlsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if "$(Configuration)"=="Debug" (
+  dxc.exe -T vs_6_0 -E main -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Shadow_VS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Shadow_VS.hlsl"
+) else (
+  dxc.exe -T vs_6_0 -E main -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Shadow_VS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Shadow_VS.hlsl"
+)</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\Shadow_VS.cso;%(Outputs)</Outputs>
     </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

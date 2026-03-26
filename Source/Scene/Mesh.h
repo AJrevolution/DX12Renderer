@@ -22,6 +22,12 @@ public:
         UploadArena& upload,
         uint32_t frameIndex);
 
+    void CreateFloorPlane(
+        ID3D12Device* device,
+        CommandList& cl,
+        UploadArena& upload,
+        uint32_t frameIndex);
+
     const D3D12_VERTEX_BUFFER_VIEW& VBV() const { return m_vbv; }
     const D3D12_INDEX_BUFFER_VIEW& IBV() const { return m_ibv; }
     uint32_t IndexCount() const { return m_indexCount; }

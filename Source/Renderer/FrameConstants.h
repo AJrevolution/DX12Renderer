@@ -6,6 +6,7 @@ struct PerFrameConstants
 {
     DirectX::XMFLOAT4X4 viewProj;
     DirectX::XMFLOAT4X4 invViewProj;
+    DirectX::XMFLOAT4X4 lightViewProj;
 
     DirectX::XMFLOAT3   cameraPos;
     float      time;
@@ -18,5 +19,8 @@ struct PerFrameConstants
 
     DirectX::XMFLOAT3   lightDir;   float pad1;  
     DirectX::XMFLOAT3   lightColor; float pad2;
+
+    DirectX::XMFLOAT2 shadowInvSize;
+    float padShadow[2];
 };
 static_assert((sizeof(PerFrameConstants) % 16) == 0); 

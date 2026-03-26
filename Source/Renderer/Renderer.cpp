@@ -27,6 +27,8 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
 
     m_rtvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 64, false, L"RTV Heap (CPU)");
 
+    CreateOrResizeShadowMap(device);
+
 }
 
 void Renderer::BeginFrame(uint32_t frameIndex)
@@ -60,20 +62,60 @@ void Renderer::RenderFrame(
 
     // Per-frame CB (b0)
     const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb = UpdateGlobalConstants(frameIndex, width, height, time);
-    
-    // Per-Draw CB using PBR factors from the material
-    auto drawAlloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
-    auto* dc = reinterpret_cast<PerDrawConstants*>(drawAlloc.cpu);
-    //temp to observe lighting calulations
+    auto quadAlloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
+    auto* quadDc = reinterpret_cast<PerDrawConstants*>(quadAlloc.cpu);
+
     float oscillation = sinf(time * 1.5f);
     float rotationAngle = oscillation * 1.1f;
 
-    DirectX::XMMATRIX world = DirectX::XMMatrixRotationY(rotationAngle);
-    DirectX::XMStoreFloat4x4(&dc->world, world);
-    dc->materialIndex = 0;
-    dc->baseColorFactor = m_material.baseColorFactor;
-    dc->metallicFactor = m_material.metallicFactor;
-    dc->roughnessFactor = m_material.roughnessFactor;
+    DirectX::XMMATRIX quadWorld =
+        DirectX::XMMatrixRotationY(rotationAngle) *
+        DirectX::XMMatrixTranslation(0.0f, 0.5f, 0.0f);
+
+    DirectX::XMStoreFloat4x4(&quadDc->world, quadWorld);
+    quadDc->materialIndex = 0;
+    quadDc->baseColorFactor = m_material.baseColorFactor;
+    quadDc->metallicFactor = m_material.metallicFactor;
+    quadDc->roughnessFactor = m_material.roughnessFactor;
+
+    auto floorAlloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
+    auto* floorDc = reinterpret_cast<PerDrawConstants*>(floorAlloc.cpu);
+
+    DirectX::XMMATRIX floorWorld = DirectX::XMMatrixIdentity();
+    DirectX::XMStoreFloat4x4(&floorDc->world, floorWorld);
+    floorDc->materialIndex = 0;
+    floorDc->baseColorFactor = m_floorMaterial.baseColorFactor;
+    floorDc->metallicFactor = m_floorMaterial.metallicFactor;
+    floorDc->roughnessFactor = m_floorMaterial.roughnessFactor;
+    // Per-Draw CB using PBR factors from the material
+    //auto drawAlloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
+    //auto* dc = reinterpret_cast<PerDrawConstants*>(drawAlloc.cpu);
+    //temp to observe lighting calulations
+    //float oscillation = sinf(time * 1.5f);
+    //float rotationAngle = oscillation * 1.1f;
+
+    //DirectX::XMMATRIX world = DirectX::XMMatrixRotationY(rotationAngle);
+    //DirectX::XMStoreFloat4x4(&dc->world, world);
+    //dc->materialIndex = 0;
+    //dc->baseColorFactor = m_material.baseColorFactor;
+    //dc->metallicFactor = m_material.metallicFactor;
+    //dc->roughnessFactor = m_material.roughnessFactor;
+
+    if (m_shadowReady)
+    {
+        CmdBeginEvent(cmdList, "ShadowPass");
+
+        cl.Transition(m_shadowMap.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        cl.FlushBarriers();
+
+        cmdList->ClearDepthStencilView(m_shadowDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        cmdList->OMSetRenderTargets(0, nullptr, FALSE, &m_shadowDsv);
+
+        m_shadowPass.Render(cl, m_shadowSize, perFrameCb, floorAlloc.gpu, m_floor);
+        m_shadowPass.Render(cl, m_shadowSize, perFrameCb, quadAlloc.gpu, m_quad);
+
+        CmdEndEvent(cmdList);
+    }
 
     if (m_useDeferred && m_gbufferReady)
     {
@@ -110,7 +152,8 @@ void Renderer::RenderFrame(
         cmdList->OMSetRenderTargets(3, mrt, FALSE, m_depthReady ? &m_depthDsv : nullptr);
         
         CmdBeginEvent(cmdList, "GBufferPass");
-        m_gbufferPass.Render(cl, width, height, perFrameCb, drawAlloc.gpu, m_scene.table.gpu, m_material, m_quad);
+        m_gbufferPass.Render(cl, width, height, perFrameCb, floorAlloc.gpu, m_scene.table.gpu, m_floorMaterial, m_floor);
+        m_gbufferPass.Render(cl, width, height, perFrameCb, quadAlloc.gpu, m_scene.table.gpu, m_material, m_quad);
         CmdEndEvent(cmdList);
 
         // LIGHTING PASS PREP 
@@ -161,7 +204,8 @@ void Renderer::RenderFrame(
             cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
         }
         CmdEndEvent(cmdList);
-        m_forwardPbr.Render(cl, width, height, perFrameCb, drawAlloc.gpu, m_scene.table.gpu, m_material, m_quad);
+        m_forwardPbr.Render(cl, width, height, perFrameCb, floorAlloc.gpu, m_scene.table.gpu, m_floorMaterial, m_floor);
+        m_forwardPbr.Render(cl, width, height, perFrameCb, quadAlloc.gpu, m_scene.table.gpu, m_material, m_quad);
         CmdEndEvent(cmdList);
         CmdEndEvent(cmdList);
     }
@@ -212,8 +256,41 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     DirectX::XMMATRIX viewProj = view * proj;
     XMMATRIX invViewProj = XMMatrixInverse(nullptr, viewProj);
 
+    // Directional light shadow camera setup
+    //XMVECTOR lightDir = XMVector3Normalize(XMLoadFloat3(&sun.direction));
+    //XMVECTOR sceneCenter = XMVectorZero();
+    //XMVECTOR lightPos = sceneCenter - lightDir * 5.0f; // simple bring-up distance
+    //XMMATRIX lightView = XMMatrixLookAtLH(
+    //    lightPos,
+    //    sceneCenter,
+    //    XMVectorSet(0, 1, 0, 0));
+    //
+    //// Simple ortho box around current demo scene
+    //XMMATRIX lightProj = XMMatrixOrthographicLH(6.0f, 6.0f, 0.1f, 20.0f);
+    //XMMATRIX lightViewProj = lightView * lightProj;
+
+    XMVECTOR lightDir = XMVector3Normalize(XMLoadFloat3(&sun.direction));
+    XMVECTOR sceneCenter = XMLoadFloat3(&m_sceneBoundsCenter);
+    XMVECTOR sceneExtent = XMLoadFloat3(&m_sceneBoundsExtent);
+
+    XMVECTOR lightPos = sceneCenter - lightDir * 8.0f;
+
+    XMMATRIX lightView = XMMatrixLookAtLH(
+        lightPos,
+        sceneCenter,
+        XMVectorSet(0, 1, 0, 0));
+
+    XMMATRIX lightProj = XMMatrixOrthographicLH(
+        m_sceneBoundsExtent.x * 2.0f,
+        m_sceneBoundsExtent.y * 2.0f,
+        0.1f,
+        20.0f);
+
+    XMMATRIX lightViewProj = lightView * lightProj;
+
     DirectX::XMStoreFloat4x4(&cb->viewProj, viewProj);
     DirectX::XMStoreFloat4x4(&cb->invViewProj, invViewProj);
+    DirectX::XMStoreFloat4x4(&cb->lightViewProj, lightViewProj);
 
     cb->cameraPos = cam.position;
     cb->time = time; 
@@ -233,6 +310,14 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     };
     cb->pad2 = 0.0f;
 
+    cb->shadowInvSize = 
+    {
+        1.0f / static_cast<float>(m_shadowSize),
+        1.0f / static_cast<float>(m_shadowSize)
+    };
+    cb->padShadow[0] = 0.0f;
+    cb->padShadow[1] = 0.0f;
+
     return alloc.gpu;
 }
 
@@ -243,6 +328,7 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
 
     // Create mesh GPU resources (DEFAULT heap VB+IB)
     m_quad.CreateTexturedQuad(device, cl, m_upload, frameIndex);
+    m_floor.CreateFloorPlane(device, cl, m_upload, frameIndex);
 
     // Load a real texture from disk 
     const auto content = Paths::ContentDir_DevOnly();
@@ -305,7 +391,10 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
 
         // Material handles the table allocation and SRV placement
         m_material.UpdateDescriptorTable(device, m_srvHeap, &m_albedoTex, &m_normalTex, &m_metalRoughTex);
-        
+       
+        m_floorMaterial.UpdateDescriptorTable(device, m_srvHeap, &m_albedoTex, &m_normalTex, &m_metalRoughTex);
+
+
         CmdBeginEvent(cl.Get(), "UpdateSceneTable");
         UpdateSceneTable(device);
         CmdEndEvent(cl.Get());
@@ -314,6 +403,10 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         m_material.baseColorFactor = { 1.0f, 1.0f, 1.0f, 1.0f };
         m_material.metallicFactor = 0.5f;
         m_material.roughnessFactor = 0.3f;
+
+        m_floorMaterial.baseColorFactor = { 0.8f, 0.8f, 0.8f, 1.0f };
+        m_floorMaterial.metallicFactor = 0.0f;
+        m_floorMaterial.roughnessFactor = 0.9f; 
     }
     else
     {
@@ -333,6 +426,11 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
     m_deferredLightPass.Initialize(
         device,
         m_backbufferFormat,
+        Paths::ShaderDir());
+
+    m_shadowPass.Initialize(
+        device,
+        DXGI_FORMAT_D32_FLOAT,
         Paths::ShaderDir());
 }
 
@@ -404,7 +502,15 @@ void Renderer::UpdateSceneTable(ID3D12Device* device)
             SceneCpuHandle(SceneResources::IBL_SPECULAR));
     }
 
-    // Slot 3: SHADOW_MAP stays null for now TODO implement
+    // Slot 3: SHADOW_MAP 
+    if (m_shadowMap.IsValid())
+    {
+        srv.Format = m_shadowMap.SrvFormat(); // DXGI_FORMAT_R32_FLOAT
+        device->CreateShaderResourceView(
+            m_shadowMap.Get(),
+            &srv,
+            SceneCpuHandle(SceneResources::SHADOW_MAP));
+    }
 }
 
 void Renderer::CreateOrResizeGBuffers(ID3D12Device* device, uint32_t w, uint32_t h)
@@ -503,4 +609,29 @@ void Renderer::UpdateDeferredInputTable(ID3D12Device* device)
         srv.Format = m_depth.SrvFormat(); // DXGI_FORMAT_R32_FLOAT
         device->CreateShaderResourceView(m_depth.Get(), &srv, DeferredCpuHandle(3));
     }
+}
+
+void Renderer::CreateOrResizeShadowMap(ID3D12Device* device)
+{
+    m_shadowMap.CreateDepth(
+        device,
+        m_shadowSize,
+        m_shadowSize,
+        DXGI_FORMAT_R32_TYPELESS,
+        DXGI_FORMAT_D32_FLOAT,
+        L"Shadow Map");
+
+    if (m_shadowDsv.ptr == 0)
+    {
+        auto alloc = m_dsvHeap.Allocate(1);
+        m_shadowDsv = alloc.cpu;
+    }
+
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
+    dsv.Format = DXGI_FORMAT_D32_FLOAT;
+    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    dsv.Flags = D3D12_DSV_FLAG_NONE;
+
+    device->CreateDepthStencilView(m_shadowMap.Get(), &dsv, m_shadowDsv);
+    m_shadowReady = true;
 }

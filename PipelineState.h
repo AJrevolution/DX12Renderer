@@ -40,6 +40,11 @@ public:
         DXGI_FORMAT rtvFormat
     );
 
+    void InitialiseShadow(
+        ID3D12Device* device,
+        ID3D12RootSignature* rootSig,
+        D3D12_SHADER_BYTECODE vs,
+        DXGI_FORMAT dsvFormat);
 
     ID3D12PipelineState* Get() const { return m_pso.Get(); }
 

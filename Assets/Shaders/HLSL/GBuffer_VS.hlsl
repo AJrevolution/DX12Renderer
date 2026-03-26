@@ -4,6 +4,8 @@ cbuffer PerFrameConstants : register(b0)
 {
     row_major float4x4 ViewProj;
     row_major float4x4 InvViewProj;
+    row_major float4x4 LightViewProj;
+    
     float3 CameraPos;
     float Time;
     uint FrameIndex;
@@ -15,6 +17,9 @@ cbuffer PerFrameConstants : register(b0)
     float pad1;
     float3 LightColor;
     float pad2;
+    
+    float2 ShadowInvSize;
+    float2 _padShadow;
 };
 
 cbuffer PerDrawConstants : register(b1)

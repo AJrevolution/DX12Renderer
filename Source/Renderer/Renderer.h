@@ -14,6 +14,7 @@
 #include "Source/RHI/Resources/RenderTarget.h"
 #include "Source/Renderer/Passes/GBufferPass.h"
 #include "Source/Renderer/Passes/DeferredLightingPass.h"
+#include "Source/Renderer/Passes/ShadowPass.h"
 
 class Renderer
 {
@@ -41,6 +42,7 @@ private:
     void CreateNullSceneTable(ID3D12Device* device);
     void UpdateSceneTable(ID3D12Device* device);
     void CreateOrResizeGBuffers(ID3D12Device* device, uint32_t w, uint32_t h);
+    void CreateOrResizeShadowMap(ID3D12Device* device);
     void CreateNullDeferredInputTable(ID3D12Device* device);
     void UpdateDeferredInputTable(ID3D12Device* device);
 
@@ -57,12 +59,19 @@ private:
 
     GBufferPass m_gbufferPass;
     DeferredLightingPass m_deferredLightPass;
-    bool m_useDeferred = true;
+    bool m_useDeferred = false;
+
+	ShadowPass m_shadowPass;
 
     DescriptorAllocator m_dsvHeap;
     Texture m_depth;
     D3D12_CPU_DESCRIPTOR_HANDLE m_depthDsv{};
     bool m_depthReady = false;
+
+    Texture m_shadowMap;
+    D3D12_CPU_DESCRIPTOR_HANDLE m_shadowDsv{};
+    uint32_t m_shadowSize = 2048;
+    bool m_shadowReady = false;
 
     DescriptorAllocator m_srvHeap;
     Texture m_testTexture;
@@ -89,4 +98,10 @@ private:
     Texture     m_iblDiffuseTex;
     Texture     m_iblSpecularTex;
     bool        m_sceneReady = false;
+
+    Mesh m_floor;
+    Material m_floorMaterial;
+    
+    DirectX::XMFLOAT3 m_sceneBoundsCenter = { 0.0f, 0.5f, 0.0f };
+    DirectX::XMFLOAT3 m_sceneBoundsExtent = { 3.5f, 3.5f, 3.5f };
 };

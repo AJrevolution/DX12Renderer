@@ -22,6 +22,7 @@ cbuffer PerFrameConstants : register(b0)
 {
     row_major float4x4 ViewProj;
     row_major float4x4 InvViewProj;
+    row_major float4x4 LightViewProj;
     
     float3 CameraPos;
     float Time;
@@ -35,6 +36,9 @@ cbuffer PerFrameConstants : register(b0)
     float _pad1;
     float3 LightColor;
     float _pad2;
+    
+    float2 ShadowInvSize;
+    float2 _padShadow;
 };
 
 cbuffer PerDrawConstants : register(b1)
@@ -74,6 +78,39 @@ float2 DirToLatLongUV(float3 d)
     return float2(u, 1.0f - v);
 }
 
+float ComputeShadowFactor(float3 worldPos, float3 worldNormal, float3 lightDir)
+{
+    float4 shadowClip = mul(float4(worldPos, 1.0f), LightViewProj);
+
+    float3 shadowNdc = shadowClip.xyz / shadowClip.w;
+    float2 shadowUV = float2(
+        shadowNdc.x * 0.5f + 0.5f,
+        1.0f - (shadowNdc.y * 0.5f + 0.5f));
+
+    float shadowDepth = shadowNdc.z;
+
+    if (shadowUV.x < 0.0f || shadowUV.x > 1.0f || shadowUV.y < 0.0f || shadowUV.y > 1.0f)
+        return 1.0f;
+
+    float bias = max(0.0005f, 0.002f * (1.0f - saturate(dot(worldNormal, -lightDir))));
+
+    float visibility = 0.0f;
+
+    [unroll]
+    for (int y = -1; y <= 1; ++y)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; ++x)
+        {
+            float2 uv = shadowUV + float2(x, y) * ShadowInvSize;
+            float mapDepth = g_ShadowMap.Sample(g_PointClamp, uv).r;
+            visibility += ((shadowDepth - bias) <= mapDepth) ? 1.0f : 0.0f;
+        }
+    }
+
+    return visibility / 9.0f;
+}
+
 float4 main(PSIn i) : SV_Target
 {
     float3 base = g_BaseColor.Sample(g_LinearWrap, i.uv).rgb; // if SRV is _SRGB, this is already linear
@@ -106,7 +143,11 @@ float4 main(PSIn i) : SV_Target
      
     // Direct light
     float3 direct = EvalDirectPBR(p, LightColor);
-
+    
+    //Shadow
+    float shadowFactor = ComputeShadowFactor(i.worldPos, worldNormal, LightDir);
+    direct *= shadowFactor;
+    
     float NdotV = saturate(dot(worldNormal, V));
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
     
@@ -155,7 +196,15 @@ float4 main(PSIn i) : SV_Target
 
     // Temporary output transform since swapchain is UNORM (not SRGB)
     float3 outColor = LinearToSRGB(lit);
-
+        #if DEBUG_VIEW == 1
+        return float4(N * 0.5f + 0.5f, 1.0f);
+    #elif DEBUG_VIEW == 2
+        return float4(roughness.xxx, 1.0f);
+    #elif DEBUG_VIEW == 3
+        return float4(metallic.xxx, 1.0f);
+    #elif DEBUG_VIEW == 5
+        return float4(shadowFactor.xxx, 1.0f);
+    #endif
     return float4(outColor, 1.0f);
 
 }

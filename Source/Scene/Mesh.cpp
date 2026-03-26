@@ -58,3 +58,53 @@ void Mesh::CreateTexturedQuad(
     m_ibv.SizeInBytes = ibSize;
     m_ibv.Format = DXGI_FORMAT_R16_UINT;
 }
+
+void Mesh::CreateFloorPlane(
+    ID3D12Device* device,
+    CommandList& cl,
+    UploadArena& upload,
+    uint32_t frameIndex)
+{
+    const Vertex verts[] =
+    {
+        // Position               Normal        Tangent(xyz,w)     Color         UV
+        { -3.0f, 0.0f,  3.0f,     0,1,0,       1,0,0,1,           1,1,1,1,      0,0 },
+        {  3.0f, 0.0f,  3.0f,     0,1,0,       1,0,0,1,           1,1,1,1,      1,0 },
+        {  3.0f, 0.0f, -3.0f,     0,1,0,       1,0,0,1,           1,1,1,1,      1,1 },
+        { -3.0f, 0.0f, -3.0f,     0,1,0,       1,0,0,1,           1,1,1,1,      0,1 },
+    };
+
+    const uint16_t indices[] =
+    {
+        0, 1, 2,
+        0, 2, 3
+    };
+
+    const uint32_t vbSize = sizeof(verts);
+    const uint32_t ibSize = sizeof(indices);
+    m_indexCount = 6;
+
+    m_vb.CreateDefaultBuffer(device, vbSize, D3D12_RESOURCE_STATE_COPY_DEST, L"VB: Floor (DEFAULT)");
+    m_ib.CreateDefaultBuffer(device, ibSize, D3D12_RESOURCE_STATE_COPY_DEST, L"IB: Floor (DEFAULT)");
+
+    CommandList::SetGlobalState(m_vb.Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+    CommandList::SetGlobalState(m_ib.Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+
+    auto vbAlloc = upload.Allocate(frameIndex, vbSize, 16);
+    memcpy(vbAlloc.cpu, verts, vbSize);
+    cl.CopyBuffer(m_vb.Get(), 0, upload.GetBuffer(frameIndex), vbAlloc.offset, vbSize);
+    cl.Transition(m_vb.Get(), D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+
+    auto ibAlloc = upload.Allocate(frameIndex, ibSize, 16);
+    memcpy(ibAlloc.cpu, indices, ibSize);
+    cl.CopyBuffer(m_ib.Get(), 0, upload.GetBuffer(frameIndex), ibAlloc.offset, ibSize);
+    cl.Transition(m_ib.Get(), D3D12_RESOURCE_STATE_INDEX_BUFFER);
+
+    m_vbv.BufferLocation = m_vb.GPUAddress();
+    m_vbv.SizeInBytes = vbSize;
+    m_vbv.StrideInBytes = sizeof(Vertex);
+
+    m_ibv.BufferLocation = m_ib.GPUAddress();
+    m_ibv.SizeInBytes = ibSize;
+    m_ibv.Format = DXGI_FORMAT_R16_UINT;
+}

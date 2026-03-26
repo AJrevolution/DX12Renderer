@@ -114,6 +114,9 @@
     <ClInclude Include="Source\Renderer\Passes\DeferredLightingPass.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\ShadowPass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -194,6 +197,9 @@
     <ClCompile Include="Source\Renderer\Passes\DeferredLightingPass.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\ShadowPass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -213,5 +219,6 @@
     <CustomBuild Include="Assets\Shaders\HLSL\DeferredLight_VS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\GBuffer_PS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\GBuffer_VS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\Shadow_VS.hlsl" />
   </ItemGroup>
 </Project>
