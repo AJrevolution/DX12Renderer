@@ -15,6 +15,7 @@
 #include "Source/Renderer/Passes/GBufferPass.h"
 #include "Source/Renderer/Passes/DeferredLightingPass.h"
 #include "Source/Renderer/Passes/ShadowPass.h"
+#include <vector>
 
 class Renderer
 {
@@ -38,6 +39,35 @@ public:
     void SetupResources(ID3D12Device* device, CommandList& cl, uint32_t frameIndex);
 
 private:
+    struct DrawItem
+    {
+        Mesh* mesh = nullptr;
+        Material* material = nullptr;
+        DirectX::XMFLOAT4X4 world{};
+    };
+
+    std::vector<DrawItem> m_draws;
+
+    void BuildDrawList(float time);
+    D3D12_GPU_VIRTUAL_ADDRESS UploadPerDrawConstants(uint32_t frameIndex, const DrawItem& item);
+
+    bool LoadMaterialFromFolder(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex,
+        const std::filesystem::path& folder,
+        Material& outMaterial,
+        Texture& outBaseColor,
+        Texture& outNormal,
+        Texture& outOrm,
+        const std::wstring& baseName,  
+        const std::wstring& normalName,
+        const std::wstring& ormName,
+        const DirectX::XMFLOAT4& baseColorFactor,
+        float metallicFactor,
+        float roughnessFactor,
+        bool requireAll = true);
+
     D3D12_GPU_VIRTUAL_ADDRESS UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height, float time);
     void CreateNullSceneTable(ID3D12Device* device);
     void UpdateSceneTable(ID3D12Device* device);
@@ -99,9 +129,22 @@ private:
     Texture     m_iblSpecularTex;
     bool        m_sceneReady = false;
 
+    Material m_matteMaterial;
+    Material m_glossyMaterial;
+    Material m_metalMaterial;
+    Material m_normalStrongMaterial;
+    Texture m_matteBaseTex, m_matteNormalTex, m_matteOrmTex;
+    Texture m_glossyBaseTex, m_glossyNormalTex, m_glossyOrmTex;
+    Texture m_metalBaseTex, m_metalNormalTex, m_metalOrmTex;
+
     Mesh m_floor;
     Material m_floorMaterial;
     
     DirectX::XMFLOAT3 m_sceneBoundsCenter = { 0.0f, 0.5f, 0.0f };
     DirectX::XMFLOAT3 m_sceneBoundsExtent = { 3.5f, 3.5f, 3.5f };
+
+    bool m_enableShadows = true;
+    uint32_t m_debugView = 0;
+
+
 };

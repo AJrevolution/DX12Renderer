@@ -62,46 +62,9 @@ void Renderer::RenderFrame(
 
     // Per-frame CB (b0)
     const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb = UpdateGlobalConstants(frameIndex, width, height, time);
-    auto quadAlloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
-    auto* quadDc = reinterpret_cast<PerDrawConstants*>(quadAlloc.cpu);
+    BuildDrawList(time);
 
-    float oscillation = sinf(time * 1.5f);
-    float rotationAngle = oscillation * 1.1f;
-
-    DirectX::XMMATRIX quadWorld =
-        DirectX::XMMatrixRotationY(rotationAngle) *
-        DirectX::XMMatrixTranslation(0.0f, 0.5f, 0.0f);
-
-    DirectX::XMStoreFloat4x4(&quadDc->world, quadWorld);
-    quadDc->materialIndex = 0;
-    quadDc->baseColorFactor = m_material.baseColorFactor;
-    quadDc->metallicFactor = m_material.metallicFactor;
-    quadDc->roughnessFactor = m_material.roughnessFactor;
-
-    auto floorAlloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
-    auto* floorDc = reinterpret_cast<PerDrawConstants*>(floorAlloc.cpu);
-
-    DirectX::XMMATRIX floorWorld = DirectX::XMMatrixIdentity();
-    DirectX::XMStoreFloat4x4(&floorDc->world, floorWorld);
-    floorDc->materialIndex = 0;
-    floorDc->baseColorFactor = m_floorMaterial.baseColorFactor;
-    floorDc->metallicFactor = m_floorMaterial.metallicFactor;
-    floorDc->roughnessFactor = m_floorMaterial.roughnessFactor;
-    // Per-Draw CB using PBR factors from the material
-    //auto drawAlloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
-    //auto* dc = reinterpret_cast<PerDrawConstants*>(drawAlloc.cpu);
-    //temp to observe lighting calulations
-    //float oscillation = sinf(time * 1.5f);
-    //float rotationAngle = oscillation * 1.1f;
-
-    //DirectX::XMMATRIX world = DirectX::XMMatrixRotationY(rotationAngle);
-    //DirectX::XMStoreFloat4x4(&dc->world, world);
-    //dc->materialIndex = 0;
-    //dc->baseColorFactor = m_material.baseColorFactor;
-    //dc->metallicFactor = m_material.metallicFactor;
-    //dc->roughnessFactor = m_material.roughnessFactor;
-
-    if (m_shadowReady)
+    if (m_enableShadows && m_shadowReady)
     {
         CmdBeginEvent(cmdList, "ShadowPass");
 
@@ -111,9 +74,11 @@ void Renderer::RenderFrame(
         cmdList->ClearDepthStencilView(m_shadowDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
         cmdList->OMSetRenderTargets(0, nullptr, FALSE, &m_shadowDsv);
 
-        m_shadowPass.Render(cl, m_shadowSize, perFrameCb, floorAlloc.gpu, m_floor);
-        m_shadowPass.Render(cl, m_shadowSize, perFrameCb, quadAlloc.gpu, m_quad);
-
+        for (const DrawItem& item : m_draws)
+        {
+            const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
+            m_shadowPass.Render(cl, m_shadowSize, perFrameCb, perDrawCb, *item.mesh);
+        }
         CmdEndEvent(cmdList);
     }
 
@@ -152,8 +117,20 @@ void Renderer::RenderFrame(
         cmdList->OMSetRenderTargets(3, mrt, FALSE, m_depthReady ? &m_depthDsv : nullptr);
         
         CmdBeginEvent(cmdList, "GBufferPass");
-        m_gbufferPass.Render(cl, width, height, perFrameCb, floorAlloc.gpu, m_scene.table.gpu, m_floorMaterial, m_floor);
-        m_gbufferPass.Render(cl, width, height, perFrameCb, quadAlloc.gpu, m_scene.table.gpu, m_material, m_quad);
+
+        for (const DrawItem& item : m_draws)
+        {
+            const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
+            m_gbufferPass.Render(
+                cl,
+                width,
+                height,
+                perFrameCb,
+                perDrawCb,
+                m_scene.table.gpu,
+                *item.material,
+                *item.mesh);
+        }
         CmdEndEvent(cmdList);
 
         // LIGHTING PASS PREP 
@@ -184,6 +161,8 @@ void Renderer::RenderFrame(
     else
     {
         CmdBeginEvent(cmdList, "ForwardPath");
+
+
         CmdBeginEvent(cmdList, "UpdateSceneTableForward");
         UpdateSceneTable(device);
         CmdEndEvent(cmdList);
@@ -204,8 +183,20 @@ void Renderer::RenderFrame(
             cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
         }
         CmdEndEvent(cmdList);
-        m_forwardPbr.Render(cl, width, height, perFrameCb, floorAlloc.gpu, m_scene.table.gpu, m_floorMaterial, m_floor);
-        m_forwardPbr.Render(cl, width, height, perFrameCb, quadAlloc.gpu, m_scene.table.gpu, m_material, m_quad);
+
+        for (const DrawItem& item : m_draws)
+        {
+            const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
+            m_forwardPbr.Render(
+                cl,
+                width,
+                height,
+                perFrameCb,
+                perDrawCb,
+                m_scene.table.gpu,
+                *item.material,
+                *item.mesh);
+        }
         CmdEndEvent(cmdList);
         CmdEndEvent(cmdList);
     }
@@ -255,19 +246,6 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     DirectX::XMMATRIX proj = DirectX::XMMatrixPerspectiveFovLH(cam.fovY, aspect, cam.nearZ, cam.farZ);
     DirectX::XMMATRIX viewProj = view * proj;
     XMMATRIX invViewProj = XMMatrixInverse(nullptr, viewProj);
-
-    // Directional light shadow camera setup
-    //XMVECTOR lightDir = XMVector3Normalize(XMLoadFloat3(&sun.direction));
-    //XMVECTOR sceneCenter = XMVectorZero();
-    //XMVECTOR lightPos = sceneCenter - lightDir * 5.0f; // simple bring-up distance
-    //XMMATRIX lightView = XMMatrixLookAtLH(
-    //    lightPos,
-    //    sceneCenter,
-    //    XMVectorSet(0, 1, 0, 0));
-    //
-    //// Simple ortho box around current demo scene
-    //XMMATRIX lightProj = XMMatrixOrthographicLH(6.0f, 6.0f, 0.1f, 20.0f);
-    //XMMATRIX lightViewProj = lightView * lightProj;
 
     XMVECTOR lightDir = XMVector3Normalize(XMLoadFloat3(&sun.direction));
     XMVECTOR sceneCenter = XMLoadFloat3(&m_sceneBoundsCenter);
@@ -432,6 +410,55 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         device,
         DXGI_FORMAT_D32_FLOAT,
         Paths::ShaderDir());
+
+    m_matteMaterial.UpdateDescriptorTable(device, m_srvHeap, &m_albedoTex, &m_normalTex, &m_metalRoughTex);
+    m_matteMaterial.baseColorFactor = { 0.85f, 0.2f, 0.2f, 1.0f };
+    m_matteMaterial.metallicFactor = 0.0f;
+    m_matteMaterial.roughnessFactor = 0.95f;
+
+    m_glossyMaterial.UpdateDescriptorTable(device, m_srvHeap, &m_albedoTex, &m_normalTex, &m_metalRoughTex);
+    m_glossyMaterial.baseColorFactor = { 0.2f, 0.3f, 0.85f, 1.0f };
+    m_glossyMaterial.metallicFactor = 0.0f;
+    m_glossyMaterial.roughnessFactor = 0.08f;
+
+    m_metalMaterial.UpdateDescriptorTable(device, m_srvHeap, &m_albedoTex, &m_normalTex, &m_metalRoughTex);
+    m_metalMaterial.baseColorFactor = { 0.9f, 0.9f, 0.9f, 1.0f };
+    m_metalMaterial.metallicFactor = 1.0f;
+    m_metalMaterial.roughnessFactor = 0.35f;
+
+    m_normalStrongMaterial.UpdateDescriptorTable(device, m_srvHeap, &m_albedoTex, &m_normalTex, &m_metalRoughTex);
+    m_normalStrongMaterial.baseColorFactor = { 1.0f, 1.0f, 1.0f, 1.0f };
+    m_normalStrongMaterial.metallicFactor = 0.0f;
+    m_normalStrongMaterial.roughnessFactor = 0.45f;
+
+    const auto materialsDir = content / L"Materials";
+
+    LoadMaterialFromFolder(
+        device, cl, frameIndex,
+        materialsDir / L"Mat_Matte",
+        m_matteMaterial,
+        m_matteBaseTex, m_matteNormalTex, m_matteOrmTex,
+		L"rock_wall_16_diff_1024.png", L"rock_wall_16_nor_dx_1024.png", L"rock_wall_16_arm_1024.png",
+        { 1,1,1,1 }, 0.0f, 0.95f, 
+        true);
+
+    LoadMaterialFromFolder(
+        device, cl, frameIndex,
+        materialsDir / L"Mat_Glossy",
+        m_glossyMaterial,
+        m_glossyBaseTex, m_glossyNormalTex, m_glossyOrmTex,
+        L"wood_table_001_diff_1024.png", L"wood_table_001_nor_1024.png", L"wood_table_001_arm_dx_1024.png",
+        { 1,1,1,1 }, 0.0f, 0.08f, 
+        true);
+
+    LoadMaterialFromFolder(
+        device, cl, frameIndex,
+        materialsDir / L"Mat_Metal",
+        m_metalMaterial,
+        m_metalBaseTex, m_metalNormalTex, m_metalOrmTex,
+        L"metal_plate_02_diff_1024.png", L"metal_plate_02_nor_dx_1024.png", L"metal_plate_02_arm_1024.png",
+        { 1,1,1,1 }, 1.0f, 0.35f, 
+        true);
 }
 
 void Renderer::CreateNullSceneTable(ID3D12Device* device)
@@ -503,7 +530,7 @@ void Renderer::UpdateSceneTable(ID3D12Device* device)
     }
 
     // Slot 3: SHADOW_MAP 
-    if (m_shadowMap.IsValid())
+    if (m_enableShadows && m_shadowMap.IsValid())
     {
         srv.Format = m_shadowMap.SrvFormat(); // DXGI_FORMAT_R32_FLOAT
         device->CreateShaderResourceView(
@@ -611,6 +638,11 @@ void Renderer::UpdateDeferredInputTable(ID3D12Device* device)
     }
 }
 
+// Shadow bring-up settings:
+// - m_shadowSize controls PCF texel scale via PerFrameConstants.shadowInvSize
+// - ShadowPass PSO uses rasterizer depth bias + slope-scaled depth bias
+// - Forward/Deferred sample shadow map with point taps for deterministic manual PCF
+// minimal, will be refined later.
 void Renderer::CreateOrResizeShadowMap(ID3D12Device* device)
 {
     m_shadowMap.CreateDepth(
@@ -634,4 +666,118 @@ void Renderer::CreateOrResizeShadowMap(ID3D12Device* device)
 
     device->CreateDepthStencilView(m_shadowMap.Get(), &dsv, m_shadowDsv);
     m_shadowReady = true;
+}
+
+void Renderer::BuildDrawList(float time)
+{
+    m_draws.clear();
+    m_draws.reserve(4);
+
+    using namespace DirectX;
+
+    const float oscillation = sinf(time * 1.5f);
+    const float rotationAngle = oscillation * 1.1f;
+
+    DrawItem floor{};
+    floor.mesh = &m_floor;
+    floor.material = &m_floorMaterial;
+    XMStoreFloat4x4(&floor.world, XMMatrixIdentity());
+    m_draws.push_back(floor);
+
+    DrawItem metalQuad{};
+    metalQuad.mesh = &m_quad;
+    metalQuad.material = &m_metalMaterial;
+    XMMATRIX rotWorld = XMMatrixRotationY(rotationAngle) * XMMatrixTranslation(0.0f, 0.5f, 0.0f);
+    XMStoreFloat4x4(&metalQuad.world, rotWorld);
+    m_draws.push_back(metalQuad);
+
+    DrawItem matteQuad{};
+    matteQuad.mesh = &m_quad;
+    matteQuad.material = &m_matteMaterial;
+    XMStoreFloat4x4(&matteQuad.world, XMMatrixTranslation(-1.5f, 0.5f, 0.0f));
+    m_draws.push_back(matteQuad);
+
+    DrawItem glossyQuad{};
+    glossyQuad.mesh = &m_quad;
+    glossyQuad.material = &m_glossyMaterial;
+    XMStoreFloat4x4(&glossyQuad.world, XMMatrixTranslation(1.5f, 0.5f, 0.0f));
+    m_draws.push_back(glossyQuad);
+
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UploadPerDrawConstants(
+    uint32_t frameIndex,
+    const DrawItem& item)
+{
+    auto alloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
+    auto* dc = reinterpret_cast<PerDrawConstants*>(alloc.cpu);
+
+    dc->world = item.world;
+    dc->materialIndex = 0;
+    dc->baseColorFactor = item.material->baseColorFactor;
+    dc->metallicFactor = item.material->metallicFactor;
+    dc->roughnessFactor = item.material->roughnessFactor;
+
+    return alloc.gpu;
+}
+bool Renderer::LoadMaterialFromFolder(
+    ID3D12Device* device,
+    CommandList& cl,
+    uint32_t frameIndex,
+    const std::filesystem::path& folder,
+    Material& outMaterial,
+    Texture& outBaseColor,
+    Texture& outNormal,
+    Texture& outOrm,
+    const std::wstring& baseName,  
+    const std::wstring& normalName, 
+    const std::wstring& ormName,
+    const DirectX::XMFLOAT4& baseColorFactor,
+    float metallicFactor,
+    float roughnessFactor,
+    bool requireAll )
+{
+    if (!std::filesystem::exists(folder))
+        return false;
+
+    const auto basePath = folder / baseName;
+    const auto normalPath = folder / normalName;
+    const auto ormPath = folder / ormName;
+
+    const bool hasBase = std::filesystem::exists(basePath);
+    const bool hasNormal = std::filesystem::exists(normalPath);
+    const bool hasOrm = std::filesystem::exists(ormPath);
+
+    const bool allPresent = hasBase && hasNormal && hasOrm;
+    const bool anyPresent = hasBase || hasNormal || hasOrm;
+
+    if (requireAll && !allPresent)
+    {
+        DebugOutput(std::format(
+            "Material folder incomplete: {} (base={}, normal={}, orm={})",
+            folder.string(),
+            hasBase ? "yes" : "no",
+            hasNormal ? "yes" : "no",
+            hasOrm ? "yes" : "no"));
+        return false;
+    }
+
+    if (!requireAll && !anyPresent)
+        return false;
+
+    if (hasBase)
+        outBaseColor.LoadFromFile_DirectXTex(device, cl, m_upload, frameIndex, basePath, true, L"Mat BaseColor");
+
+    if (hasNormal)
+        outNormal.LoadFromFile_DirectXTex(device, cl, m_upload, frameIndex, normalPath, false, L"Mat Normal");
+
+    if (hasOrm)
+        outOrm.LoadFromFile_DirectXTex(device, cl, m_upload, frameIndex, ormPath, false, L"Mat ORM");
+
+    outMaterial.UpdateDescriptorTable(device, m_srvHeap, &outBaseColor, &outNormal, &outOrm);
+    outMaterial.baseColorFactor = baseColorFactor;
+    outMaterial.metallicFactor = metallicFactor;
+    outMaterial.roughnessFactor = roughnessFactor;
+
+    return true;
 }

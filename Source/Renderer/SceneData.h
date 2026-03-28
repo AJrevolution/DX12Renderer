@@ -12,10 +12,10 @@ struct DirectionalLight
 
 struct CameraSettings
 {
-    DirectX::XMFLOAT3 position = { 0.0f, 5.0f, -2.0f };
+    DirectX::XMFLOAT3 position = { 0.0f, 2.0f, -2.0f };
     float fovY = DirectX::XM_PIDIV4;
 
-    DirectX::XMFLOAT3 target = { 0.0f, -1.0f, 0.0f };
+    DirectX::XMFLOAT3 target = { 0.0f, 0.0f, 0.0f };
     float nearZ = 0.1f;
 
     float farZ = 100.0f;

@@ -120,19 +120,25 @@ void Texture::LoadFromFile_DirectXTex(
         hr = LoadFromDDSFile(wpath.c_str(), DDS_FLAGS_NONE, &meta, image);
     else
         hr = LoadFromWICFile(wpath.c_str(), WIC_FLAGS_NONE, &meta, image);
-    
+    // 1. If it's compressed (BC1-BC7), we must decompress it first to convert it
+    if (DirectX::IsCompressed(meta.format))
+    {
+        ScratchImage decompressed;
+        hr = Decompress(image.GetImages(), image.GetImageCount(), meta, DXGI_FORMAT_R8G8B8A8_UNORM, decompressed);
+        if (FAILED(hr))
+        {
+            throw std::runtime_error("DirectXTex: Failed to decompress texture.");
+        }
+
+        image = std::move(decompressed);
+        meta = image.GetMetadata();
+    }
     const Image* src = image.GetImage(0, 0, 0);
     // BODGE: Force conversion to R8G8B8A8_UNORM for now
 	//TODO add either separate function for other types of resources like HDR or add support for more formats in this function.
     if (meta.format != DXGI_FORMAT_R8G8B8A8_UNORM)
     {
-        // Check if the format is compressed (BC1-BC7)
-        if (DirectX::IsCompressed(meta.format))
-        {
-            // For now don't support loading compressed textures into this 8-bit path.
-            // fix later: call DirectX::Decompress() here.
-            throw std::runtime_error("DirectXTex: Compressed DDS not supported in this 8-bit bodge path.");
-        }
+
         ScratchImage converted;
         hr = Convert(
             image.GetImages(), image.GetImageCount(), meta,
@@ -143,11 +149,12 @@ void Texture::LoadFromFile_DirectXTex(
         ThrowIfFailed(hr, "DirectXTex: Failed to convert/downsample to RGBA8");
 
         image = std::move(converted);
-        meta.format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        src = image.GetImage(0, 0, 0);
+        //meta.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        meta = image.GetMetadata();
+  
     }
 
-   
+    src = image.GetImage(0, 0, 0);
     if (!src || !src->pixels)
         throw std::runtime_error("DirectXTex: missing image pixels.");
 
