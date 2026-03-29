@@ -60,7 +60,21 @@ private:
         Texture& outBaseColor,
         Texture& outNormal,
         Texture& outOrm,
-        const std::wstring& baseName,  
+        const DirectX::XMFLOAT4& baseColorFactor,
+        float metallicFactor,
+        float roughnessFactor,
+        bool requireAll = true);
+
+    bool LoadMaterialFromFolder(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex,
+        const std::filesystem::path& folder,
+        Material& outMaterial,
+        Texture& outBaseColor,
+        Texture& outNormal,
+        Texture& outOrm,
+        const std::wstring& baseName,
         const std::wstring& normalName,
         const std::wstring& ormName,
         const DirectX::XMFLOAT4& baseColorFactor,
@@ -83,6 +97,10 @@ private:
     ForwardPBRPass m_forwardPbr;
     SceneResources m_scene;
     SceneData m_sceneData;
+    float m_camYaw = 0.0f;
+    float m_camPitch = -0.25f;
+    float m_camRadius = 4.0f;
+    bool  m_autoOrbit = true;
 
     DescriptorAllocator::Allocation m_deferredInputTable; // space1 for deferred lighting only
     bool m_deferredInputTableReady = false;

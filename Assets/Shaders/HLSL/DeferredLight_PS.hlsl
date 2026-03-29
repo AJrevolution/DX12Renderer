@@ -130,7 +130,11 @@ float4 main(PSIn i) : SV_Target
     float shadowFactor = ComputeShadowFactor(worldPos, N, LightDir);
     direct *= shadowFactor;
     
-    // Deferred IBL using the same scene contract as forward
+    //// Deferred path parity target:
+    // - same GGX direct term as forward
+    // - same ORM interpretation
+    // - same shadow factor function
+    // - same latlong IBL approximation
     float NdotV = saturate(dot(N, V));
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
 

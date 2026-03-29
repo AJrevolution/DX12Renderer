@@ -148,6 +148,7 @@ float4 main(PSIn i) : SV_Target
     float shadowFactor = ComputeShadowFactor(i.worldPos, worldNormal, LightDir);
     direct *= shadowFactor;
     
+    // Forward path is the baseline reference for deferred parity.
     float NdotV = saturate(dot(worldNormal, V));
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
     

@@ -135,10 +135,10 @@ void Renderer::RenderFrame(
 
         // LIGHTING PASS PREP 
         // Remap the Scene Table 
-        //CmdBeginEvent(cmdList, "UpdateDeferredInputTable");
-        ////UpdateSceneTableForDeferred(device);
-		//UpdateDeferredInputTable(device);
-        //CmdEndEvent(cmdList);
+        CmdBeginEvent(cmdList, "UpdateDeferredInputTable");
+        //UpdateSceneTableForDeferred(device);
+		UpdateDeferredInputTable(device);
+        CmdEndEvent(cmdList);
 
         // Transition GBuffers to Shader Resource so the lighting pass can read them
         cl.Transition(m_gbuffer0.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -232,7 +232,23 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
 
     auto alloc = m_upload.Allocate(frameIndex, cbSize, 256);
     auto* cb = reinterpret_cast<PerFrameConstants*>(alloc.cpu);
+    if (m_autoOrbit)
+    {
+        m_camYaw = time * 0.35f;
 
+        const float cp = cosf(m_camPitch);
+        const float sp = sinf(m_camPitch);
+        const float cy = cosf(m_camYaw);
+        const float sy = sinf(m_camYaw);
+
+        m_sceneData.camera.position =
+        {
+            sy * cp * m_camRadius,
+            sp * m_camRadius + 1.5f,
+            cy * cp * m_camRadius
+        };
+        m_sceneData.camera.target = { 0.0f, 0.5f, 0.0f };
+    }
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     
     const auto& cam = m_sceneData.camera;
@@ -249,7 +265,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
 
     XMVECTOR lightDir = XMVector3Normalize(XMLoadFloat3(&sun.direction));
     XMVECTOR sceneCenter = XMLoadFloat3(&m_sceneBoundsCenter);
-    XMVECTOR sceneExtent = XMLoadFloat3(&m_sceneBoundsExtent);
+
 
     XMVECTOR lightPos = sceneCenter - lightDir * 8.0f;
 
@@ -532,7 +548,7 @@ void Renderer::UpdateSceneTable(ID3D12Device* device)
     // Slot 3: SHADOW_MAP 
     if (m_enableShadows && m_shadowMap.IsValid())
     {
-        srv.Format = m_shadowMap.SrvFormat(); // DXGI_FORMAT_R32_FLOAT
+        srv.Format = m_shadowMap.SrvFormat(); 
         device->CreateShaderResourceView(
             m_shadowMap.Get(),
             &srv,
@@ -678,30 +694,49 @@ void Renderer::BuildDrawList(float time)
     const float oscillation = sinf(time * 1.5f);
     const float rotationAngle = oscillation * 1.1f;
 
-    DrawItem floor{};
-    floor.mesh = &m_floor;
-    floor.material = &m_floorMaterial;
-    XMStoreFloat4x4(&floor.world, XMMatrixIdentity());
-    m_draws.push_back(floor);
+    {
+        DrawItem item{};
+        item.mesh = &m_floor;
+        item.material = &m_floorMaterial;
+        XMStoreFloat4x4(&item.world, XMMatrixIdentity());
+        m_draws.push_back(item);
+    }
 
-    DrawItem metalQuad{};
-    metalQuad.mesh = &m_quad;
-    metalQuad.material = &m_metalMaterial;
-    XMMATRIX rotWorld = XMMatrixRotationY(rotationAngle) * XMMatrixTranslation(0.0f, 0.5f, 0.0f);
-    XMStoreFloat4x4(&metalQuad.world, rotWorld);
-    m_draws.push_back(metalQuad);
+    // Center rotating metal test object
+    {
+        DrawItem item{};
+        item.mesh = &m_quad;
+        item.material = &m_metalMaterial;
+        XMMATRIX world =
+            XMMatrixRotationY(rotationAngle) *
+            XMMatrixTranslation(0.0f, 0.5f, 0.0f);
+        XMStoreFloat4x4(&item.world, world);
+        m_draws.push_back(item);
+    }
 
-    DrawItem matteQuad{};
-    matteQuad.mesh = &m_quad;
-    matteQuad.material = &m_matteMaterial;
-    XMStoreFloat4x4(&matteQuad.world, XMMatrixTranslation(-1.5f, 0.5f, 0.0f));
-    m_draws.push_back(matteQuad);
+    // Left matte reference
+    {
+        DrawItem item{};
+        item.mesh = &m_quad;
+        item.material = &m_matteMaterial;
+        XMMATRIX world =
+            XMMatrixScaling(0.9f, 0.9f, 0.9f) *
+            XMMatrixTranslation(-1.75f, 0.5f, 0.0f);
+        XMStoreFloat4x4(&item.world, world);
+        m_draws.push_back(item);
+    }
 
-    DrawItem glossyQuad{};
-    glossyQuad.mesh = &m_quad;
-    glossyQuad.material = &m_glossyMaterial;
-    XMStoreFloat4x4(&glossyQuad.world, XMMatrixTranslation(1.5f, 0.5f, 0.0f));
-    m_draws.push_back(glossyQuad);
+    // Right glossy reference
+    {
+        DrawItem item{};
+        item.mesh = &m_quad;
+        item.material = &m_glossyMaterial;
+        XMMATRIX world =
+            XMMatrixScaling(0.9f, 0.9f, 0.9f) *
+            XMMatrixTranslation(1.75f, 0.5f, 0.0f);
+        XMStoreFloat4x4(&item.world, world);
+        m_draws.push_back(item);
+    }
 
 }
 
@@ -720,6 +755,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UploadPerDrawConstants(
 
     return alloc.gpu;
 }
+
 bool Renderer::LoadMaterialFromFolder(
     ID3D12Device* device,
     CommandList& cl,
@@ -729,13 +765,13 @@ bool Renderer::LoadMaterialFromFolder(
     Texture& outBaseColor,
     Texture& outNormal,
     Texture& outOrm,
-    const std::wstring& baseName,  
-    const std::wstring& normalName, 
+    const std::wstring& baseName,
+    const std::wstring& normalName,
     const std::wstring& ormName,
     const DirectX::XMFLOAT4& baseColorFactor,
     float metallicFactor,
     float roughnessFactor,
-    bool requireAll )
+    bool requireAll)
 {
     if (!std::filesystem::exists(folder))
         return false;
@@ -780,4 +816,36 @@ bool Renderer::LoadMaterialFromFolder(
     outMaterial.roughnessFactor = roughnessFactor;
 
     return true;
+}
+
+bool Renderer::LoadMaterialFromFolder(
+    ID3D12Device* device,
+    CommandList& cl,
+    uint32_t frameIndex,
+    const std::filesystem::path& folder,
+    Material& outMaterial,
+    Texture& outBaseColor,
+    Texture& outNormal,
+    Texture& outOrm,
+    const DirectX::XMFLOAT4& baseColorFactor,
+    float metallicFactor,
+    float roughnessFactor,
+    bool requireAll)
+{
+    return LoadMaterialFromFolder(
+        device,
+        cl,
+        frameIndex,
+        folder,
+        outMaterial,
+        outBaseColor,
+        outNormal,
+        outOrm,
+        L"basecolor.png",
+        L"normal.png",
+        L"orm.png",
+        baseColorFactor,
+        metallicFactor,
+        roughnessFactor,
+        requireAll);
 }
