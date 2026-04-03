@@ -32,10 +32,17 @@ public:
     const D3D12_INDEX_BUFFER_VIEW& IBV() const { return m_ibv; }
     uint32_t IndexCount() const { return m_indexCount; }
 
+    ID3D12Resource* VertexBufferResource() const { return m_vb.Get(); }
+    ID3D12Resource* IndexBufferResource() const { return m_ib.Get(); }
+
+    uint32_t VertexStride() const { return sizeof(Vertex); }
+    uint32_t VertexCount() const { return m_vbv.StrideInBytes ? (m_vbv.SizeInBytes / m_vbv.StrideInBytes) : 0; }
+    DXGI_FORMAT IndexFormat() const { return m_ibv.Format; }
 private:
     GPUBuffer m_vb;
     GPUBuffer m_ib;
     D3D12_VERTEX_BUFFER_VIEW m_vbv{};
     D3D12_INDEX_BUFFER_VIEW  m_ibv{};
     uint32_t m_indexCount = 0;
+
 };

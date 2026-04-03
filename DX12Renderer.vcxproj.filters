@@ -117,6 +117,12 @@
     <ClInclude Include="Source\Renderer\Passes\ShadowPass.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\RHI\Raytracing\AccelerationStructure.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\RHI\Raytracing\RaytracingPipeline.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -200,6 +206,12 @@
     <ClCompile Include="Source\Renderer\Passes\ShadowPass.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\RHI\Raytracing\AccelerationStructure.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\RHI\Raytracing\RaytracingPipeline.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -220,5 +232,6 @@
     <CustomBuild Include="Assets\Shaders\HLSL\GBuffer_PS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\GBuffer_VS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\Shadow_VS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\Raytracing.hlsl" />
   </ItemGroup>
 </Project>

@@ -1,10 +1,11 @@
 #pragma once
+#include <filesystem>
+#include <vector>
 #include "Common.h"
 #include "Source/Renderer/Passes/TrianglePass.h"
 #include "Source/Renderer/Passes/ForwardPBRPass.h"
 #include "GPUMarkers.h"
 #include "Source/RHI/Memory/UploadArena.h"
-#include <filesystem>
 #include "Source/RHI/Memory/DescriptorAllocator.h"
 #include "Source/RHI/Resources/Texture.h"
 #include "Source/Scene/Mesh.h"
@@ -15,7 +16,8 @@
 #include "Source/Renderer/Passes/GBufferPass.h"
 #include "Source/Renderer/Passes/DeferredLightingPass.h"
 #include "Source/Renderer/Passes/ShadowPass.h"
-#include <vector>
+#include "Source/RHI/Raytracing/AccelerationStructure.h"
+#include "Source/RHI/Raytracing/RaytracingPipeline.h"
 
 class Renderer
 {
@@ -31,12 +33,15 @@ public:
         CommandList& cl,
         uint32_t frameIndex,
         D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv,
+        ID3D12Resource* backbufferResource,
         uint32_t width,
         uint32_t height,
         float time
     );
     
     void SetupResources(ID3D12Device* device, CommandList& cl, uint32_t frameIndex);
+
+
 
 private:
     struct DrawItem
@@ -89,6 +94,11 @@ private:
     void CreateOrResizeShadowMap(ID3D12Device* device);
     void CreateNullDeferredInputTable(ID3D12Device* device);
     void UpdateDeferredInputTable(ID3D12Device* device);
+
+    void CreateRtOutput(ID3D12Device* device, uint32_t width, uint32_t height);
+    void CreateRtGeometryTable(ID3D12Device* device);
+    void BuildTlasForDrawList(uint32_t frameIndex, ID3D12GraphicsCommandList4* cmd4);
+    ComPtr<ID3D12GraphicsCommandList4> GetCommandList4(CommandList& cl);
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -164,5 +174,35 @@ private:
     bool m_enableShadows = true;
     uint32_t m_debugView = 0;
 
+	bool m_useRaytracing = true; // Toggle for raytracing vs rasterization (for testing/debugging)
+    bool m_dxrAvailable = false;
+    bool didDXR = false;
 
+    ComPtr<ID3D12Device5> m_device5;
+
+    AccelerationStructure m_blasQuad;
+    AccelerationStructure m_blasFloor;
+    struct FrameRaytracingResources
+    {
+        AccelerationStructure tlas;
+    };
+
+    std::vector<FrameRaytracingResources> m_rtFrames;
+    uint32_t m_frameCount = 0;
+
+    RaytracingPipeline m_rtPipeline;
+
+    // RT output
+    ComPtr<ID3D12Resource> m_rtOutput;
+    DescriptorAllocator::Allocation m_rtOutputUav{};
+    bool m_rtOutputReady = false;
+
+    // RT geometry SRV table (space0 table for RT global root sig only)
+    DescriptorAllocator::Allocation m_rtGeometryTable{};
+    bool m_rtGeometryTableReady = false;
+
+
+
+    uint32_t m_widthCached = 1;
+    uint32_t m_heightCached = 1;
 };

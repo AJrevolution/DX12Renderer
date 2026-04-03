@@ -29,6 +29,31 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
 
     CreateOrResizeShadowMap(device);
 
+    HRESULT dxrHr = device->QueryInterface(IID_PPV_ARGS(&m_device5));
+    if (SUCCEEDED(dxrHr) && m_device5)
+    {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 opts5{};
+        if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &opts5, sizeof(opts5))) &&
+            opts5.RaytracingTier != D3D12_RAYTRACING_TIER_NOT_SUPPORTED)
+        {
+            DebugOutput("DXR device interface available.");
+            m_dxrAvailable = true;
+        }
+        else
+        {
+            DebugOutput("DXR not supported on this device. Ray tracing disabled.");
+            m_device5.Reset();
+            m_useRaytracing = false;
+        }
+    }
+    else
+    {
+        DebugOutput("DXR not supported on this device. Ray tracing disabled.");
+        m_useRaytracing = false;
+    }
+
+    m_frameCount = frameCount;
+    m_rtFrames.resize(frameCount);
 }
 
 void Renderer::BeginFrame(uint32_t frameIndex)
@@ -42,6 +67,7 @@ void Renderer::RenderFrame(
     CommandList& cl,
     uint32_t frameIndex,
     D3D12_CPU_DESCRIPTOR_HANDLE backbufferRtv,
+    ID3D12Resource* backbufferResource,
     uint32_t width,
     uint32_t height,
     float time)
@@ -64,148 +90,207 @@ void Renderer::RenderFrame(
     const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb = UpdateGlobalConstants(frameIndex, width, height, time);
     BuildDrawList(time);
 
-    if (m_enableShadows && m_shadowReady)
+    if (m_dxrAvailable && m_useRaytracing && m_device5 && m_rtPipeline.StateObject() && m_rtOutput && m_rtOutputReady && m_rtGeometryTableReady )
     {
-        CmdBeginEvent(cmdList, "ShadowPass");
+        auto cmd4 = GetCommandList4(cl);
 
-        cl.Transition(m_shadowMap.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        BuildTlasForDrawList(frameIndex, cmd4.Get());
+
+        ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
+        cmd4->SetDescriptorHeaps(1, heaps);
+
+        cmd4->SetPipelineState1(m_rtPipeline.StateObject());
+        cmd4->SetComputeRootSignature(m_rtPipeline.GlobalRootSignature());
+        cmd4->SetComputeRootDescriptorTable(0, m_rtOutputUav.gpu);
+        cmd4->SetComputeRootShaderResourceView(1, m_rtFrames[frameIndex].tlas.GpuAddress());
+        cmd4->SetComputeRootConstantBufferView(2, perFrameCb);
+        cmd4->SetComputeRootDescriptorTable(3, m_rtGeometryTable.gpu);
+
+        auto tableBase = m_rtPipeline.ShaderTable()->GetGPUVirtualAddress();
+
+        D3D12_DISPATCH_RAYS_DESC rays{};
+        rays.RayGenerationShaderRecord.StartAddress = tableBase + m_rtPipeline.RayGenOffset();
+        rays.RayGenerationShaderRecord.SizeInBytes = m_rtPipeline.RayGenRecordSize();
+
+        rays.MissShaderTable.StartAddress = tableBase + m_rtPipeline.MissOffset();
+        rays.MissShaderTable.SizeInBytes = m_rtPipeline.MissRecordSize();
+        rays.MissShaderTable.StrideInBytes = m_rtPipeline.MissRecordSize();
+
+        rays.HitGroupTable.StartAddress = tableBase + m_rtPipeline.HitGroupOffset();
+        rays.HitGroupTable.SizeInBytes = m_rtPipeline.HitGroupRecordSize();
+        rays.HitGroupTable.StrideInBytes = m_rtPipeline.HitGroupRecordSize();
+
+        rays.Width = width;
+        rays.Height = height;
+        rays.Depth = 1;
+
+        CmdBeginEvent(cl.Get(), "DXR");
+        cmd4->DispatchRays(&rays);
+        CmdEndEvent(cl.Get());
+
+        // Copy RT output into backbuffer
+        cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cl.Transition(backbufferResource, D3D12_RESOURCE_STATE_COPY_DEST);
         cl.FlushBarriers();
 
-        cmdList->ClearDepthStencilView(m_shadowDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-        cmdList->OMSetRenderTargets(0, nullptr, FALSE, &m_shadowDsv);
+        cl.Get()->CopyResource(backbufferResource, m_rtOutput.Get());
 
-        for (const DrawItem& item : m_draws)
-        {
-            const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
-            m_shadowPass.Render(cl, m_shadowSize, perFrameCb, perDrawCb, *item.mesh);
-        }
-        CmdEndEvent(cmdList);
+        cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl.FlushBarriers();
+        didDXR = true;
     }
 
-    if (m_useDeferred && m_gbufferReady)
+    if (!didDXR)
     {
-        CmdBeginEvent(cmdList, "DeferredPath");
-
-        // Scene table stays the true scene contract in deferred too
-        CmdBeginEvent(cmdList, "UpdateSceneTable");
-        UpdateSceneTable(device);
-        CmdEndEvent(cmdList);
-
-        // GBUFFER PASS 
-        // Transitions
-        cl.Transition(m_gbuffer0.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-        cl.Transition(m_gbuffer1.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-        cl.Transition(m_gbuffer2.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-        if (m_depthReady) 
-            cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        cl.FlushBarriers();
-
-        // Clear GBuffer RTs and Depth
-        cmdList->ClearRenderTargetView(m_gbuffer0.RTV(), m_gbuffer0.ClearColor(), 0, nullptr);
-        cmdList->ClearRenderTargetView(m_gbuffer1.RTV(), m_gbuffer1.ClearColor(), 0, nullptr);
-        cmdList->ClearRenderTargetView(m_gbuffer2.RTV(), m_gbuffer2.ClearColor(), 0, nullptr);
-        if (m_depthReady) 
-            cmdList->ClearDepthStencilView(m_depthDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-
-        // Bind MRTs (Multiple Render Targets)
-        D3D12_CPU_DESCRIPTOR_HANDLE mrt[3] = 
-        { 
-            m_gbuffer0.RTV(), 
-            m_gbuffer1.RTV(), 
-            m_gbuffer2.RTV() 
-        };
-        cmdList->OMSetRenderTargets(3, mrt, FALSE, m_depthReady ? &m_depthDsv : nullptr);
-        
-        CmdBeginEvent(cmdList, "GBufferPass");
-
-        for (const DrawItem& item : m_draws)
+        if (m_enableShadows && m_shadowReady)
         {
-            const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
-            m_gbufferPass.Render(
-                cl,
-                width,
-                height,
-                perFrameCb,
-                perDrawCb,
-                m_scene.table.gpu,
-                *item.material,
-                *item.mesh);
+            CmdBeginEvent(cmdList, "ShadowPass");
+
+            cl.Transition(m_shadowMap.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            cl.FlushBarriers();
+
+            cmdList->ClearDepthStencilView(m_shadowDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            cmdList->OMSetRenderTargets(0, nullptr, FALSE, &m_shadowDsv);
+
+            for (const DrawItem& item : m_draws)
+            {
+                const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
+                m_shadowPass.Render(cl, m_shadowSize, perFrameCb, perDrawCb, *item.mesh);
+            }
+            CmdEndEvent(cmdList);
         }
-        CmdEndEvent(cmdList);
 
-        // LIGHTING PASS PREP 
-        // Remap the Scene Table 
-        CmdBeginEvent(cmdList, "UpdateDeferredInputTable");
-        //UpdateSceneTableForDeferred(device);
-		UpdateDeferredInputTable(device);
-        CmdEndEvent(cmdList);
-
-        // Transition GBuffers to Shader Resource so the lighting pass can read them
-        cl.Transition(m_gbuffer0.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        cl.Transition(m_gbuffer1.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        cl.Transition(m_gbuffer2.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        if (m_depthReady)
-            cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        cl.FlushBarriers();
-
-        // LIGHTING PASS
-        cmdList->ClearRenderTargetView(backbufferRtv, m_clearColor, 0, nullptr);
-        cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr); // No depth for lighting quad
-        
-        CmdBeginEvent(cmdList, "DeferredLightingPass");
-        m_deferredLightPass.Render(cl, width, height, perFrameCb, m_scene.table.gpu, m_deferredInputTable.gpu);
-        CmdEndEvent(cmdList);
-
-        CmdEndEvent(cmdList);
-    }
-    else
-    {
-        CmdBeginEvent(cmdList, "ForwardPath");
-
-
-        CmdBeginEvent(cmdList, "UpdateSceneTableForward");
-        UpdateSceneTable(device);
-        CmdEndEvent(cmdList);
-
-        // Normal Forward Setup
-        if (m_depthReady) 
-            cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        cl.FlushBarriers();
-
-        cmdList->ClearRenderTargetView(backbufferRtv, m_clearColor, 0, nullptr);
-        if (m_depthReady)
+        if (m_useDeferred && m_gbufferReady)
         {
-            cmdList->ClearDepthStencilView(m_depthDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-            cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, &m_depthDsv);
+            CmdBeginEvent(cmdList, "DeferredPath");
+
+            // Scene table stays the true scene contract in deferred too
+            CmdBeginEvent(cmdList, "UpdateSceneTable");
+            UpdateSceneTable(device);
+            CmdEndEvent(cmdList);
+
+            // GBUFFER PASS 
+            // Transitions
+            cl.Transition(m_gbuffer0.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cl.Transition(m_gbuffer1.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cl.Transition(m_gbuffer2.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+            if (m_depthReady)
+                cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            cl.FlushBarriers();
+
+            // Clear GBuffer RTs and Depth
+            cmdList->ClearRenderTargetView(m_gbuffer0.RTV(), m_gbuffer0.ClearColor(), 0, nullptr);
+            cmdList->ClearRenderTargetView(m_gbuffer1.RTV(), m_gbuffer1.ClearColor(), 0, nullptr);
+            cmdList->ClearRenderTargetView(m_gbuffer2.RTV(), m_gbuffer2.ClearColor(), 0, nullptr);
+            if (m_depthReady)
+                cmdList->ClearDepthStencilView(m_depthDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+            // Bind MRTs (Multiple Render Targets)
+            D3D12_CPU_DESCRIPTOR_HANDLE mrt[3] =
+            {
+                m_gbuffer0.RTV(),
+                m_gbuffer1.RTV(),
+                m_gbuffer2.RTV()
+            };
+            cmdList->OMSetRenderTargets(3, mrt, FALSE, m_depthReady ? &m_depthDsv : nullptr);
+
+            CmdBeginEvent(cmdList, "GBufferPass");
+
+            for (const DrawItem& item : m_draws)
+            {
+                const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
+                m_gbufferPass.Render(
+                    cl,
+                    width,
+                    height,
+                    perFrameCb,
+                    perDrawCb,
+                    m_scene.table.gpu,
+                    *item.material,
+                    *item.mesh);
+            }
+            CmdEndEvent(cmdList);
+
+            // LIGHTING PASS PREP 
+            // Remap the Scene Table 
+            CmdBeginEvent(cmdList, "UpdateDeferredInputTable");
+            //UpdateSceneTableForDeferred(device);
+            UpdateDeferredInputTable(device);
+            CmdEndEvent(cmdList);
+
+            // Transition GBuffers to Shader Resource so the lighting pass can read them
+            cl.Transition(m_gbuffer0.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cl.Transition(m_gbuffer1.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cl.Transition(m_gbuffer2.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            if (m_depthReady)
+                cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cl.FlushBarriers();
+
+            // LIGHTING PASS
+            cmdList->ClearRenderTargetView(backbufferRtv, m_clearColor, 0, nullptr);
+            cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr); // No depth for lighting quad
+
+            CmdBeginEvent(cmdList, "DeferredLightingPass");
+            m_deferredLightPass.Render(cl, width, height, perFrameCb, m_scene.table.gpu, m_deferredInputTable.gpu);
+            CmdEndEvent(cmdList);
+
+            CmdEndEvent(cmdList);
         }
         else
         {
-            cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
-        }
-        CmdEndEvent(cmdList);
+            CmdBeginEvent(cmdList, "ForwardPath");
 
-        for (const DrawItem& item : m_draws)
-        {
-            const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
-            m_forwardPbr.Render(
-                cl,
-                width,
-                height,
-                perFrameCb,
-                perDrawCb,
-                m_scene.table.gpu,
-                *item.material,
-                *item.mesh);
+
+            CmdBeginEvent(cmdList, "UpdateSceneTableForward");
+            UpdateSceneTable(device);
+            CmdEndEvent(cmdList);
+
+            // Normal Forward Setup
+            if (m_depthReady)
+                cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            cl.FlushBarriers();
+
+            cmdList->ClearRenderTargetView(backbufferRtv, m_clearColor, 0, nullptr);
+            if (m_depthReady)
+            {
+                cmdList->ClearDepthStencilView(m_depthDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+                cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, &m_depthDsv);
+            }
+            else
+            {
+                cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
+            }
+            CmdEndEvent(cmdList);
+
+            for (const DrawItem& item : m_draws)
+            {
+                const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
+                m_forwardPbr.Render(
+                    cl,
+                    width,
+                    height,
+                    perFrameCb,
+                    perDrawCb,
+                    m_scene.table.gpu,
+                    *item.material,
+                    *item.mesh);
+            }
+            CmdEndEvent(cmdList);
+            CmdEndEvent(cmdList);
         }
-        CmdEndEvent(cmdList);
-        CmdEndEvent(cmdList);
     }
-
     CmdEndEvent(cmdList);
 }
 
 void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
 {
+    m_widthCached = width;
+    m_heightCached = height;
+
+    m_depthReady = false;
+    m_gbufferReady = false;
+    m_rtOutputReady = false;
+
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
     CommandList::SetGlobalState(m_depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
@@ -223,6 +308,13 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_depthReady = true;
 
     CreateOrResizeGBuffers(device, width, height);
+   
+    if (m_dxrAvailable && m_useRaytracing && m_device5)
+    {
+        //m_rtPipeline.Initialize(m_device5.Get(), Paths::ShaderDir());
+        //CreateRtGeometryTable(device);
+        CreateRtOutput(device, width, height); 
+    }
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, uint32_t width, uint32_t height, float time)
@@ -323,6 +415,56 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
     // Create mesh GPU resources (DEFAULT heap VB+IB)
     m_quad.CreateTexturedQuad(device, cl, m_upload, frameIndex);
     m_floor.CreateFloorPlane(device, cl, m_upload, frameIndex);
+
+    if (m_dxrAvailable && m_useRaytracing && m_device5)
+    {
+        // Transition mesh buffers for DXR geometry reads
+        cl.Transition(
+            m_quad.VertexBufferResource(),
+            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        cl.Transition(
+            m_quad.IndexBufferResource(),
+            D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        cl.Transition(
+            m_floor.VertexBufferResource(),
+            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        cl.Transition(
+            m_floor.IndexBufferResource(),
+            D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        cl.FlushBarriers();
+
+        auto cmd4 = GetCommandList4(cl);
+ 
+        {
+            AccelerationStructure::GeometryDesc g{};
+            g.vertexBuffer = m_quad.VertexBufferResource()->GetGPUVirtualAddress();
+            g.vertexCount = m_quad.VertexCount();
+            g.vertexStride = m_quad.VertexStride();
+            g.indexBuffer = m_quad.IndexBufferResource()->GetGPUVirtualAddress();
+            g.indexCount = m_quad.IndexCount();
+            g.indexFormat = m_quad.IndexFormat();
+            m_blasQuad.BuildBottomLevel(m_device5.Get(), cmd4.Get(), g, L"BLAS Quad");
+        }
+
+        {
+            AccelerationStructure::GeometryDesc g{};
+            g.vertexBuffer = m_floor.VertexBufferResource()->GetGPUVirtualAddress();
+            g.vertexCount = m_floor.VertexCount();
+            g.vertexStride = m_floor.VertexStride();
+            g.indexBuffer = m_floor.IndexBufferResource()->GetGPUVirtualAddress();
+            g.indexCount = m_floor.IndexCount();
+            g.indexFormat = m_floor.IndexFormat();
+            m_blasFloor.BuildBottomLevel(m_device5.Get(), cmd4.Get(), g, L"BLAS Floor");
+        }
+
+        m_rtPipeline.Initialize(m_device5.Get(), Paths::ShaderDir());
+        CreateRtGeometryTable(device);
+		CreateRtOutput(device, m_widthCached, m_heightCached); //Cached variables changed in OnResize
+    }
 
     // Load a real texture from disk 
     const auto content = Paths::ContentDir_DevOnly();
@@ -848,4 +990,153 @@ bool Renderer::LoadMaterialFromFolder(
         metallicFactor,
         roughnessFactor,
         requireAll);
+}
+
+void Renderer::CreateRtOutput(ID3D12Device* device, uint32_t width, uint32_t height)
+{
+    CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+    auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        width,
+        height,
+        1,
+        1,
+        1,
+        0,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+    ThrowIfFailed(
+        device->CreateCommittedResource(
+            &heap,
+            D3D12_HEAP_FLAG_NONE,
+            &desc,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            nullptr,
+            IID_PPV_ARGS(&m_rtOutput)),
+        "Create RT output");
+
+    SetD3D12ObjectName(m_rtOutput.Get(), L"RT Output");
+    CommandList::SetGlobalState(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    if (!m_rtOutputUav.IsValid())
+        m_rtOutputUav = m_srvHeap.Allocate(1);
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+    uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+    device->CreateUnorderedAccessView(m_rtOutput.Get(), nullptr, &uav, m_rtOutputUav.cpu);
+    m_rtOutputReady = true;
+}
+
+void Renderer::CreateRtGeometryTable(ID3D12Device* device)
+{
+    if (!m_rtGeometryTable.IsValid())
+        m_rtGeometryTable = m_srvHeap.Allocate(4);
+
+    auto HandleAt = [&](uint32_t i)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_rtGeometryTable.cpu;
+        h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
+        return h;
+    };
+
+    // Quad verts
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC s{};
+        s.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        s.Format = DXGI_FORMAT_UNKNOWN;
+        s.Buffer.FirstElement = 0;
+        s.Buffer.NumElements = m_quad.VertexCount();
+        s.Buffer.StructureByteStride = m_quad.VertexStride();
+        s.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+        device->CreateShaderResourceView(m_quad.VertexBufferResource(), &s, HandleAt(0));
+    }
+
+    // Quad indices raw
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC s{};
+        s.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        s.Format = DXGI_FORMAT_R32_TYPELESS;
+        s.Buffer.FirstElement = 0;
+        s.Buffer.NumElements = (m_quad.IndexCount() * 2 + 3) / 4;
+        s.Buffer.StructureByteStride = 0;
+        s.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        device->CreateShaderResourceView(m_quad.IndexBufferResource(), &s, HandleAt(1));
+    }
+
+    // Floor verts
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC s{};
+        s.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        s.Format = DXGI_FORMAT_UNKNOWN;
+        s.Buffer.FirstElement = 0;
+        s.Buffer.NumElements = m_floor.VertexCount();
+        s.Buffer.StructureByteStride = m_floor.VertexStride();
+        s.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+        device->CreateShaderResourceView(m_floor.VertexBufferResource(), &s, HandleAt(2));
+    }
+
+    // Floor indices raw
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC s{};
+        s.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        s.Format = DXGI_FORMAT_R32_TYPELESS;
+        s.Buffer.FirstElement = 0;
+        s.Buffer.NumElements = (m_floor.IndexCount() * 2 + 3) / 4;
+        s.Buffer.StructureByteStride = 0;
+        s.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        device->CreateShaderResourceView(m_floor.IndexBufferResource(), &s, HandleAt(3));
+    }
+
+    m_rtGeometryTableReady = true;
+}
+
+void Renderer::BuildTlasForDrawList(uint32_t frameIndex, ID3D12GraphicsCommandList4* cmd4)
+{
+    std::vector<AccelerationStructure::InstanceDesc> instances;
+    instances.reserve(m_draws.size());
+
+    for (uint32_t i = 0; i < static_cast<uint32_t>(m_draws.size()); ++i)
+    {
+        const DrawItem& item = m_draws[i];
+
+        AccelerationStructure::InstanceDesc inst{};
+        inst.instanceID = i;
+        inst.hitGroupIndex = 0;
+        inst.mask = 0xFF;
+
+        if (item.mesh == &m_floor)
+            inst.blasAddress = m_blasFloor.GpuAddress();
+        else
+            inst.blasAddress = m_blasQuad.GpuAddress();
+
+        const auto& m = item.world;
+        inst.transform[0] = m._11; inst.transform[1] = m._12; inst.transform[2] = m._13; inst.transform[3] = m._41;
+        inst.transform[4] = m._21; inst.transform[5] = m._22; inst.transform[6] = m._23; inst.transform[7] = m._42;
+        inst.transform[8] = m._31; inst.transform[9] = m._32; inst.transform[10] = m._33; inst.transform[11] = m._43;
+
+        instances.push_back(inst);
+    }
+
+    if (!instances.empty())
+    {
+        m_rtFrames[frameIndex].tlas.BuildTopLevel(
+            m_device5.Get(),
+            cmd4,
+            instances.data(),
+            static_cast<uint32_t>(instances.size()),
+            L"TLAS Scene");
+    }
+}
+
+ComPtr<ID3D12GraphicsCommandList4> Renderer::GetCommandList4(CommandList& cl)
+{
+    ComPtr<ID3D12GraphicsCommandList4> cmd4;
+    ThrowIfFailed(cl.Get()->QueryInterface(IID_PPV_ARGS(&cmd4)), "QI(ID3D12GraphicsCommandList4)");
+    return cmd4;
 }

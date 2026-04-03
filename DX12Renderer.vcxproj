@@ -157,6 +157,8 @@
     <ClInclude Include="Source\RHI\Memory\DescriptorAllocator.h" />
     <ClInclude Include="Device.h" />
     <ClInclude Include="Source\RHI\CommandList\CommandList.h" />
+    <ClInclude Include="Source\RHI\Raytracing\AccelerationStructure.h" />
+    <ClInclude Include="Source\RHI\Raytracing\RaytracingPipeline.h" />
     <ClInclude Include="Source\RHI\Resources\GPUBuffer.h" />
     <ClInclude Include="GPUMarkers.h" />
     <ClInclude Include="PipelineState.h" />
@@ -188,6 +190,8 @@
     <ClCompile Include="Source\RHI\Memory\DescriptorAllocator.cpp" />
     <ClCompile Include="Device.cpp" />
     <ClCompile Include="Source\RHI\CommandList\CommandList.cpp" />
+    <ClCompile Include="Source\RHI\Raytracing\AccelerationStructure.cpp" />
+    <ClCompile Include="Source\RHI\Raytracing\RaytracingPipeline.cpp" />
     <ClCompile Include="Source\RHI\Resources\GPUBuffer.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Paths.cpp" />
@@ -312,6 +316,18 @@
   dxc.exe -T vs_6_0 -E main -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Shadow_VS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Shadow_VS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\Shadow_VS.cso;%(Outputs)</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="Assets\Shaders\HLSL\Raytracing.hlsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+if "$(Configuration)"=="Debug" (
+  dxc.exe -T lib_6_3 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Raytracing.cso" "$(ProjectDir)Assets\Shaders\HLSL\Raytracing.hlsl"
+) else (
+  dxc.exe -T lib_6_3 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Raytracing.cso" "$(ProjectDir)Assets\Shaders\HLSL\Raytracing.hlsl"
+)</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\Raytracing.cso;%(Outputs)</Outputs>
     </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
