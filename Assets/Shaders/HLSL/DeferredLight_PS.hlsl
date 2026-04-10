@@ -40,7 +40,8 @@ cbuffer PerFrameConstants : register(b0)
     float pad2;
     
     float2 ShadowInvSize;
-    float2 _padShadow;
+    uint DebugView;
+    uint _padShadow;
 };
 
 struct PSIn

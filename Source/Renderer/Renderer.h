@@ -18,6 +18,7 @@
 #include "Source/Renderer/Passes/ShadowPass.h"
 #include "Source/RHI/Raytracing/AccelerationStructure.h"
 #include "Source/RHI/Raytracing/RaytracingPipeline.h"
+#include "Source/RHI/Pipeline/RTInstanceData.h"
 
 class Renderer
 {
@@ -96,9 +97,12 @@ private:
     void UpdateDeferredInputTable(ID3D12Device* device);
 
     void CreateRtOutput(ID3D12Device* device, uint32_t width, uint32_t height);
-    void CreateRtGeometryTable(ID3D12Device* device);
     void BuildTlasForDrawList(uint32_t frameIndex, ID3D12GraphicsCommandList4* cmd4);
     ComPtr<ID3D12GraphicsCommandList4> GetCommandList4(CommandList& cl);
+
+    void EnsureRtOutputSize(uint32_t width, uint32_t height);
+    void EnsureRtInstanceData(uint32_t frameIndex);
+    void UpdateRtGeometryTable(uint32_t frameIndex);
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -174,9 +178,8 @@ private:
     bool m_enableShadows = true;
     uint32_t m_debugView = 0;
 
-	bool m_useRaytracing = true; // Toggle for raytracing vs rasterization (for testing/debugging)
+	bool m_useRaytracing = false; // Toggle for raytracing vs rasterization (for testing/debugging)
     bool m_dxrAvailable = false;
-    bool didDXR = false;
 
     ComPtr<ID3D12Device5> m_device5;
 
@@ -185,8 +188,16 @@ private:
     struct FrameRaytracingResources
     {
         AccelerationStructure tlas;
+        ComPtr<ID3D12Resource> instanceDataUpload; // upload heap
+        DescriptorAllocator::Allocation instanceDataSrv{}; 
+
+        // keep the t1..t5 table per-frame because t5 changes every frame.
+        DescriptorAllocator::Allocation geometryTable{};
+
+        uint32_t capacity = 0;
     };
 
+    
     std::vector<FrameRaytracingResources> m_rtFrames;
     uint32_t m_frameCount = 0;
 
@@ -195,13 +206,13 @@ private:
     // RT output
     ComPtr<ID3D12Resource> m_rtOutput;
     DescriptorAllocator::Allocation m_rtOutputUav{};
+    uint32_t m_rtOutputWidth = 0;
+    uint32_t m_rtOutputHeight = 0;
     bool m_rtOutputReady = false;
 
     // RT geometry SRV table (space0 table for RT global root sig only)
-    DescriptorAllocator::Allocation m_rtGeometryTable{};
-    bool m_rtGeometryTableReady = false;
-
-
+    //DescriptorAllocator::Allocation m_rtGeometryTable{};
+    //bool m_rtGeometryTableReady = false;
 
     uint32_t m_widthCached = 1;
     uint32_t m_heightCached = 1;

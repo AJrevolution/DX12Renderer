@@ -22,13 +22,13 @@ void RaytracingPipeline::BuildRootSignature(ID3D12Device* device)
     uavTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 output texture
 
     CD3DX12_DESCRIPTOR_RANGE srvTable;
-    srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 1, 0); // t1..t4 geometry buffers
+    srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 1, 0); // t1..t5 geometry buffers
 
     CD3DX12_ROOT_PARAMETER params[4]{};
     params[0].InitAsDescriptorTable(1, &uavTable); // u0 output texture
     params[1].InitAsShaderResourceView(0);         // t0 TLAS
     params[2].InitAsConstantBufferView(0);         // b0 frame
-    params[3].InitAsDescriptorTable(1, &srvTable); // t1..t4 geometry buffers
+    params[3].InitAsDescriptorTable(1, &srvTable); // t1..t5 geometry buffers
 
     CD3DX12_ROOT_SIGNATURE_DESC desc{};
     desc.Init(_countof(params), params, 0, nullptr);
@@ -64,7 +64,7 @@ void RaytracingPipeline::BuildStateObject(ID3D12Device5* device, const std::file
     hitGroup.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
 
     D3D12_RAYTRACING_SHADER_CONFIG shaderConfig{};
-    shaderConfig.MaxPayloadSizeInBytes = 16;
+    shaderConfig.MaxPayloadSizeInBytes = 24;
     shaderConfig.MaxAttributeSizeInBytes = 8;
 
     D3D12_GLOBAL_ROOT_SIGNATURE grs{};

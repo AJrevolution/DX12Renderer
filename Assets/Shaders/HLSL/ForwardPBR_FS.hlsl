@@ -38,7 +38,8 @@ cbuffer PerFrameConstants : register(b0)
     float _pad2;
     
     float2 ShadowInvSize;
-    float2 _padShadow;
+    uint DebugView;
+    uint _padShadow;
 };
 
 cbuffer PerDrawConstants : register(b1)
@@ -197,15 +198,25 @@ float4 main(PSIn i) : SV_Target
 
     // Temporary output transform since swapchain is UNORM (not SRGB)
     float3 outColor = LinearToSRGB(lit);
-        #if DEBUG_VIEW == 1
-        return float4(N * 0.5f + 0.5f, 1.0f);
-    #elif DEBUG_VIEW == 2
+
+    if (DebugView == 1)
+        return float4(worldNormal * 0.5f + 0.5f, 1.0f);
+
+    if (DebugView == 2)
         return float4(roughness.xxx, 1.0f);
-    #elif DEBUG_VIEW == 3
+
+    if (DebugView == 3)
         return float4(metallic.xxx, 1.0f);
-    #elif DEBUG_VIEW == 5
+
+    if (DebugView == 4)
+    {
+        float depth01 = saturate(i.pos.z);
+        return float4(depth01.xxx, 1.0f);
+    }
+
+    if (DebugView == 5)
         return float4(shadowFactor.xxx, 1.0f);
-    #endif
+
     return float4(outColor, 1.0f);
 
 }

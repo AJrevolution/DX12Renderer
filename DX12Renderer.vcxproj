@@ -157,6 +157,7 @@
     <ClInclude Include="Source\RHI\Memory\DescriptorAllocator.h" />
     <ClInclude Include="Device.h" />
     <ClInclude Include="Source\RHI\CommandList\CommandList.h" />
+    <ClInclude Include="Source\RHI\Pipeline\RTInstanceData.h" />
     <ClInclude Include="Source\RHI\Raytracing\AccelerationStructure.h" />
     <ClInclude Include="Source\RHI\Raytracing\RaytracingPipeline.h" />
     <ClInclude Include="Source\RHI\Resources\GPUBuffer.h" />

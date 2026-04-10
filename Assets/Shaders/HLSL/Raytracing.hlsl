@@ -15,6 +15,17 @@ ByteAddressBuffer g_QuadIndices : register(t2);
 StructuredBuffer<VertexRT> g_FloorVerts : register(t3);
 ByteAddressBuffer g_FloorIndices : register(t4);
 
+struct RTInstanceData
+{
+    float4 baseColorFactor;
+    float metallic;
+    float roughness;
+    float2 _pad0;
+    uint meshType;
+    uint materialId;
+    uint2 _pad1;
+};
+StructuredBuffer<RTInstanceData> g_InstanceData : register(t5);
 cbuffer PerFrameConstants : register(b0)
 {
     row_major float4x4 ViewProj;
@@ -35,13 +46,16 @@ cbuffer PerFrameConstants : register(b0)
     float pad2;
 
     float2 ShadowInvSize;
-    float2 _padShadow;
+    uint DebugView;
+    uint _padShadow;
 };
 
 struct RayPayload
 {
     float3 color;
     uint hit;
+    uint isShadow;
+    uint occluded;
 };
 
 uint LoadIndex16(ByteAddressBuffer buf, uint idx)
@@ -71,10 +85,12 @@ float3 BaryLerp(float3 a, float3 b, float3 c, float2 bary)
 
 float3 FetchWorldNormal(uint instanceID, uint primitiveIndex, float2 bary)
 {
+    RTInstanceData inst = g_InstanceData[instanceID];
+
     uint i0, i1, i2;
     float3 n0, n1, n2;
 
-    if (instanceID == 0)
+    if (inst.meshType == 0)
     {
         i0 = LoadIndex16(g_FloorIndices, primitiveIndex * 3 + 0);
         i1 = LoadIndex16(g_FloorIndices, primitiveIndex * 3 + 1);
@@ -99,17 +115,80 @@ float3 FetchWorldNormal(uint instanceID, uint primitiveIndex, float2 bary)
     return TransformNormal(n);
 }
 
-float3 ShadeInstance(uint instanceID, float3 worldNormal)
+float3 ShadeMaterial(
+    float3 base,
+    float metallic,
+    float roughness,
+    float3 worldPos,
+    float3 worldNormal,
+    float shadowVisibility)
 {
-    float3 base =
-        (instanceID == 0) ? float3(0.8, 0.8, 0.8) :
-        (instanceID == 1) ? float3(0.9, 0.9, 0.9) :
-        (instanceID == 2) ? float3(0.85, 0.2, 0.2) :
-                            float3(0.2, 0.3, 0.85);
+    float3 L = normalize(-LightDir);
+    float ndotl = saturate(dot(worldNormal, L));
+
+    float3 ambient = base * 0.08f;
+    float3 diffuseColor = base * (1.0f - metallic);
+
+    float specPower = lerp(64.0f, 4.0f, roughness);
+    float3 V = normalize(CameraPos - worldPos);
+    float3 H = normalize(L + V);
+    float spec = pow(saturate(dot(worldNormal, H)), specPower);
+
+    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
+    float3 specular = F0 * spec;
+
+    float3 direct = (diffuseColor * ndotl + specular * ndotl) * LightColor * shadowVisibility;
+    return ambient + direct;
+}
+
+//float3 GetBaseColor(uint instanceID)
+//{
+//    return
+//        (instanceID == 0) ? float3(0.8, 0.8, 0.8) :
+//        (instanceID == 1) ? float3(0.9, 0.9, 0.9) :
+//        (instanceID == 2) ? float3(0.85, 0.2, 0.2) :
+//                            float3(0.2, 0.3, 0.85);
+//}
+float3 ShadeInstance(uint instanceID, float3 worldNormal, float shadowVisibility)
+{
+    RTInstanceData data = g_InstanceData[instanceID];
+
+    float3 base = data.baseColorFactor.rgb;
+    float roughness = saturate(data.roughness);
+    float metallic = saturate(data.metallic);
 
     float3 L = normalize(-LightDir);
     float ndotl = saturate(dot(worldNormal, L));
-    return base * (0.08 + ndotl);
+
+    float3 ambient = base * 0.08;
+
+    float3 diffuseColor = base * (1.0f - metallic);
+
+    // cheap placeholder spec term so metallic/roughness affect output at least somewhat
+    float specPower = lerp(64.0f, 4.0f, roughness);
+    float3 V = normalize(CameraPos - (WorldRayOrigin() + RayTCurrent() * WorldRayDirection()));
+    float3 H = normalize(L + V);
+    float spec = pow(saturate(dot(worldNormal, H)), specPower);
+
+    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
+    float3 specular = F0 * spec;
+
+    float3 direct = (diffuseColor * ndotl + specular * ndotl) * LightColor * shadowVisibility;
+
+    return ambient + direct;
+}
+
+float3 EvalSky(float3 dir)
+{
+    float t = saturate(dir.y * 0.5f + 0.5f);
+    return lerp(float3(0.10f, 0.12f, 0.15f), float3(0.50f, 0.65f, 0.90f), t);
+}
+
+float3 HashColor(uint id)
+{
+    float3 p = frac(float3(0.1031, 0.11369, 0.13787) * float(id + 1));
+    p += dot(p, p.yzx + 19.19);
+    return frac((p.xxy + p.yzz) * p.zyx);
 }
 
 [shader("raygeneration")]
@@ -135,8 +214,10 @@ void RayGen()
     RayPayload payload;
     payload.color = float3(0.02, 0.03, 0.05);
     payload.hit = 0;
+    payload.isShadow = 0;
+    payload.occluded = 0;
 
-    TraceRay(g_Scene, 0, 0xFF, 0, 1, 0, ray, payload);
+    TraceRay(g_Scene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 1, 0, ray, payload);
 
     g_Output[pixel] = float4(payload.color, 1.0);
 }
@@ -144,19 +225,114 @@ void RayGen()
 [shader("miss")]
 void Miss(inout RayPayload payload)
 {
-    payload.color = float3(0.04, 0.06, 0.10);
+    if (payload.isShadow == 1)
+    {
+        payload.occluded = 0;
+        return;
+    }
+    
+    payload.color = EvalSky(WorldRayDirection());
     payload.hit = 0;
 }
 
 [shader("closesthit")]
 void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
+    if (payload.isShadow == 1)
+    {
+        payload.occluded = 1;
+        return;
+    }
+    
+
     const uint instanceID = InstanceID();
     const uint prim = PrimitiveIndex();
 
     float2 bary = float2(attr.barycentrics.x, attr.barycentrics.y);
     float3 worldNormal = FetchWorldNormal(instanceID, prim, bary);
+    
+    float3 worldPos = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
 
-    payload.color = ShadeInstance(instanceID, worldNormal);
+    if (dot(worldNormal, WorldRayDirection()) > 0.0f)
+        worldNormal = -worldNormal;
+
+    RTInstanceData data = g_InstanceData[instanceID];
+    float3 base = data.baseColorFactor.rgb;
+    float roughness = saturate(data.roughness);
+    float metallic = saturate(data.metallic);
+    
+    float3 L = normalize(-LightDir);
+    
+    RayPayload shadowPayload;
+    shadowPayload.color = 0.0.xxx;
+    shadowPayload.hit = 0;
+    shadowPayload.isShadow = 1;
+    shadowPayload.occluded = 0;
+
+    float shadowBias = max(0.001f, 0.01f * (1.0f - saturate(dot(worldNormal, L))));
+
+    RayDesc shadowRay;
+    shadowRay.Origin = worldPos + worldNormal * shadowBias;
+    shadowRay.Direction = L;
+    shadowRay.TMin = 0.0f;
+    shadowRay.TMax = 1e38f;
+
+    TraceRay(
+        g_Scene,
+         RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+        RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+        0xFF,
+        0,
+        1,
+        0,
+        shadowRay,
+        shadowPayload);
+
+    float shadowVisibility = (shadowPayload.occluded != 0) ? 0.0f : 1.0f;
+
+    if (DebugView == 1)
+    {
+        payload.color = worldNormal * 0.5f + 0.5f;
+        payload.hit = 1;
+        return;
+    }
+
+    if (DebugView == 2)
+    {
+        payload.color = roughness.xxx;
+        payload.hit = 1;
+        return;
+    }
+
+    if (DebugView == 3)
+    {
+        payload.color = metallic.xxx;
+        payload.hit = 1;
+        return;
+    }
+    if (DebugView == 4)
+    {
+        float4 clip = mul(float4(worldPos, 1.0f), ViewProj);
+        float depth01 = saturate((clip.z / clip.w) * 0.5f + 0.5f);
+        payload.color = depth01.xxx;
+        payload.hit = 1;
+        return;
+    }
+
+    if (DebugView == 5)
+    {
+        payload.color = shadowVisibility.xxx;
+        payload.hit = 1;
+        return;
+    }
+
+    if (DebugView == 6)
+    {
+        payload.color = HashColor(instanceID);
+        payload.hit = 1;
+        return;
+    }
+
+    payload.color = ShadeMaterial(base, metallic, roughness, worldPos, worldNormal, shadowVisibility);
     payload.hit = 1;
 }

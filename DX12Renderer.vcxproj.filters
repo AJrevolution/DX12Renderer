@@ -123,6 +123,9 @@
     <ClInclude Include="Source\RHI\Raytracing\RaytracingPipeline.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\RHI\Pipeline\RTInstanceData.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">

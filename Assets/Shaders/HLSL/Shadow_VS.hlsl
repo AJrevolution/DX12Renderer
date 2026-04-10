@@ -16,6 +16,10 @@ cbuffer PerFrameConstants : register(b0)
     float _pad1;
     float3 LightColor;
     float _pad2;
+    
+    float2 ShadowInvSize;
+    uint DebugView;
+    uint _padShadow;
 };
 
 cbuffer PerDrawConstants : register(b1)

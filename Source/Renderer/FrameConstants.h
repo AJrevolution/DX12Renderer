@@ -21,6 +21,7 @@ struct PerFrameConstants
     DirectX::XMFLOAT3   lightColor; float pad2;
 
     DirectX::XMFLOAT2 shadowInvSize;
-    float padShadow[2];
+    uint32_t debugView = 0;
+    uint32_t padShadow = 0;
 };
 static_assert((sizeof(PerFrameConstants) % 16) == 0); 
