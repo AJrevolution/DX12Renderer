@@ -98,6 +98,7 @@ void Renderer::RenderFrame(
 
     if (canRunDxr)
     {
+        CmdBeginEvent(cmdList, "DXR");
         EnsureRtOutputSize(width, height);
         EnsureRtInstanceData(frameIndex);
         UpdateRtGeometryTable(frameIndex);
@@ -135,9 +136,9 @@ void Renderer::RenderFrame(
             rays.Height = height;
             rays.Depth = 1;
 
-            CmdBeginEvent(cl.Get(), "DXR");
+
             cmd4->DispatchRays(&rays);
-            CmdEndEvent(cl.Get());
+
 
             // Copy RT output into backbuffer
             cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -150,6 +151,7 @@ void Renderer::RenderFrame(
             cl.FlushBarriers();
             renderedWithDxr = true;
         }
+        CmdEndEvent(cmdList); //DXR
     }
 
     if (!renderedWithDxr)

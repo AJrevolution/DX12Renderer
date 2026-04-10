@@ -1,3 +1,6 @@
+#include "Common.hlsli"
+#include "PBR.hlsli"
+
 struct VertexRT
 {
     float3 pos;
@@ -115,6 +118,7 @@ float3 FetchWorldNormal(uint instanceID, uint primitiveIndex, float2 bary)
     return TransformNormal(n);
 }
 
+
 float3 ShadeMaterial(
     float3 base,
     float metallic,
@@ -138,43 +142,6 @@ float3 ShadeMaterial(
     float3 specular = F0 * spec;
 
     float3 direct = (diffuseColor * ndotl + specular * ndotl) * LightColor * shadowVisibility;
-    return ambient + direct;
-}
-
-//float3 GetBaseColor(uint instanceID)
-//{
-//    return
-//        (instanceID == 0) ? float3(0.8, 0.8, 0.8) :
-//        (instanceID == 1) ? float3(0.9, 0.9, 0.9) :
-//        (instanceID == 2) ? float3(0.85, 0.2, 0.2) :
-//                            float3(0.2, 0.3, 0.85);
-//}
-float3 ShadeInstance(uint instanceID, float3 worldNormal, float shadowVisibility)
-{
-    RTInstanceData data = g_InstanceData[instanceID];
-
-    float3 base = data.baseColorFactor.rgb;
-    float roughness = saturate(data.roughness);
-    float metallic = saturate(data.metallic);
-
-    float3 L = normalize(-LightDir);
-    float ndotl = saturate(dot(worldNormal, L));
-
-    float3 ambient = base * 0.08;
-
-    float3 diffuseColor = base * (1.0f - metallic);
-
-    // cheap placeholder spec term so metallic/roughness affect output at least somewhat
-    float specPower = lerp(64.0f, 4.0f, roughness);
-    float3 V = normalize(CameraPos - (WorldRayOrigin() + RayTCurrent() * WorldRayDirection()));
-    float3 H = normalize(L + V);
-    float spec = pow(saturate(dot(worldNormal, H)), specPower);
-
-    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
-    float3 specular = F0 * spec;
-
-    float3 direct = (diffuseColor * ndotl + specular * ndotl) * LightColor * shadowVisibility;
-
     return ambient + direct;
 }
 
@@ -219,7 +186,7 @@ void RayGen()
 
     TraceRay(g_Scene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 1, 0, ray, payload);
 
-    g_Output[pixel] = float4(payload.color, 1.0);
+    g_Output[pixel] = float4(LinearToSRGB(payload.color), 1.0f);
 }
 
 [shader("miss")]
@@ -261,7 +228,10 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     float roughness = saturate(data.roughness);
     float metallic = saturate(data.metallic);
     
-    float3 L = normalize(-LightDir);
+    roughness = max(0.045f, roughness);
+
+    float3 V = SafeNormalize(CameraPos - worldPos);
+    float3 L = SafeNormalize(-LightDir);
     
     RayPayload shadowPayload;
     shadowPayload.color = 0.0.xxx;
@@ -333,6 +303,19 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         return;
     }
 
-    payload.color = ShadeMaterial(base, metallic, roughness, worldPos, worldNormal, shadowVisibility);
+    // use the same GGX direct-lighting helper as forward/deferred.
+    PbrInputs p;
+    p.N = worldNormal;
+    p.V = V;
+    p.L = L;
+    p.albedo = base;
+    p.metallic = metallic;
+    p.roughness = roughness;
+
+    float3 direct = EvalDirectPBR(p, LightColor) * shadowVisibility;
+    float3 ambient = base * 0.03f;
+    float3 lit = ambient + direct;
+
+    payload.color = lit;
     payload.hit = 1;
 }
