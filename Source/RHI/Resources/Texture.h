@@ -39,6 +39,17 @@ public:
         const float clearColor[4],
         const wchar_t* name);
 
+    void CreateFromRGBA8Data(
+        ID3D12Device* device,
+        CommandList& cl,
+        UploadArena& upload,
+        uint32_t frameIndex,
+        uint32_t width,
+        uint32_t height,
+        const void* rgba8Pixels,
+        bool treatAsSRGB,
+        const wchar_t* debugName);
+
     ID3D12Resource* Get() const { return m_resource.Get(); }
     DXGI_FORMAT ResourceFormat() const { return m_resourceFormat; }
     DXGI_FORMAT SrvFormat() const { return m_srvFormat; }

@@ -104,6 +104,18 @@ private:
     void EnsureRtInstanceData(uint32_t frameIndex);
     void UpdateRtGeometryTable(uint32_t frameIndex);
 
+    void WriteRtTextureSrv(
+        ID3D12Device* device,
+        D3D12_CPU_DESCRIPTOR_HANDLE dst,
+        const Texture& texture) const;
+
+    void CreateRtFallbackTextures(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex);
+
+    uint32_t GetRtMaterialId(const Material* material) const;
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -169,6 +181,10 @@ private:
     Texture m_glossyBaseTex, m_glossyNormalTex, m_glossyOrmTex;
     Texture m_metalBaseTex, m_metalNormalTex, m_metalOrmTex;
 
+    Texture m_rtFallbackWhiteTex;
+    Texture m_rtFallbackFlatNormalTex;
+    Texture m_rtFallbackOrmTex;
+
     Mesh m_floor;
     Material m_floorMaterial;
     
@@ -191,7 +207,7 @@ private:
         ComPtr<ID3D12Resource> instanceDataUpload; // upload heap
         DescriptorAllocator::Allocation instanceDataSrv{}; 
 
-        // keep the t1..t5 table per-frame because t5 changes every frame.
+        // per-frame RT table: geometry + instance data + material textures
         DescriptorAllocator::Allocation geometryTable{};
 
         uint32_t capacity = 0;
@@ -208,12 +224,19 @@ private:
     DescriptorAllocator::Allocation m_rtOutputUav{};
     uint32_t m_rtOutputWidth = 0;
     uint32_t m_rtOutputHeight = 0;
+    uint32_t m_rtMaterialCount = 4;
     bool m_rtOutputReady = false;
-
-    // RT geometry SRV table (space0 table for RT global root sig only)
-    //DescriptorAllocator::Allocation m_rtGeometryTable{};
-    //bool m_rtGeometryTableReady = false;
 
     uint32_t m_widthCached = 1;
     uint32_t m_heightCached = 1;
+
+    static constexpr uint32_t kMaxRtMaterials = 8;
+    static constexpr uint32_t kRtGeometrySrvCount = 5; // t1..t5
+    static constexpr uint32_t kRtTexturesPerMaterial = 3;
+
+    static constexpr uint32_t kRtMaterialFloor = 0;
+    static constexpr uint32_t kRtMaterialMetal = 1;
+    static constexpr uint32_t kRtMaterialMatte = 2;
+    static constexpr uint32_t kRtMaterialGlossy = 3;
+
 };

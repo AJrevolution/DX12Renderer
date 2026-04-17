@@ -2,6 +2,15 @@
 #include "ThirdParty/DirectX-Headers/include/directx/d3dx12.h"
 #include <fstream>
 
+namespace
+{
+    static constexpr uint32_t kMaxRtMaterials = 8;
+    static constexpr uint32_t kRtGeometrySrvCount = 5;          // t1..t5
+    static constexpr uint32_t kRtTexturesPerMaterial = 3;       // base, normal, orm
+    static constexpr uint32_t kRtSrvTableCount =
+        kRtGeometrySrvCount + (kRtTexturesPerMaterial * kMaxRtMaterials);
+}
+
 static std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path)
 {
     std::ifstream in(path, std::ios::binary);
@@ -22,16 +31,35 @@ void RaytracingPipeline::BuildRootSignature(ID3D12Device* device)
     uavTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 output texture
 
     CD3DX12_DESCRIPTOR_RANGE srvTable;
-    srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 1, 0); // t1..t5 geometry buffers
+    srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kRtSrvTableCount, 1, 0); // t1..t5 + t6.. material textures
 
     CD3DX12_ROOT_PARAMETER params[4]{};
     params[0].InitAsDescriptorTable(1, &uavTable); // u0 output texture
     params[1].InitAsShaderResourceView(0);         // t0 TLAS
     params[2].InitAsConstantBufferView(0);         // b0 frame
-    params[3].InitAsDescriptorTable(1, &srvTable); // t1..t5 geometry buffers
+    params[3].InitAsDescriptorTable(1, &srvTable); // t1..expanded RT table
+    
+    CD3DX12_STATIC_SAMPLER_DESC staticSamplers[2];
+    staticSamplers[0].Init(
+        0,
+        D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+
+    staticSamplers[1].Init(
+        1,
+        D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
 
     CD3DX12_ROOT_SIGNATURE_DESC desc{};
-    desc.Init(_countof(params), params, 0, nullptr);
+    desc.Init(
+        _countof(params),
+        params,
+        _countof(staticSamplers),
+        staticSamplers);
 
     ComPtr<ID3DBlob> blob, err;
     ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err), "Serialize RT root sig");

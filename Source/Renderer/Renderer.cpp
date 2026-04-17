@@ -17,7 +17,7 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
     m_dsvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 16, false, L"DSV Heap (CPU)");
     
     // Shader-visible SRV heap for textures
-    m_srvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 256, true, L"SRV Heap (Shader Visible)");
+    m_srvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1024, true, L"SRV Heap (Shader Visible)");
 
     // Space 0: Scene Table (t0..t3)
     static constexpr uint32_t kSceneSrvCount = 4;
@@ -632,6 +632,11 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         L"metal_plate_02_diff_1024.png", L"metal_plate_02_nor_dx_1024.png", L"metal_plate_02_arm_1024.png",
         { 1,1,1,1 }, 1.0f, 0.35f, 
         true);
+
+    if (m_dxrAvailable && m_device5)
+    {
+        CreateRtFallbackTextures(device, cl, frameIndex);
+    }
 }
 
 void Renderer::CreateNullSceneTable(ID3D12Device* device)
@@ -1170,7 +1175,7 @@ void Renderer::EnsureRtInstanceData(uint32_t frameIndex)
         data.roughness = mat ? mat->roughnessFactor : 0.5f;
 
         data.meshType = (item.mesh == &m_floor) ? 0u : 1u;
-        data.materialId = i;
+        data.materialId = GetRtMaterialId(item.material);
 
         dst[i] = data;
     }
@@ -1183,8 +1188,11 @@ void Renderer::UpdateRtGeometryTable(uint32_t frameIndex)
 {
     auto& frame = m_rtFrames[frameIndex];
 
+    static constexpr uint32_t kRtTableDescriptorCount =
+        kRtGeometrySrvCount + (kRtTexturesPerMaterial * kMaxRtMaterials);
+
     if (!frame.geometryTable.IsValid())
-        frame.geometryTable = m_srvHeap.Allocate(5);
+        frame.geometryTable = m_srvHeap.Allocate(kRtTableDescriptorCount);
 
     auto HandleAt = [&](uint32_t i)
     {
@@ -1267,5 +1275,142 @@ void Renderer::UpdateRtGeometryTable(uint32_t frameIndex)
             &srv,
             HandleAt(4) 
         );
+    }
+
+    // Fill the whole RT material block with deterministic fallback textures first.
+    for (uint32_t materialId = 0; materialId < kMaxRtMaterials; ++materialId)
+    {
+        const uint32_t firstSlot =
+            kRtGeometrySrvCount + materialId * kRtTexturesPerMaterial;
+
+        WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 0), m_rtFallbackWhiteTex);
+        WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 1), m_rtFallbackFlatNormalTex);
+        WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 2), m_rtFallbackOrmTex);
+    }
+
+    auto WriteMaterial = [&](uint32_t materialId, const Texture* base, const Texture* normal, const Texture* orm)
+    {
+        if (materialId >= kMaxRtMaterials)
+            return;
+
+        const uint32_t firstSlot =
+            kRtGeometrySrvCount + materialId * kRtTexturesPerMaterial;
+
+        const Texture& baseTex = (base && base->IsValid()) ? *base : m_rtFallbackWhiteTex;
+        const Texture& normalTex = (normal && normal->IsValid()) ? *normal : m_rtFallbackFlatNormalTex;
+        const Texture& ormTex = (orm && orm->IsValid()) ? *orm : m_rtFallbackOrmTex;
+
+        WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 0), baseTex);
+        WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 1), normalTex);
+        WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 2), ormTex);
+    };
+
+    // Stable explicit mapping:
+    // 0 = floor
+    // 1 = metal
+    // 2 = matte
+    // 3 = glossy
+
+    WriteMaterial(
+        kRtMaterialFloor,
+        &m_albedoTex,
+        &m_normalTex,
+        &m_metalRoughTex);
+
+    WriteMaterial(
+        kRtMaterialMetal,
+        m_metalBaseTex.IsValid() ? &m_metalBaseTex : &m_albedoTex,
+        m_metalNormalTex.IsValid() ? &m_metalNormalTex : &m_normalTex,
+        m_metalOrmTex.IsValid() ? &m_metalOrmTex : &m_metalRoughTex);
+
+    WriteMaterial(
+        kRtMaterialMatte,
+        m_matteBaseTex.IsValid() ? &m_matteBaseTex : &m_albedoTex,
+        m_matteNormalTex.IsValid() ? &m_matteNormalTex : &m_normalTex,
+        m_matteOrmTex.IsValid() ? &m_matteOrmTex : &m_metalRoughTex);
+
+    WriteMaterial(
+        kRtMaterialGlossy,
+        m_glossyBaseTex.IsValid() ? &m_glossyBaseTex : &m_albedoTex,
+        m_glossyNormalTex.IsValid() ? &m_glossyNormalTex : &m_normalTex,
+        m_glossyOrmTex.IsValid() ? &m_glossyOrmTex : &m_metalRoughTex);
+
+    m_rtMaterialCount = 4;
+}
+
+void Renderer::WriteRtTextureSrv(
+    ID3D12Device* device,
+    D3D12_CPU_DESCRIPTOR_HANDLE dst,
+    const Texture& texture) const
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = texture.SrvFormat();
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MostDetailedMip = 0;
+    srv.Texture2D.MipLevels = std::max(1u, texture.MipCount());
+
+    device->CreateShaderResourceView(texture.Get(), &srv, dst);
+}
+
+uint32_t Renderer::GetRtMaterialId(const Material* material) const
+{
+    if (material == &m_floorMaterial)  return kRtMaterialFloor;
+    if (material == &m_metalMaterial)  return kRtMaterialMetal;
+    if (material == &m_matteMaterial)  return kRtMaterialMatte;
+    if (material == &m_glossyMaterial) return kRtMaterialGlossy;
+
+    // Current draw list only uses the four materials above.
+    return kRtMaterialFloor;
+}
+
+void Renderer::CreateRtFallbackTextures(
+    ID3D12Device* device,
+    CommandList& cl,
+    uint32_t frameIndex)
+{
+    if (!m_rtFallbackWhiteTex.IsValid())
+    {
+        static const uint8_t kWhite[4] = { 255, 255, 255, 255 };
+        m_rtFallbackWhiteTex.CreateFromRGBA8Data(
+            device,
+            cl,
+            m_upload,
+            frameIndex,
+            1,
+            1,
+            kWhite,
+            true,
+            L"RT Fallback White");
+    }
+
+    if (!m_rtFallbackFlatNormalTex.IsValid())
+    {
+        static const uint8_t kFlatNormal[4] = { 128, 128, 255, 255 };
+        m_rtFallbackFlatNormalTex.CreateFromRGBA8Data(
+            device,
+            cl,
+            m_upload,
+            frameIndex,
+            1,
+            1,
+            kFlatNormal,
+            false,
+            L"RT Fallback Flat Normal");
+    }
+
+    if (!m_rtFallbackOrmTex.IsValid())
+    {
+        static const uint8_t kOrm[4] = { 255, 255, 255, 255 };
+        m_rtFallbackOrmTex.CreateFromRGBA8Data(
+            device,
+            cl,
+            m_upload,
+            frameIndex,
+            1,
+            1,
+            kOrm,
+            false,
+            L"RT Fallback ORM");
     }
 }

@@ -1,6 +1,10 @@
 #include "Common.hlsli"
 #include "PBR.hlsli"
 
+#define RT_MAX_MATERIALS 8
+#define RT_TEXTURES_PER_MATERIAL 3
+#define RT_TEXTURE_COUNT (RT_MAX_MATERIALS * RT_TEXTURES_PER_MATERIAL)
+
 struct VertexRT
 {
     float3 pos;
@@ -9,14 +13,6 @@ struct VertexRT
     float4 color;
     float2 uv;
 };
-
-RaytracingAccelerationStructure g_Scene : register(t0);
-RWTexture2D<float4> g_Output : register(u0);
-
-StructuredBuffer<VertexRT> g_QuadVerts : register(t1);
-ByteAddressBuffer g_QuadIndices : register(t2);
-StructuredBuffer<VertexRT> g_FloorVerts : register(t3);
-ByteAddressBuffer g_FloorIndices : register(t4);
 
 struct RTInstanceData
 {
@@ -28,7 +24,7 @@ struct RTInstanceData
     uint materialId;
     uint2 _pad1;
 };
-StructuredBuffer<RTInstanceData> g_InstanceData : register(t5);
+
 cbuffer PerFrameConstants : register(b0)
 {
     row_major float4x4 ViewProj;
@@ -61,6 +57,29 @@ struct RayPayload
     uint occluded;
 };
 
+struct SurfaceBasisRT
+{
+    float2 uv;
+    float3 worldGeomNormal;
+    float3 worldTangent;
+    float tangentSign;
+};
+
+
+RaytracingAccelerationStructure     g_Scene : register(t0);
+RWTexture2D<float4>                 g_Output : register(u0);
+StructuredBuffer<VertexRT>          g_QuadVerts : register(t1);
+ByteAddressBuffer                   g_QuadIndices : register(t2);
+StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);
+ByteAddressBuffer                   g_FloorIndices : register(t4);
+StructuredBuffer<RTInstanceData>    g_InstanceData : register(t5);
+
+// t6.. = [base0, normal0, orm0, base1, normal1, orm1, ...]
+Texture2D<float4>                   g_RtMaterialTextures[RT_TEXTURE_COUNT] : register(t6);
+
+SamplerState                        g_LinearWrap : register(s0);
+SamplerState                        g_LinearClamp : register(s1);
+
 uint LoadIndex16(ByteAddressBuffer buf, uint idx)
 {
     uint byteOffset = idx * 2;
@@ -80,10 +99,61 @@ float3 TransformNormal(float3 n)
     return normalize(mul(n, m));
 }
 
+float3 TransformDirection(float3 v)
+{
+    float3x3 m = (float3x3) GetObjectToWorld();
+    return SafeNormalize(mul(v, m));
+}
+
+
 float3 BaryLerp(float3 a, float3 b, float3 c, float2 bary)
 {
     float w = 1.0 - bary.x - bary.y;
     return a * w + b * bary.x + c * bary.y;
+}
+
+float2 BaryLerp2(float2 a, float2 b, float2 c, float2 bary)
+{
+    float w = 1.0f - bary.x - bary.y;
+    return a * w + b * bary.x + c * bary.y;
+}
+
+float3 BaryLerp3(float3 a, float3 b, float3 c, float2 bary)
+{
+    float w = 1.0f - bary.x - bary.y;
+    return a * w + b * bary.x + c * bary.y;
+}
+
+float4 BaryLerp4(float4 a, float4 b, float4 c, float2 bary)
+{
+    float w = 1.0f - bary.x - bary.y;
+    return a * w + b * bary.x + c * bary.y;
+}
+
+VertexRT LoadVertex(uint meshType, uint vertexIndex)
+{
+    if (meshType == 0)
+        return g_FloorVerts[vertexIndex];
+    else
+        return g_QuadVerts[vertexIndex];
+}
+
+uint LoadMeshIndex(uint meshType, uint indexIndex)
+{
+    return (meshType == 0)
+        ? LoadIndex16(g_FloorIndices, indexIndex)
+        : LoadIndex16(g_QuadIndices, indexIndex);
+}
+
+void LoadTriangleVertices(uint meshType, uint primitiveIndex, out VertexRT v0, out VertexRT v1, out VertexRT v2)
+{
+    uint i0 = LoadMeshIndex(meshType, primitiveIndex * 3 + 0);
+    uint i1 = LoadMeshIndex(meshType, primitiveIndex * 3 + 1);
+    uint i2 = LoadMeshIndex(meshType, primitiveIndex * 3 + 2);
+
+    v0 = LoadVertex(meshType, i0);
+    v1 = LoadVertex(meshType, i1);
+    v2 = LoadVertex(meshType, i2);
 }
 
 float3 FetchWorldNormal(uint instanceID, uint primitiveIndex, float2 bary)
@@ -118,6 +188,55 @@ float3 FetchWorldNormal(uint instanceID, uint primitiveIndex, float2 bary)
     return TransformNormal(n);
 }
 
+SurfaceBasisRT FetchSurfaceBasis(uint instanceID, uint primitiveIndex, float2 bary)
+{
+    RTInstanceData inst = g_InstanceData[instanceID];
+
+    VertexRT v0, v1, v2;
+    LoadTriangleVertices(inst.meshType, primitiveIndex, v0, v1, v2);
+
+    float2 uv = BaryLerp2(v0.uv, v1.uv, v2.uv, bary);
+
+    float3 nObj = SafeNormalize(BaryLerp3(v0.nrm, v1.nrm, v2.nrm, bary));
+    float4 tObj4 = BaryLerp4(v0.tan, v1.tan, v2.tan, bary);
+    float3 tObj = SafeNormalize(tObj4.xyz);
+
+    SurfaceBasisRT s;
+    s.uv = uv;
+    s.worldGeomNormal = TransformDirection(nObj);
+    s.worldTangent = TransformDirection(tObj);
+    s.tangentSign = (tObj4.w >= 0.0f) ? 1.0f : -1.0f;
+    return s;
+}
+
+
+uint GetRtTextureBaseIndex(uint materialId)
+{
+    uint clampedId = min(materialId, (uint) (RT_MAX_MATERIALS - 1));
+    return clampedId * RT_TEXTURES_PER_MATERIAL;
+}
+
+float4 SampleRtTexture(uint materialId, uint slot, float2 uv)
+{
+    uint texIndex = GetRtTextureBaseIndex(materialId) + slot;
+    return g_RtMaterialTextures[texIndex].SampleLevel(g_LinearWrap, uv, 0.0f);
+}
+
+float4 SampleBaseColorTex(uint materialId, float2 uv)
+{
+    return SampleRtTexture(materialId, 0, uv);
+}
+
+float3 SampleNormalTex(uint materialId, float2 uv)
+{
+    float3 s = SampleRtTexture(materialId, 1, uv).xyz;
+    return SafeNormalize(s * 2.0f - 1.0f);
+}
+
+float3 SampleOrmTex(uint materialId, float2 uv)
+{
+    return SampleRtTexture(materialId, 2, uv).rgb;
+}
 
 float3 ShadeMaterial(
     float3 base,
@@ -174,7 +293,7 @@ void RayGen()
 
     RayDesc ray;
     ray.Origin = nearP.xyz;
-    ray.Direction = normalize(farP.xyz - nearP.xyz);
+    ray.Direction = SafeNormalize(farP.xyz - nearP.xyz);
     ray.TMin = 0.001;
     ray.TMax = 10000.0;
 
@@ -211,25 +330,39 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         return;
     }
     
-
     const uint instanceID = InstanceID();
     const uint prim = PrimitiveIndex();
 
     float2 bary = float2(attr.barycentrics.x, attr.barycentrics.y);
-    float3 worldNormal = FetchWorldNormal(instanceID, prim, bary);
     
     float3 worldPos = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+        
+    SurfaceBasisRT surface = FetchSurfaceBasis(instanceID, prim, bary);
+    
+    float3 geomNormal = surface.worldGeomNormal;
+    if (dot(geomNormal, WorldRayDirection()) > 0.0f)
+        geomNormal = -geomNormal;
 
+    RTInstanceData data = g_InstanceData[instanceID];
+
+    float3 T = SafeNormalize(surface.worldTangent - geomNormal * dot(surface.worldTangent, geomNormal));
+    float3 B = SafeNormalize(cross(geomNormal, T)) * surface.tangentSign;
+    
+    float3 tangentNormal = SampleNormalTex(data.materialId, surface.uv);
+    float3 worldNormal = SafeNormalize(T * tangentNormal.x + B * tangentNormal.y + geomNormal * tangentNormal.z);
+    
     if (dot(worldNormal, WorldRayDirection()) > 0.0f)
         worldNormal = -worldNormal;
 
-    RTInstanceData data = g_InstanceData[instanceID];
-    float3 base = data.baseColorFactor.rgb;
-    float roughness = saturate(data.roughness);
-    float metallic = saturate(data.metallic);
+    float4 baseTex = SampleBaseColorTex(data.materialId, surface.uv);
+    float3 ormTex = SampleOrmTex(data.materialId, surface.uv);
+
+    float3 base = data.baseColorFactor.rgb * baseTex.rgb;
+    float roughness = saturate(data.roughness * ormTex.g);
+    float metallic = saturate(data.metallic * ormTex.b);
     
     roughness = max(0.045f, roughness);
-
+    
     float3 V = SafeNormalize(CameraPos - worldPos);
     float3 L = SafeNormalize(-LightDir);
     
@@ -239,10 +372,10 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     shadowPayload.isShadow = 1;
     shadowPayload.occluded = 0;
 
-    float shadowBias = max(0.001f, 0.01f * (1.0f - saturate(dot(worldNormal, L))));
+    float shadowBias = max(0.001f, 0.01f * (1.0f - saturate(dot(geomNormal, L))));
 
     RayDesc shadowRay;
-    shadowRay.Origin = worldPos + worldNormal * shadowBias;
+    shadowRay.Origin = worldPos + geomNormal * shadowBias;
     shadowRay.Direction = L;
     shadowRay.TMin = 0.0f;
     shadowRay.TMax = 1e38f;
@@ -302,7 +435,21 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         payload.hit = 1;
         return;
     }
+    
+    if (DebugView == 7)
+    {
+        payload.color = base;
+        payload.hit = 1;
+        return;
+    }
 
+    if (DebugView == 8)
+    {
+        payload.color = float3(frac(surface.uv), 0.0f);
+        payload.hit = 1;
+        return;
+    }
+    
     // use the same GGX direct-lighting helper as forward/deferred.
     PbrInputs p;
     p.N = worldNormal;
