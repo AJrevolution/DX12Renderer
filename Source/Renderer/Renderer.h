@@ -116,6 +116,10 @@ private:
 
     uint32_t GetRtMaterialId(const Material* material) const;
 
+    void CreateRtAccum(ID3D12Device* device, uint32_t width, uint32_t height);
+    void ResetRtAccumulation();
+    D3D12_CPU_DESCRIPTOR_HANDLE RtUavCpuAt(uint32_t slot) const;
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -127,6 +131,12 @@ private:
     float m_camPitch = -0.25f;
     float m_camRadius = 4.0f;
     bool  m_autoOrbit = true;
+
+    bool m_pauseAnimation = false;
+
+    bool m_rtAccumulate = true;          // validation / progressive mode
+    uint32_t m_rtSamplesPerFrame = 1;    // 1..N
+    uint32_t m_rtMaxSamples = 256;       // hard cap
 
     DescriptorAllocator::Allocation m_deferredInputTable; // space1 for deferred lighting only
     bool m_deferredInputTableReady = false;
@@ -221,11 +231,30 @@ private:
 
     // RT output
     ComPtr<ID3D12Resource> m_rtOutput;
+    // Contiguous UAV table:
+    // u0 = m_rtOutput
+    // u1 = m_rtAccum
     DescriptorAllocator::Allocation m_rtOutputUav{};
     uint32_t m_rtOutputWidth = 0;
     uint32_t m_rtOutputHeight = 0;
+    // Progressive accumulation target
+    ComPtr<ID3D12Resource> m_rtAccum;
+    bool m_rtAccumReady = false;
     uint32_t m_rtMaterialCount = 4;
     bool m_rtOutputReady = false;
+    uint32_t m_rtSampleIndex = 0;
+    uint32_t m_rtDispatchSampleIndex = 0;
+    uint32_t m_rtResetId = 0;
+    bool m_rtAccumulateThisFrame = false;
+    bool m_rtAccumulatingLastFrame = false;
+
+    bool m_rtHistoryValid = false;
+    uint32_t m_prevRtDebugView = 0;
+    float m_prevRtCamYaw = 0.0f;
+    float m_prevRtCamPitch = 0.0f;
+    float m_prevRtCamRadius = 0.0f;
+    std::vector<DirectX::XMFLOAT4X4> m_prevRtWorlds;
+    std::vector<const Material*> m_prevRtMaterials;
 
     uint32_t m_widthCached = 1;
     uint32_t m_heightCached = 1;

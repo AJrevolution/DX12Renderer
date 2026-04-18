@@ -28,7 +28,7 @@ void RaytracingPipeline::Initialize(ID3D12Device5* device, const std::filesystem
 void RaytracingPipeline::BuildRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE uavTable;
-    uavTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 output texture
+    uavTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 0); // u0 output, u1 accumulation
 
     CD3DX12_DESCRIPTOR_RANGE srvTable;
     srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kRtSrvTableCount, 1, 0); // t1..t5 + t6.. material textures

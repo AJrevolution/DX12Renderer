@@ -20,7 +20,10 @@ cbuffer PerFrameConstants : register(b0)
     
     float2 ShadowInvSize;
     uint DebugView;
-    uint _padShadow;
+    uint RtSampleIndex;
+    uint RtResetId;
+    uint RtAccumulate;
+    uint2 _padShadow;
 };
 
 cbuffer PerDrawConstants : register(b1)

@@ -46,7 +46,10 @@ cbuffer PerFrameConstants : register(b0)
 
     float2 ShadowInvSize;
     uint DebugView;
-    uint _padShadow;
+    uint RtSampleIndex;
+    uint RtResetId;
+    uint RtAccumulate;
+    uint2 _padShadow;
 };
 
 struct RayPayload
@@ -68,6 +71,7 @@ struct SurfaceBasisRT
 
 RaytracingAccelerationStructure     g_Scene : register(t0);
 RWTexture2D<float4>                 g_Output : register(u0);
+RWTexture2D<float4>                 g_Accum : register(u1);
 StructuredBuffer<VertexRT>          g_QuadVerts : register(t1);
 ByteAddressBuffer                   g_QuadIndices : register(t2);
 StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);
@@ -238,6 +242,37 @@ float3 SampleOrmTex(uint materialId, float2 uv)
     return SampleRtTexture(materialId, 2, uv).rgb;
 }
 
+uint HashUint(uint x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+
+float NextRandom01(inout uint state)
+{
+    state = 1664525u * state + 1013904223u;
+    return (state & 0x00FFFFFFu) / 16777216.0f;
+}
+
+float2 PixelJitter(uint2 pixel, uint sampleIndex, uint resetId)
+{
+    uint seed =
+        pixel.x * 1973u ^
+        pixel.y * 9277u ^
+        sampleIndex * 26699u ^
+        resetId * 31847u;
+
+    seed = HashUint(seed);
+
+    return float2(
+        NextRandom01(seed),
+        NextRandom01(seed)) - 0.5f;
+}
+
 float3 ShadeMaterial(
     float3 base,
     float metallic,
@@ -283,7 +318,13 @@ void RayGen()
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 dim = DispatchRaysDimensions().xy;
 
-    float2 uv = (float2(pixel) + 0.5) / float2(dim);
+    float2 jitter = 0.0f.xx;
+    if (RtAccumulate != 0 && DebugView == 0)
+    {
+        jitter = PixelJitter(pixel, RtSampleIndex, RtResetId);
+    }
+    
+    float2 uv = (float2(pixel) + 0.5 + jitter) / float2(dim);
     float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
 
     float4 nearP = mul(float4(ndc, 0.0, 1.0), InvViewProj);
@@ -304,8 +345,23 @@ void RayGen()
     payload.occluded = 0;
 
     TraceRay(g_Scene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 1, 0, ray, payload);
+    
+    float3 sampleColor = payload.color;
 
-    g_Output[pixel] = float4(LinearToSRGB(payload.color), 1.0f);
+    // Debug views and non-accumulating mode bypass the running average.
+    if (DebugView != 0 || RtAccumulate == 0)
+    {
+        g_Accum[pixel] = float4(sampleColor, 1.0f);
+        g_Output[pixel] = float4(LinearToSRGB(sampleColor), 1.0f);
+        return;
+    }
+
+    float sampleIndex = (float) RtSampleIndex;
+    float3 oldAccum = (RtSampleIndex == 0) ? 0.0f.xxx : g_Accum[pixel].rgb;
+    float3 avg = (oldAccum * sampleIndex + sampleColor) / (sampleIndex + 1.0f);
+
+    g_Accum[pixel] = float4(avg, 1.0f);
+    g_Output[pixel] = float4(LinearToSRGB(avg), 1.0f);
 }
 
 [shader("miss")]

@@ -4,8 +4,26 @@
 #include "ThirdParty\DirectX-Headers\include\directx\d3dx12.h"
 #include "DrawConstants.h"
 #include "Source/RHI/Resources/NullSrvHelpers.h"
-#include <cstring>
 
+#include <cstring>
+#include <cmath>
+
+namespace
+{
+    bool MatrixNear(const DirectX::XMFLOAT4X4& a, const DirectX::XMFLOAT4X4& b, float eps = 1e-4f)
+    {
+        const float* pa = reinterpret_cast<const float*>(&a);
+        const float* pb = reinterpret_cast<const float*>(&b);
+
+        for (int i = 0; i < 16; ++i)
+        {
+            if (std::fabs(pa[i] - pb[i]) > eps)
+                return false;
+        }
+
+        return true;
+    }
+}
 
 void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
 {
@@ -86,9 +104,67 @@ void Renderer::RenderFrame(
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
     cmdList->SetDescriptorHeaps(1, heaps);
 
-    // Per-frame CB (b0)
-    const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb = UpdateGlobalConstants(frameIndex, width, height, time);
-    BuildDrawList(time);
+    const float sceneTime = m_pauseAnimation ? 0.0f : time;
+    BuildDrawList(sceneTime);
+
+    const bool allowRtAccumulation =
+        m_rtAccumulate &&
+        (m_debugView == 0) &&
+        !m_autoOrbit &&
+        m_pauseAnimation;
+
+    bool drawListChanged = !m_rtHistoryValid || (m_draws.size() != m_prevRtWorlds.size());
+
+    if (!drawListChanged)
+    {
+        for (size_t i = 0; i < m_draws.size(); ++i)
+        {
+            if (m_prevRtMaterials[i] != m_draws[i].material ||
+                !MatrixNear(m_prevRtWorlds[i], m_draws[i].world))
+            {
+                drawListChanged = true;
+                break;
+            }
+        }
+    }
+
+    const bool cameraChanged =
+        !m_rtHistoryValid ||
+        (std::fabs(m_camYaw - m_prevRtCamYaw) > 1e-6f) ||
+        (std::fabs(m_camPitch - m_prevRtCamPitch) > 1e-6f) ||
+        (std::fabs(m_camRadius - m_prevRtCamRadius) > 1e-6f);
+
+    const bool debugViewChanged =
+        !m_rtHistoryValid ||
+        (m_debugView != m_prevRtDebugView);
+
+    const bool accumulationModeChanged =
+        (allowRtAccumulation != m_rtAccumulatingLastFrame);
+
+    if (cameraChanged || drawListChanged || debugViewChanged || accumulationModeChanged)
+    {
+        ResetRtAccumulation();
+    }
+
+    m_rtAccumulateThisFrame = allowRtAccumulation;
+
+    m_prevRtCamYaw = m_camYaw;
+    m_prevRtCamPitch = m_camPitch;
+    m_prevRtCamRadius = m_camRadius;
+    m_prevRtDebugView = m_debugView;
+    m_rtAccumulatingLastFrame = allowRtAccumulation;
+
+    m_prevRtWorlds.resize(m_draws.size());
+    m_prevRtMaterials.resize(m_draws.size());
+
+    for (size_t i = 0; i < m_draws.size(); ++i)
+    {
+        m_prevRtWorlds[i] = m_draws[i].world;
+        m_prevRtMaterials[i] = m_draws[i].material;
+    }
+
+    m_rtHistoryValid = true;
+
     bool renderedWithDxr = false;
     const bool canRunDxr =
         m_useRaytracing &&
@@ -103,44 +179,107 @@ void Renderer::RenderFrame(
         EnsureRtInstanceData(frameIndex);
         UpdateRtGeometryTable(frameIndex);
 
-        auto cmd4 = GetCommandList4(cl);
-
-        BuildTlasForDrawList(frameIndex, cmd4.Get());
-
-        ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
-        cmd4->SetDescriptorHeaps(1, heaps);
-        if (m_rtOutputReady && m_rtFrames[frameIndex].tlas.GpuAddress() != 0)
+        const bool canReuseAccumulatedOutput =
+            m_rtAccumulateThisFrame &&
+            m_rtOutputReady &&
+            m_rtAccumReady &&
+            (m_rtSampleIndex >= m_rtMaxSamples);
+        if (!canReuseAccumulatedOutput)
         {
-            cmd4->SetPipelineState1(m_rtPipeline.StateObject());
-            cmd4->SetComputeRootSignature(m_rtPipeline.GlobalRootSignature());
-            cmd4->SetComputeRootDescriptorTable(0, m_rtOutputUav.gpu);
-            cmd4->SetComputeRootShaderResourceView(1, m_rtFrames[frameIndex].tlas.GpuAddress());
-            cmd4->SetComputeRootConstantBufferView(2, perFrameCb);
-            cmd4->SetComputeRootDescriptorTable(3, m_rtFrames[frameIndex].geometryTable.gpu);
+            auto cmd4 = GetCommandList4(cl);
 
-            auto tableBase = m_rtPipeline.ShaderTable()->GetGPUVirtualAddress();
+            BuildTlasForDrawList(frameIndex, cmd4.Get());
 
-            D3D12_DISPATCH_RAYS_DESC rays{};
-            rays.RayGenerationShaderRecord.StartAddress = tableBase + m_rtPipeline.RayGenOffset();
-            rays.RayGenerationShaderRecord.SizeInBytes = m_rtPipeline.RayGenRecordSize();
+            ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
+            cmd4->SetDescriptorHeaps(1, heaps);
+            if (m_rtOutputReady && m_rtFrames[frameIndex].tlas.GpuAddress() != 0)
+            {
+                cmd4->SetPipelineState1(m_rtPipeline.StateObject());
+                cmd4->SetComputeRootSignature(m_rtPipeline.GlobalRootSignature());
+                cmd4->SetComputeRootDescriptorTable(0, m_rtOutputUav.gpu);
+                cmd4->SetComputeRootShaderResourceView(1, m_rtFrames[frameIndex].tlas.GpuAddress());
+                cmd4->SetComputeRootDescriptorTable(3, m_rtFrames[frameIndex].geometryTable.gpu);
 
-            rays.MissShaderTable.StartAddress = tableBase + m_rtPipeline.MissOffset();
-            rays.MissShaderTable.SizeInBytes = m_rtPipeline.MissRecordSize();
-            rays.MissShaderTable.StrideInBytes = m_rtPipeline.MissRecordSize();
+                auto tableBase = m_rtPipeline.ShaderTable()->GetGPUVirtualAddress();
 
-            rays.HitGroupTable.StartAddress = tableBase + m_rtPipeline.HitGroupOffset();
-            rays.HitGroupTable.SizeInBytes = m_rtPipeline.HitGroupRecordSize();
-            rays.HitGroupTable.StrideInBytes = m_rtPipeline.HitGroupRecordSize();
+                D3D12_DISPATCH_RAYS_DESC rays{};
+                rays.RayGenerationShaderRecord.StartAddress = tableBase + m_rtPipeline.RayGenOffset();
+                rays.RayGenerationShaderRecord.SizeInBytes = m_rtPipeline.RayGenRecordSize();
 
-            rays.Width = width;
-            rays.Height = height;
-            rays.Depth = 1;
+                rays.MissShaderTable.StartAddress = tableBase + m_rtPipeline.MissOffset();
+                rays.MissShaderTable.SizeInBytes = m_rtPipeline.MissRecordSize();
+                rays.MissShaderTable.StrideInBytes = m_rtPipeline.MissRecordSize();
+
+                rays.HitGroupTable.StartAddress = tableBase + m_rtPipeline.HitGroupOffset();
+                rays.HitGroupTable.SizeInBytes = m_rtPipeline.HitGroupRecordSize();
+                rays.HitGroupTable.StrideInBytes = m_rtPipeline.HitGroupRecordSize();
+
+                rays.Width = width;
+                rays.Height = height;
+                rays.Depth = 1;
+
+                uint32_t dispatchCount = 1;
+                if (m_rtAccumulateThisFrame)
+                {
+                    const uint32_t safeSamplesPerFrame =
+                        (m_rtSamplesPerFrame < 1u) ? 1u :
+                        (m_rtSamplesPerFrame > 8u) ? 8u :
+                        m_rtSamplesPerFrame;
+
+                    const uint32_t remaining = (m_rtSampleIndex < m_rtMaxSamples)
+                        ? (m_rtMaxSamples - m_rtSampleIndex)
+                        : 0u;
+
+                    dispatchCount = std::min(safeSamplesPerFrame, remaining);
+                    if (dispatchCount == 0)
+                        dispatchCount = 1;
+
+                    if (m_rtSampleIndex > 0)
+                    {
+                        D3D12_RESOURCE_BARRIER b{};
+                        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                        b.UAV.pResource = m_rtAccum.Get();
+                        cmd4->ResourceBarrier(1, &b);
+                    }
+                }
 
 
-            cmd4->DispatchRays(&rays);
+                for (uint32_t i = 0; i < dispatchCount; ++i)
+                {
+                    m_rtDispatchSampleIndex = m_rtAccumulateThisFrame ? (m_rtSampleIndex + i) : 0u;
 
+                    const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb =
+                        UpdateGlobalConstants(frameIndex, width, height, sceneTime);
 
-            // Copy RT output into backbuffer
+                    cmd4->SetComputeRootConstantBufferView(2, perFrameCb);
+                    cmd4->DispatchRays(&rays);
+
+                    if (i + 1 < dispatchCount)
+                    {
+                        D3D12_RESOURCE_BARRIER barriers[2]{};
+
+                        barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                        barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                        barriers[0].UAV.pResource = m_rtAccum.Get();
+
+                        barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                        barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                        barriers[1].UAV.pResource = m_rtOutput.Get();
+
+                        cmd4->ResourceBarrier(2, barriers);
+                    }
+                }
+
+                if (m_rtAccumulateThisFrame)
+                    m_rtSampleIndex = std::min(m_rtSampleIndex + dispatchCount, m_rtMaxSamples);
+                else
+                    m_rtSampleIndex = 0;
+            }
+        }
+
+        if (m_rtOutputReady)
+        {
             cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
             cl.Transition(backbufferResource, D3D12_RESOURCE_STATE_COPY_DEST);
             cl.FlushBarriers();
@@ -149,13 +288,18 @@ void Renderer::RenderFrame(
 
             cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.FlushBarriers();
+
             renderedWithDxr = true;
         }
         CmdEndEvent(cmdList); //DXR
     }
-
     if (!renderedWithDxr)
     {
+        m_rtDispatchSampleIndex = 0;
+        m_rtAccumulateThisFrame = false;
+
+        const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb =
+            UpdateGlobalConstants(frameIndex, width, height, sceneTime);
         if (m_enableShadows && m_shadowReady)
         {
             CmdBeginEvent(cmdList, "ShadowPass");
@@ -228,7 +372,6 @@ void Renderer::RenderFrame(
             // LIGHTING PASS PREP 
             // Remap the Scene Table 
             CmdBeginEvent(cmdList, "UpdateDeferredInputTable");
-            //UpdateSceneTableForDeferred(device);
             UpdateDeferredInputTable(device);
             CmdEndEvent(cmdList);
 
@@ -320,14 +463,16 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     device->CreateDepthStencilView(m_depth.Get(), &dsv, m_depthDsv);
 
     m_depthReady = true;
+    
+    m_rtAccumReady = false;
 
     CreateOrResizeGBuffers(device, width, height);
    
     if (m_dxrAvailable && m_device5)
     {
-        //m_rtPipeline.Initialize(m_device5.Get(), Paths::ShaderDir());
-        //CreateRtGeometryTable(device);
-        CreateRtOutput(device, width, height); 
+        CreateRtOutput(m_device5.Get(), width, height);
+        CreateRtAccum(m_device5.Get(), width, height);
+        ResetRtAccumulation();
     }
 }
 
@@ -417,7 +562,11 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     };
 
     cb->debugView = m_debugView;
-    cb->padShadow = 0;
+    cb->rtSampleIndex = m_rtDispatchSampleIndex;
+    cb->rtResetId = m_rtResetId;
+    cb->rtAccumulate = m_rtAccumulateThisFrame ? 1u : 0u;
+    cb->padShadow[0] = 0;
+    cb->padShadow[1] = 0;
 
     return alloc.gpu;
 }
@@ -1062,12 +1211,18 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         return;
 
     const bool sizeMismatch =
+        !m_rtOutput ||
+        !m_rtAccum ||
+        !m_rtOutputReady ||
+        !m_rtAccumReady ||
         (m_rtOutputWidth != width) ||
         (m_rtOutputHeight != height);
 
-    if (!m_rtOutput || !m_rtOutputReady || sizeMismatch)
+    if (sizeMismatch)
     {
         CreateRtOutput(m_device5.Get(), width, height);
+        CreateRtAccum(m_device5.Get(), width, height);
+        ResetRtAccumulation();
     }
 }
 
@@ -1101,13 +1256,14 @@ void Renderer::CreateRtOutput(ID3D12Device* device, uint32_t width, uint32_t hei
     CommandList::SetGlobalState(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     if (!m_rtOutputUav.IsValid())
-        m_rtOutputUav = m_srvHeap.Allocate(1);
+        m_rtOutputUav = m_srvHeap.Allocate(2);
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
     uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 
-    device->CreateUnorderedAccessView(m_rtOutput.Get(), nullptr, &uav, m_rtOutputUav.cpu);
+    device->CreateUnorderedAccessView(m_rtOutput.Get(), nullptr, &uav, RtUavCpuAt(0));
+
     m_rtOutputWidth = width;
     m_rtOutputHeight = height;
 
@@ -1413,4 +1569,57 @@ void Renderer::CreateRtFallbackTextures(
             false,
             L"RT Fallback ORM");
     }
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE Renderer::RtUavCpuAt(uint32_t slot) const
+{
+    D3D12_CPU_DESCRIPTOR_HANDLE h = m_rtOutputUav.cpu;
+    h.ptr += SIZE_T(slot) * SIZE_T(m_srvHeap.DescriptorSize());
+    return h;
+}
+
+void Renderer::ResetRtAccumulation()
+{
+    m_rtSampleIndex = 0;
+    ++m_rtResetId;
+}
+
+void Renderer::CreateRtAccum(ID3D12Device* device, uint32_t width, uint32_t height)
+{
+    m_rtAccumReady = false;
+    m_rtAccum.Reset();
+
+    if (!m_rtOutputUav.IsValid())
+        m_rtOutputUav = m_srvHeap.Allocate(2);
+
+    CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+    auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+        width,
+        height,
+        1,
+        1,
+        1,
+        0,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+    ThrowIfFailed(
+        device->CreateCommittedResource(
+            &heap,
+            D3D12_HEAP_FLAG_NONE,
+            &desc,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            nullptr,
+            IID_PPV_ARGS(&m_rtAccum)),
+        "Create RT accumulation");
+
+    SetD3D12ObjectName(m_rtAccum.Get(), L"RT Accum");
+    CommandList::SetGlobalState(m_rtAccum.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+    uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+    device->CreateUnorderedAccessView(m_rtAccum.Get(), nullptr, &uav, RtUavCpuAt(1));
+    m_rtAccumReady = true;
 }
