@@ -213,6 +213,9 @@ private:
 	bool m_useRaytracing = false; // Toggle for raytracing vs rasterization (for testing/debugging)
     bool m_dxrAvailable = false;
 
+    float m_frozenTime = 0.0f;
+    bool  m_wasPaused = false;
+
     ComPtr<ID3D12Device5> m_device5;
 
     AccelerationStructure m_blasQuad;

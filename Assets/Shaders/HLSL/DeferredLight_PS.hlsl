@@ -43,6 +43,7 @@ cbuffer PerFrameConstants : register(b0)
     uint DebugView;
     uint RtSampleIndex;
     uint RtResetId;
+    uint RtAccumulate;
     uint RtEnableIndirect;
     float RtIndirectScale;
 };

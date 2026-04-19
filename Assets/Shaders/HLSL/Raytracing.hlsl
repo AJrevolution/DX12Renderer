@@ -581,6 +581,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         payload.color = float3(frac(surface.uv), 0.0f);
         return;
     }
+
     
     float3 direct = EvalDirectAtSurface(
         base,
@@ -593,7 +594,11 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
     float3 indirect = 0.0f.xxx;
 
-    if (RtAccumulate != 0 && RtEnableIndirect != 0)
+    bool allowIndirect =
+    (RtEnableIndirect != 0) &&
+    ((RtAccumulate != 0 && DebugView == 0) || DebugView == 9);
+
+    if (allowIndirect)
     {
         float3 bounceT, bounceB;
         BuildOnb(worldNormal, bounceT, bounceB);
@@ -634,6 +639,13 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         payload.rng = bounce.rng;
     }
 
+            
+    if (DebugView == 9)
+    {
+        payload.color = RtIndirectScale * indirect;
+        return;
+    }
+    
     float3 ambient = base * 0.03f;
 
     payload.color = ambient + direct + (RtIndirectScale * indirect);

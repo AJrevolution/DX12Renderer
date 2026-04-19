@@ -104,7 +104,14 @@ void Renderer::RenderFrame(
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
     cmdList->SetDescriptorHeaps(1, heaps);
 
-    const float sceneTime = m_pauseAnimation ? 0.0f : time;
+    if (m_pauseAnimation && !m_wasPaused)
+    {
+        m_frozenTime = time;
+    }
+
+    const float sceneTime = m_pauseAnimation ? m_frozenTime : time;
+    m_wasPaused = m_pauseAnimation;
+
     BuildDrawList(sceneTime);
 
     const bool allowRtAccumulation =
