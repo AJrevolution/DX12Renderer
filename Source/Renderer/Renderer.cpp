@@ -141,7 +141,12 @@ void Renderer::RenderFrame(
     const bool accumulationModeChanged =
         (allowRtAccumulation != m_rtAccumulatingLastFrame);
 
-    if (cameraChanged || drawListChanged || debugViewChanged || accumulationModeChanged)
+    const bool integratorChanged =
+        !m_rtHistoryValid ||
+        (m_rtEnableIndirect != m_prevRtEnableIndirect) ||
+        (std::fabs(m_rtIndirectScale - m_prevRtIndirectScale) > 1e-6f);
+
+    if (cameraChanged || drawListChanged || debugViewChanged || accumulationModeChanged || integratorChanged)
     {
         ResetRtAccumulation();
     }
@@ -162,6 +167,8 @@ void Renderer::RenderFrame(
         m_prevRtWorlds[i] = m_draws[i].world;
         m_prevRtMaterials[i] = m_draws[i].material;
     }
+    m_prevRtEnableIndirect = m_rtEnableIndirect;
+    m_prevRtIndirectScale = m_rtIndirectScale;
 
     m_rtHistoryValid = true;
 
@@ -565,8 +572,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     cb->rtSampleIndex = m_rtDispatchSampleIndex;
     cb->rtResetId = m_rtResetId;
     cb->rtAccumulate = m_rtAccumulateThisFrame ? 1u : 0u;
-    cb->padShadow[0] = 0;
-    cb->padShadow[1] = 0;
+    cb->rtEnableIndirect = m_rtEnableIndirect ? 1u : 0u;
+    cb->rtIndirectScale = m_rtIndirectScale;
 
     return alloc.gpu;
 }

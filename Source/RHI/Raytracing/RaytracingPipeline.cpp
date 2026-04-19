@@ -92,7 +92,7 @@ void RaytracingPipeline::BuildStateObject(ID3D12Device5* device, const std::file
     hitGroup.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
 
     D3D12_RAYTRACING_SHADER_CONFIG shaderConfig{};
-    shaderConfig.MaxPayloadSizeInBytes = 24;
+    shaderConfig.MaxPayloadSizeInBytes = 24; // float3 color + uint rayType + uint occluded + uint rng
     shaderConfig.MaxAttributeSizeInBytes = 8;
 
     D3D12_GLOBAL_ROOT_SIGNATURE grs{};

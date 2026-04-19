@@ -25,7 +25,7 @@ struct PerFrameConstants
     uint32_t rtSampleIndex = 0;
     uint32_t rtResetId = 0;
     uint32_t rtAccumulate = 0;
-
-    uint32_t padShadow[2] = {};
+    uint32_t rtEnableIndirect = 1;
+    float    rtIndirectScale = 1.0f;
 };
 static_assert((sizeof(PerFrameConstants) % 16) == 0); 

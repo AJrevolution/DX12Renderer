@@ -42,7 +42,8 @@ cbuffer PerFrameConstants : register(b0)
     uint RtSampleIndex;
     uint RtResetId;
     uint RtAccumulate;
-    uint2 _padShadow;
+    uint RtEnableIndirect;
+    float RtIndirectScale;
 };
 
 cbuffer PerDrawConstants : register(b1)

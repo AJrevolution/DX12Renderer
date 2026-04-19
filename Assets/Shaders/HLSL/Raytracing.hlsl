@@ -49,15 +49,16 @@ cbuffer PerFrameConstants : register(b0)
     uint RtSampleIndex;
     uint RtResetId;
     uint RtAccumulate;
-    uint2 _padShadow;
+    uint RtEnableIndirect;
+    float RtIndirectScale;
 };
 
 struct RayPayload
 {
-    float3 color;
-    uint hit;
-    uint isShadow;
+    float3 color; // returned radiance
+    uint rayType; // 0 = primary, 1 = shadow, 2 = indirect
     uint occluded;
+    uint rng;
 };
 
 struct SurfaceBasisRT
@@ -273,6 +274,48 @@ float2 PixelJitter(uint2 pixel, uint sampleIndex, uint resetId)
         NextRandom01(seed)) - 0.5f;
 }
 
+static const float kPi = 3.14159265f;
+
+uint InitRng(uint2 pixel, uint sampleIndex, uint resetId)
+{
+    uint seed =
+        pixel.x * 1973u ^
+        pixel.y * 9277u ^
+        sampleIndex * 26699u ^
+        resetId * 31847u ^
+        0x68bc21ebu;
+
+    return HashUint(seed);
+}
+
+uint Lcg(inout uint s)
+{
+    s = 1664525u * s + 1013904223u;
+    return s;
+}
+
+float Rand01(inout uint s)
+{
+    return (Lcg(s) & 0x00FFFFFFu) / 16777216.0f;
+}
+
+float3 SampleCosineHemisphere(float2 u)
+{
+    float r = sqrt(u.x);
+    float phi = 2.0f * kPi * u.y;
+    float x = r * cos(phi);
+    float y = r * sin(phi);
+    float z = sqrt(max(0.0f, 1.0f - u.x));
+    return float3(x, y, z);
+}
+
+void BuildOnb(float3 n, out float3 t, out float3 b)
+{
+    float3 up = (abs(n.z) < 0.999f) ? float3(0.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f);
+    t = SafeNormalize(cross(up, n));
+    b = cross(n, t);
+}
+
 float3 ShadeMaterial(
     float3 base,
     float metallic,
@@ -312,16 +355,68 @@ float3 HashColor(uint id)
     return frac((p.xxy + p.yzz) * p.zyx);
 }
 
+float3 EvalDirectAtSurface(
+    float3 base,
+    float metallic,
+    float roughness,
+    float3 N,
+    float3 V,
+    float3 L,
+    float shadowVisibility)
+{
+    PbrInputs pbr;
+    pbr.N = N;
+    pbr.V = V;
+    pbr.L = L;
+    pbr.albedo = base;
+    pbr.metallic = metallic;
+    pbr.roughness = roughness;
+
+    return EvalDirectPBR(pbr, LightColor) * shadowVisibility;
+}
+
+float TraceShadowVisibility(float3 worldPos, float3 geomNormal, float3 L)
+{
+    RayPayload shadowPayload;
+    shadowPayload.color = 0.0f.xxx;
+    shadowPayload.rayType = 1;
+    shadowPayload.occluded = 0;
+    shadowPayload.rng = 0u;
+
+    float shadowBias = max(0.001f, 0.01f * (1.0f - saturate(dot(geomNormal, L))));
+
+    RayDesc shadowRay;
+    shadowRay.Origin = worldPos + geomNormal * shadowBias;
+    shadowRay.Direction = L;
+    shadowRay.TMin = 0.0f;
+    shadowRay.TMax = 1e38f;
+
+    TraceRay(
+        g_Scene,
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+        RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+        0xFF,
+        0,
+        1,
+        0,
+        shadowRay,
+        shadowPayload);
+
+    return (shadowPayload.occluded != 0) ? 0.0f : 1.0f;
+}
+
 [shader("raygeneration")]
 void RayGen()
 {
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 dim = DispatchRaysDimensions().xy;
+    
+    uint rng = InitRng(pixel, RtSampleIndex, RtResetId);
 
     float2 jitter = 0.0f.xx;
     if (RtAccumulate != 0 && DebugView == 0)
     {
-        jitter = PixelJitter(pixel, RtSampleIndex, RtResetId);
+        jitter = float2(Rand01(rng), Rand01(rng)) - 0.5f;
     }
     
     float2 uv = (float2(pixel) + 0.5 + jitter) / float2(dim);
@@ -340,9 +435,9 @@ void RayGen()
 
     RayPayload payload;
     payload.color = float3(0.02, 0.03, 0.05);
-    payload.hit = 0;
-    payload.isShadow = 0;
+    payload.rayType = 0;
     payload.occluded = 0;
+    payload.rng = rng;
 
     TraceRay(g_Scene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 1, 0, ray, payload);
     
@@ -367,20 +462,19 @@ void RayGen()
 [shader("miss")]
 void Miss(inout RayPayload payload)
 {
-    if (payload.isShadow == 1)
+    if (payload.rayType == 1)
     {
         payload.occluded = 0;
         return;
     }
     
     payload.color = EvalSky(WorldRayDirection());
-    payload.hit = 0;
 }
 
 [shader("closesthit")]
 void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
-    if (payload.isShadow == 1)
+    if (payload.rayType == 1)
     {
         payload.occluded = 1;
         return;
@@ -419,54 +513,41 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     
     roughness = max(0.045f, roughness);
     
-    float3 V = SafeNormalize(CameraPos - worldPos);
+    // Use outgoing direction for both primary and indirect hits.
+    float3 V = SafeNormalize(-WorldRayDirection());
     float3 L = SafeNormalize(-LightDir);
     
-    RayPayload shadowPayload;
-    shadowPayload.color = 0.0.xxx;
-    shadowPayload.hit = 0;
-    shadowPayload.isShadow = 1;
-    shadowPayload.occluded = 0;
+    if (payload.rayType == 2)
+    {
+        payload.color = EvalDirectAtSurface(
+            base,
+            metallic,
+            roughness,
+            worldNormal,
+            V,
+            L,
+            1.0f);
 
-    float shadowBias = max(0.001f, 0.01f * (1.0f - saturate(dot(geomNormal, L))));
-
-    RayDesc shadowRay;
-    shadowRay.Origin = worldPos + geomNormal * shadowBias;
-    shadowRay.Direction = L;
-    shadowRay.TMin = 0.0f;
-    shadowRay.TMax = 1e38f;
-
-    TraceRay(
-        g_Scene,
-         RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-        RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
-        0xFF,
-        0,
-        1,
-        0,
-        shadowRay,
-        shadowPayload);
-
-    float shadowVisibility = (shadowPayload.occluded != 0) ? 0.0f : 1.0f;
+        return;
+    }
+    
+    float shadowVisibility = TraceShadowVisibility(worldPos, geomNormal, L);
 
     if (DebugView == 1)
     {
         payload.color = worldNormal * 0.5f + 0.5f;
-        payload.hit = 1;
         return;
     }
 
     if (DebugView == 2)
     {
         payload.color = roughness.xxx;
-        payload.hit = 1;
         return;
     }
 
     if (DebugView == 3)
     {
         payload.color = metallic.xxx;
-        payload.hit = 1;
         return;
     }
     if (DebugView == 4)
@@ -474,51 +555,86 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         float4 clip = mul(float4(worldPos, 1.0f), ViewProj);
         float depth01 = saturate((clip.z / clip.w) * 0.5f + 0.5f);
         payload.color = depth01.xxx;
-        payload.hit = 1;
         return;
     }
 
     if (DebugView == 5)
     {
         payload.color = shadowVisibility.xxx;
-        payload.hit = 1;
         return;
     }
 
     if (DebugView == 6)
     {
         payload.color = HashColor(instanceID);
-        payload.hit = 1;
         return;
     }
     
     if (DebugView == 7)
     {
         payload.color = base;
-        payload.hit = 1;
         return;
     }
 
     if (DebugView == 8)
     {
         payload.color = float3(frac(surface.uv), 0.0f);
-        payload.hit = 1;
         return;
     }
     
-    // use the same GGX direct-lighting helper as forward/deferred.
-    PbrInputs p;
-    p.N = worldNormal;
-    p.V = V;
-    p.L = L;
-    p.albedo = base;
-    p.metallic = metallic;
-    p.roughness = roughness;
+    float3 direct = EvalDirectAtSurface(
+        base,
+        metallic,
+        roughness,
+        worldNormal,
+        V,
+        L,
+        shadowVisibility);
 
-    float3 direct = EvalDirectPBR(p, LightColor) * shadowVisibility;
+    float3 indirect = 0.0f.xxx;
+
+    if (RtAccumulate != 0 && RtEnableIndirect != 0)
+    {
+        float3 bounceT, bounceB;
+        BuildOnb(worldNormal, bounceT, bounceB);
+
+        float2 u = float2(Rand01(payload.rng), Rand01(payload.rng));
+        float3 localDir = SampleCosineHemisphere(u);
+        float3 wi = SafeNormalize(
+            bounceT * localDir.x +
+            bounceB * localDir.y +
+            worldNormal * localDir.z);
+
+        RayPayload bounce;
+        bounce.color = 0.0f.xxx;
+        bounce.rayType = 2;
+        bounce.occluded = 0;
+        bounce.rng = payload.rng;
+
+        RayDesc r;
+        r.Origin = worldPos + geomNormal * 0.001f;
+        r.Direction = wi;
+        r.TMin = 0.0f;
+        r.TMax = 1e38f;
+
+        TraceRay(
+            g_Scene,
+            RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+            0xFF,
+            0,
+            1,
+            0,
+            r,
+            bounce);
+
+        // Lambert diffuse transport under metallic workflow:
+        // use diffuse albedo, not raw base color.
+        float3 diffuseAlbedo = base * (1.0f - metallic);
+        indirect = bounce.color * diffuseAlbedo;
+        payload.rng = bounce.rng;
+    }
+
     float3 ambient = base * 0.03f;
-    float3 lit = ambient + direct;
 
-    payload.color = lit;
-    payload.hit = 1;
+    payload.color = ambient + direct + (RtIndirectScale * indirect);
 }

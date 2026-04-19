@@ -195,6 +195,12 @@ private:
     Texture m_rtFallbackFlatNormalTex;
     Texture m_rtFallbackOrmTex;
 
+    bool     m_rtEnableIndirect = true;  // 1-bounce diffuse GI
+    float    m_rtIndirectScale = 1.0f;   // tuning knob
+
+    bool  m_prevRtEnableIndirect = true;
+    float m_prevRtIndirectScale = 1.0f;
+
     Mesh m_floor;
     Material m_floorMaterial;
     
