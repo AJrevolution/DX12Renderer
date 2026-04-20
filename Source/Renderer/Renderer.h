@@ -130,11 +130,14 @@ private:
     float m_camYaw = 0.0f;
     float m_camPitch = -0.25f;
     float m_camRadius = 4.0f;
+    
+    //Toggles
+    uint32_t m_debugView = 0;
     bool  m_autoOrbit = true;
-
     bool m_pauseAnimation = false;
-
+    bool m_useRaytracing = false; // Toggle for raytracing vs rasterization (for testing/debugging)
     bool m_rtAccumulate = true;          // validation / progressive mode
+    
     uint32_t m_rtSamplesPerFrame = 1;    // 1..N
     uint32_t m_rtMaxSamples = 256;       // hard cap
 
@@ -208,9 +211,7 @@ private:
     DirectX::XMFLOAT3 m_sceneBoundsExtent = { 3.5f, 3.5f, 3.5f };
 
     bool m_enableShadows = true;
-    uint32_t m_debugView = 0;
 
-	bool m_useRaytracing = false; // Toggle for raytracing vs rasterization (for testing/debugging)
     bool m_dxrAvailable = false;
 
     float m_frozenTime = 0.0f;

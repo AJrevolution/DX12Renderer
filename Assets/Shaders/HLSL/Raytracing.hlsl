@@ -161,38 +161,6 @@ void LoadTriangleVertices(uint meshType, uint primitiveIndex, out VertexRT v0, o
     v2 = LoadVertex(meshType, i2);
 }
 
-float3 FetchWorldNormal(uint instanceID, uint primitiveIndex, float2 bary)
-{
-    RTInstanceData inst = g_InstanceData[instanceID];
-
-    uint i0, i1, i2;
-    float3 n0, n1, n2;
-
-    if (inst.meshType == 0)
-    {
-        i0 = LoadIndex16(g_FloorIndices, primitiveIndex * 3 + 0);
-        i1 = LoadIndex16(g_FloorIndices, primitiveIndex * 3 + 1);
-        i2 = LoadIndex16(g_FloorIndices, primitiveIndex * 3 + 2);
-
-        n0 = g_FloorVerts[i0].nrm;
-        n1 = g_FloorVerts[i1].nrm;
-        n2 = g_FloorVerts[i2].nrm;
-    }
-    else
-    {
-        i0 = LoadIndex16(g_QuadIndices, primitiveIndex * 3 + 0);
-        i1 = LoadIndex16(g_QuadIndices, primitiveIndex * 3 + 1);
-        i2 = LoadIndex16(g_QuadIndices, primitiveIndex * 3 + 2);
-
-        n0 = g_QuadVerts[i0].nrm;
-        n1 = g_QuadVerts[i1].nrm;
-        n2 = g_QuadVerts[i2].nrm;
-    }
-
-    float3 n = normalize(BaryLerp(n0, n1, n2, bary));
-    return TransformNormal(n);
-}
-
 SurfaceBasisRT FetchSurfaceBasis(uint instanceID, uint primitiveIndex, float2 bary)
 {
     RTInstanceData inst = g_InstanceData[instanceID];
@@ -316,31 +284,28 @@ void BuildOnb(float3 n, out float3 t, out float3 b)
     b = cross(n, t);
 }
 
-float3 ShadeMaterial(
-    float3 base,
-    float metallic,
-    float roughness,
-    float3 worldPos,
-    float3 worldNormal,
-    float shadowVisibility)
+float Max3(float3 v)
 {
-    float3 L = normalize(-LightDir);
-    float ndotl = saturate(dot(worldNormal, L));
-
-    float3 ambient = base * 0.08f;
-    float3 diffuseColor = base * (1.0f - metallic);
-
-    float specPower = lerp(64.0f, 4.0f, roughness);
-    float3 V = normalize(CameraPos - worldPos);
-    float3 H = normalize(L + V);
-    float spec = pow(saturate(dot(worldNormal, H)), specPower);
-
-    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
-    float3 specular = F0 * spec;
-
-    float3 direct = (diffuseColor * ndotl + specular * ndotl) * LightColor * shadowVisibility;
-    return ambient + direct;
+    return max(v.x, max(v.y, v.z));
 }
+
+float3 SampleGGXHalfVector(float2 u, float alpha)
+{
+    // Matches the same alpha convention used by EvalDirectPBR:
+    // alpha = roughness^2, and D_GGX internally squares it again.
+    float a2 = alpha * alpha;
+    float phi = 2.0f * kPi * u.x;
+
+    float cosTheta = sqrt(saturate((1.0f - u.y) / (1.0f + (a2 - 1.0f) * u.y)));
+    float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
+
+    return float3(
+        sinTheta * cos(phi),
+        sinTheta * sin(phi),
+        cosTheta);
+}
+
+
 
 float3 EvalSky(float3 dir)
 {
@@ -592,23 +557,33 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         L,
         shadowVisibility);
 
-    float3 indirect = 0.0f.xxx;
+    float3 indirectDiffuse = 0.0f.xxx;
+    float3 indirectSpec = 0.0f.xxx;
+    float3 lobeVis = 0.0f.xxx;
 
     bool allowIndirect =
-    (RtEnableIndirect != 0) &&
-    ((RtAccumulate != 0 && DebugView == 0) || DebugView == 9);
+        (RtEnableIndirect != 0) &&
+        (
+            (RtAccumulate != 0 && DebugView == 0) ||
+            DebugView == 9 ||
+            DebugView == 10 ||
+            DebugView == 11
+        );
 
     if (allowIndirect)
     {
+        float3 diffuseAlbedo = base * (1.0f - metallic);
+        float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
+        float pSpec = clamp(Max3(F0), 0.05f, 0.95f);
+
+        float xi = Rand01(payload.rng);
+        bool chooseSpec = (xi < pSpec);
+
+        // DebugView 11: red = diffuse lobe, blue = specular lobe.
+        lobeVis = chooseSpec ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f);
+
         float3 bounceT, bounceB;
         BuildOnb(worldNormal, bounceT, bounceB);
-
-        float2 u = float2(Rand01(payload.rng), Rand01(payload.rng));
-        float3 localDir = SampleCosineHemisphere(u);
-        float3 wi = SafeNormalize(
-            bounceT * localDir.x +
-            bounceB * localDir.y +
-            worldNormal * localDir.z);
 
         RayPayload bounce;
         bounce.color = 0.0f.xxx;
@@ -618,31 +593,107 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
         RayDesc r;
         r.Origin = worldPos + geomNormal * 0.001f;
-        r.Direction = wi;
         r.TMin = 0.0f;
         r.TMax = 1e38f;
 
-        TraceRay(
-            g_Scene,
-            RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
-            0xFF,
-            0,
-            1,
-            0,
-            r,
-            bounce);
+        if (chooseSpec)
+        {
+            float alpha = max(roughness * roughness, 0.002f);
 
-        // Lambert diffuse transport under metallic workflow:
-        // use diffuse albedo, not raw base color.
-        float3 diffuseAlbedo = base * (1.0f - metallic);
-        indirect = bounce.color * diffuseAlbedo;
-        payload.rng = bounce.rng;
+            float2 u = float2(Rand01(payload.rng), Rand01(payload.rng));
+            float3 localH = SampleGGXHalfVector(u, alpha);
+            float3 H = SafeNormalize(
+                bounceT * localH.x +
+                bounceB * localH.y +
+                worldNormal * localH.z);
+
+            float3 wi = SafeNormalize(reflect(-V, H));
+
+            float NdotV = saturate(dot(worldNormal, V));
+            float NdotL = saturate(dot(worldNormal, wi));
+            float NdotH = saturate(dot(worldNormal, H));
+            float VdotH = saturate(dot(V, H));
+
+            if (NdotV > 1e-4f && NdotL > 1e-4f && NdotH > 1e-4f && VdotH > 1e-4f)
+            {
+                r.Direction = wi;
+
+                TraceRay(
+                    g_Scene,
+                    RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+                    0xFF,
+                    0,
+                    1,
+                    0,
+                    r,
+                    bounce);
+
+                float G = G_Smith(NdotV, NdotL, roughness);
+                float3 F = F_Schlick(VdotH, F0);
+
+                // Simplified GGX importance-sampling estimator.
+                float3 specWeight =
+                    (G * F * VdotH) / max(1e-4f, NdotV * NdotH);
+
+                // Firefly control.
+                specWeight = min(specWeight, float3(10.0f, 10.0f, 10.0f));
+                float3 bounceRadiance = min(bounce.color, float3(20.0f, 20.0f, 20.0f));
+
+                indirectSpec = bounceRadiance * specWeight / pSpec;
+                payload.rng = bounce.rng;
+            }
+        }
+        else
+        {
+            float2 u = float2(Rand01(payload.rng), Rand01(payload.rng));
+            float3 localDir = SampleCosineHemisphere(u);
+            float3 wi = SafeNormalize(
+                bounceT * localDir.x +
+                bounceB * localDir.y +
+                worldNormal * localDir.z);
+
+            float NdotL = saturate(dot(worldNormal, wi));
+            if (NdotL > 1e-4f)
+            {
+                r.Direction = wi;
+
+                TraceRay(
+                    g_Scene,
+                    RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+                    0xFF,
+                    0,
+                    1,
+                    0,
+                    r,
+                    bounce);
+
+                indirectDiffuse =
+                    bounce.color * diffuseAlbedo / max(1e-4f, 1.0f - pSpec);
+
+                payload.rng = bounce.rng;
+            }
+        }
     }
 
-            
+    float3 indirect = indirectDiffuse + indirectSpec;
+    
     if (DebugView == 9)
     {
         payload.color = RtIndirectScale * indirect;
+        return;
+    }
+    
+    if (DebugView == 10)
+    {
+        // Specular indirect only.
+        payload.color = RtIndirectScale * indirectSpec;
+        return;
+    }
+
+    if (DebugView == 11)
+    {
+        // Red = diffuse branch, Blue = specular branch.
+        payload.color = lobeVis;
         return;
     }
     
