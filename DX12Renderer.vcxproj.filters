@@ -126,6 +126,9 @@
     <ClInclude Include="Source\RHI\Pipeline\RTInstanceData.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\RtDenoisePass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -215,6 +218,9 @@
     <ClCompile Include="Source\RHI\Raytracing\RaytracingPipeline.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\RtDenoisePass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -236,5 +242,6 @@
     <CustomBuild Include="Assets\Shaders\HLSL\GBuffer_VS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\Shadow_VS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\Raytracing.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\RtDenoise_CS.hlsl" />
   </ItemGroup>
 </Project>

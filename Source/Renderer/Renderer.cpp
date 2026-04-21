@@ -292,6 +292,39 @@ void Renderer::RenderFrame(
             }
         }
 
+        if (m_rtDenoise && m_debugView == 0 
+            && m_rtAccumulateThisFrame 
+            && m_rtAovReady 
+            && m_rtDenoiseSrvTableReady)
+        {
+            CmdBeginEvent(cmdList, "RT Denoise");
+
+            cl.Transition(m_rtAccum.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.FlushBarriers();
+
+            UpdateRtDenoiseSrvTable(device);
+
+            m_rtDenoisePass.Dispatch(
+                cl,
+                m_rtDenoiseSrvTable.gpu,
+                m_rtOutputUav.gpu, // base of UAV table; u0 is rtOutput
+                width,
+                height,
+                m_rtDenoiseRadius,
+                m_rtDenoiseSigmaDepth,
+                m_rtDenoiseSigmaNormal);
+
+            cl.Transition(m_rtAccum.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.FlushBarriers();
+
+            CmdEndEvent(cmdList);
+        }
+
         if (m_rtOutputReady)
         {
             cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -461,6 +494,7 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_depthReady = false;
     m_gbufferReady = false;
     m_rtOutputReady = false;
+    m_rtDenoiseSrvTableReady = false;
 
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
@@ -480,12 +514,16 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     
     m_rtAccumReady = false;
 
+    m_rtAovReady = false;
+
     CreateOrResizeGBuffers(device, width, height);
    
     if (m_dxrAvailable && m_device5)
     {
         CreateRtOutput(m_device5.Get(), width, height);
         CreateRtAccum(m_device5.Get(), width, height);
+        CreateRtAovs(m_device5.Get(), width, height);
+        UpdateRtDenoiseSrvTable(m_device5.Get());
         ResetRtAccumulation();
     }
 }
@@ -640,8 +678,12 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         }
 
         m_rtPipeline.Initialize(m_device5.Get(), Paths::ShaderDir());
-        //CreateRtGeometryTable(device);
 		CreateRtOutput(device, m_widthCached, m_heightCached); //Cached variables changed in OnResize
+		CreateRtAccum(device, m_widthCached, m_heightCached);
+        CreateRtAovs(m_device5.Get(), m_widthCached, m_heightCached);
+        
+        m_rtDenoisePass.Initialize(device, Paths::ShaderDir());
+        UpdateRtDenoiseSrvTable(device);
     }
 
     // Load a real texture from disk 
@@ -1227,8 +1269,11 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
     const bool sizeMismatch =
         !m_rtOutput ||
         !m_rtAccum ||
+        !m_rtAovNormal ||
+        !m_rtAovDepth ||
         !m_rtOutputReady ||
         !m_rtAccumReady ||
+        !m_rtAovReady ||
         (m_rtOutputWidth != width) ||
         (m_rtOutputHeight != height);
 
@@ -1236,6 +1281,8 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
     {
         CreateRtOutput(m_device5.Get(), width, height);
         CreateRtAccum(m_device5.Get(), width, height);
+        CreateRtAovs(m_device5.Get(), width, height);
+        UpdateRtDenoiseSrvTable(m_device5.Get());
         ResetRtAccumulation();
     }
 }
@@ -1270,7 +1317,7 @@ void Renderer::CreateRtOutput(ID3D12Device* device, uint32_t width, uint32_t hei
     CommandList::SetGlobalState(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     if (!m_rtOutputUav.IsValid())
-        m_rtOutputUav = m_srvHeap.Allocate(2);
+		m_rtOutputUav = m_srvHeap.Allocate(4);
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
     uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -1604,7 +1651,7 @@ void Renderer::CreateRtAccum(ID3D12Device* device, uint32_t width, uint32_t heig
     m_rtAccum.Reset();
 
     if (!m_rtOutputUav.IsValid())
-        m_rtOutputUav = m_srvHeap.Allocate(2);
+        m_rtOutputUav = m_srvHeap.Allocate(4);
 
     CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
     auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
@@ -1636,4 +1683,133 @@ void Renderer::CreateRtAccum(ID3D12Device* device, uint32_t width, uint32_t heig
 
     device->CreateUnorderedAccessView(m_rtAccum.Get(), nullptr, &uav, RtUavCpuAt(1));
     m_rtAccumReady = true;
+}
+
+void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t height)
+{
+    m_rtAovReady = false;
+    m_rtAovNormal.Reset();
+    m_rtAovDepth.Reset();
+
+    if (!m_rtOutputUav.IsValid())
+        m_rtOutputUav = m_srvHeap.Allocate(4);
+
+    CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+
+    {
+        auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&m_rtAovNormal)),
+            "Create RT AOV normal");
+
+        SetD3D12ObjectName(m_rtAovNormal.Get(), L"RT AOV Normal");
+        CommandList::SetGlobalState(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        device->CreateUnorderedAccessView(m_rtAovNormal.Get(), nullptr, &uav, RtUavCpuAt(2));
+    }
+
+    {
+        auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R32_FLOAT,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&m_rtAovDepth)),
+            "Create RT AOV depth");
+
+        SetD3D12ObjectName(m_rtAovDepth.Get(), L"RT AOV Depth");
+        CommandList::SetGlobalState(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R32_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        device->CreateUnorderedAccessView(m_rtAovDepth.Get(), nullptr, &uav, RtUavCpuAt(3));
+    }
+
+    m_rtAovReady = true;
+}
+
+bool Renderer::UpdateRtDenoiseSrvTable(ID3D12Device* device)
+{
+    m_rtDenoiseSrvTableReady = false;
+    
+    if (!device ||
+        !m_rtAccum || !m_rtAovNormal || !m_rtAovDepth ||
+        !m_rtAccumReady || !m_rtAovReady)
+    {
+        return false;
+    }
+
+    if (!m_rtDenoiseSrvTable.IsValid())
+        m_rtDenoiseSrvTable = m_srvHeap.Allocate(3);
+
+    auto HandleAt = [&](uint32_t i)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_rtDenoiseSrvTable.cpu;
+        h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
+        return h;
+    };
+
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(m_rtAccum.Get(), &srv, HandleAt(0));
+    }
+
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(m_rtAovNormal.Get(), &srv, HandleAt(1));
+    }
+
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(m_rtAovDepth.Get(), &srv, HandleAt(2));
+    }
+
+    m_rtDenoiseSrvTableReady = true;
+    return true;
 }

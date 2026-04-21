@@ -19,6 +19,7 @@
 #include "Source/RHI/Raytracing/AccelerationStructure.h"
 #include "Source/RHI/Raytracing/RaytracingPipeline.h"
 #include "Source/RHI/Pipeline/RTInstanceData.h"
+#include "Source/Renderer/Passes/RtDenoisePass.h"
 
 class Renderer
 {
@@ -120,6 +121,9 @@ private:
     void ResetRtAccumulation();
     D3D12_CPU_DESCRIPTOR_HANDLE RtUavCpuAt(uint32_t slot) const;
 
+    void CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t height);
+    bool UpdateRtDenoiseSrvTable(ID3D12Device* device);
+    
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -278,4 +282,17 @@ private:
     static constexpr uint32_t kRtMaterialMatte = 2;
     static constexpr uint32_t kRtMaterialGlossy = 3;
 
+    ComPtr<ID3D12Resource> m_rtAovNormal;
+    ComPtr<ID3D12Resource> m_rtAovDepth;
+    bool m_rtAovReady = false;
+
+    DescriptorAllocator::Allocation m_rtDenoiseSrvTable{};
+    RtDenoisePass m_rtDenoisePass;
+
+    bool  m_rtDenoise = true;
+    int   m_rtDenoiseRadius = 2;
+    float m_rtDenoiseSigmaDepth = 0.02f;
+    float m_rtDenoiseSigmaNormal = 0.25f;
+
+    bool m_rtDenoiseSrvTableReady = false;
 };

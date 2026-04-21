@@ -73,6 +73,8 @@ struct SurfaceBasisRT
 RaytracingAccelerationStructure     g_Scene : register(t0);
 RWTexture2D<float4>                 g_Output : register(u0);
 RWTexture2D<float4>                 g_Accum : register(u1);
+RWTexture2D<float4>                 g_AovNormal : register(u2);
+RWTexture2D<float>                  g_AovDepth : register(u3);
 StructuredBuffer<VertexRT>          g_QuadVerts : register(t1);
 ByteAddressBuffer                   g_QuadIndices : register(t2);
 StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);
@@ -406,6 +408,22 @@ void RayGen()
 
     TraceRay(g_Scene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 1, 0, ray, payload);
     
+    if (DebugView == 12)
+    {
+        float3 n = g_AovNormal[pixel].xyz;
+        g_Accum[pixel] = float4(n, 1.0f);
+        g_Output[pixel] = float4(n, 1.0f);
+        return;
+    }
+    
+    if (DebugView == 13)
+    {
+        float d = g_AovDepth[pixel];
+        g_Accum[pixel] = float4(d.xxx, 1.0f);
+        g_Output[pixel] = float4(d.xxx, 1.0f);
+        return;
+    }
+    
     float3 sampleColor = payload.color;
 
     // Debug views and non-accumulating mode bypass the running average.
@@ -432,7 +450,14 @@ void Miss(inout RayPayload payload)
         payload.occluded = 0;
         return;
     }
-    
+    if (payload.rayType == 0)
+    {
+        uint2 pixel = DispatchRaysIndex().xy;
+        g_AovNormal[pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        g_AovDepth[pixel] = 1.0f;
+
+    }
+
     payload.color = EvalSky(WorldRayDirection());
 }
 
@@ -482,6 +507,16 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     float3 V = SafeNormalize(-WorldRayDirection());
     float3 L = SafeNormalize(-LightDir);
     
+    float4 clip = mul(float4(worldPos, 1.0f), ViewProj);
+    float depth01 = saturate(clip.z / clip.w);
+
+    if (payload.rayType == 0)
+    {
+        uint2 pixel = DispatchRaysIndex().xy;
+        g_AovNormal[pixel] = float4(worldNormal * 0.5f + 0.5f, 1.0f);
+        g_AovDepth[pixel] = depth01;
+    }
+    
     if (payload.rayType == 2)
     {
         payload.color = EvalDirectAtSurface(
@@ -517,8 +552,6 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     }
     if (DebugView == 4)
     {
-        float4 clip = mul(float4(worldPos, 1.0f), ViewProj);
-        float depth01 = saturate((clip.z / clip.w) * 0.5f + 0.5f);
         payload.color = depth01.xxx;
         return;
     }
@@ -697,6 +730,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         return;
     }
     
+
     float3 ambient = base * 0.03f;
 
     payload.color = ambient + direct + (RtIndirectScale * indirect);
