@@ -282,6 +282,17 @@ private:
     static constexpr uint32_t kRtMaterialMatte = 2;
     static constexpr uint32_t kRtMaterialGlossy = 3;
 
+    static constexpr uint32_t kRtIblSrvCount = 3;
+    static constexpr uint32_t kRtSrvTableCount =
+        kRtGeometrySrvCount + (kRtTexturesPerMaterial * kMaxRtMaterials) + kRtIblSrvCount;
+
+    static constexpr uint32_t kRtSrv_BrdfLut =
+        kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 0; // t30
+    static constexpr uint32_t kRtSrv_IblDiff =
+        kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 1; // t31
+    static constexpr uint32_t kRtSrv_IblSpec =
+        kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 2; // t32
+
     ComPtr<ID3D12Resource> m_rtAovNormal;
     ComPtr<ID3D12Resource> m_rtAovDepth;
     bool m_rtAovReady = false;

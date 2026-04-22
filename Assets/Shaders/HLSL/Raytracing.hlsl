@@ -83,7 +83,12 @@ StructuredBuffer<RTInstanceData>    g_InstanceData : register(t5);
 
 // t6.. = [base0, normal0, orm0, base1, normal1, orm1, ...]
 Texture2D<float4>                   g_RtMaterialTextures[RT_TEXTURE_COUNT] : register(t6);
-
+Texture2D<float4> g_BRDFLut : register(t30);
+Texture2D<float4> g_IBLDiffuse : register(t31);
+Texture2D<float4> g_IBLSpecular : register(t32);
+//t1..t5 geometry + instance
+//t6..t29 8 materials × 3 textures
+//t30..t32 IBLresources
 SamplerState                        g_LinearWrap : register(s0);
 SamplerState                        g_LinearClamp : register(s1);
 
@@ -372,6 +377,32 @@ float TraceShadowVisibility(float3 worldPos, float3 geomNormal, float3 L)
     return (shadowPayload.occluded != 0) ? 0.0f : 1.0f;
 }
 
+float2 DirToLatLongUV(float3 d)
+{
+    d = SafeNormalize(d);
+    float u = atan2(d.z, d.x) / (2.0f * kPi) + 0.5f;
+    float v = acos(saturate(d.y)) / kPi;
+    return float2(u, 1.0f - v);
+}
+
+float3 EvalIBLDiffuse(float3 N)
+{
+    float2 uv = DirToLatLongUV(N);
+    return g_IBLDiffuse.SampleLevel(g_LinearClamp, uv, 0.0f).rgb;
+}
+
+float3 EvalIBLSpecular(float3 R, float roughness, float NdotV, float3 F0)
+{
+    float2 uv = DirToLatLongUV(R);
+
+    // Simple bring-up mip choice.
+    float mip = roughness * 6.0f;
+    float3 prefiltered = g_IBLSpecular.SampleLevel(g_LinearClamp, uv, mip).rgb;
+
+    float2 brdf = g_BRDFLut.SampleLevel(g_LinearClamp, float2(NdotV, roughness), 0.0f).rg;
+    return prefiltered * (F0 * brdf.x + brdf.y);
+}
+
 [shader("raygeneration")]
 void RayGen()
 {
@@ -509,6 +540,20 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     
     float4 clip = mul(float4(worldPos, 1.0f), ViewProj);
     float depth01 = saturate(clip.z / clip.w);
+    
+    float3 diffuseAlbedo = base * (1.0f - metallic);
+    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
+    float NdotV = saturate(dot(worldNormal, V));
+    float3 R = reflect(-V, worldNormal);
+
+    float3 iblDiffuse = 0.0f.xxx;
+    float3 iblSpecular = 0.0f.xxx;
+
+    if (HasIBL != 0 && HasBRDFLut != 0)
+    {
+        iblDiffuse = EvalIBLDiffuse(worldNormal) * diffuseAlbedo;
+        iblSpecular = EvalIBLSpecular(R, roughness, NdotV, F0);
+    }
 
     if (payload.rayType == 0)
     {
@@ -605,8 +650,8 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
     if (allowIndirect)
     {
-        float3 diffuseAlbedo = base * (1.0f - metallic);
-        float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
+        //float3 diffuseAlbedo = base * (1.0f - metallic);
+        //float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
         float pSpec = clamp(Max3(F0), 0.05f, 0.95f);
 
         float xi = Rand01(payload.rng);
@@ -730,8 +775,18 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         return;
     }
     
+    if (DebugView == 14)
+    {
+        payload.color = iblDiffuse;
+        return;
+    }
 
+    if (DebugView == 15)
+    {
+        payload.color = iblSpecular;
+        return;
+    }
     float3 ambient = base * 0.03f;
 
-    payload.color = ambient + direct + (RtIndirectScale * indirect);
+    payload.color = ambient + direct + (RtIndirectScale * indirect) + iblDiffuse + iblSpecular;
 }

@@ -7,8 +7,9 @@ namespace
     static constexpr uint32_t kMaxRtMaterials = 8;
     static constexpr uint32_t kRtGeometrySrvCount = 5;          // t1..t5
     static constexpr uint32_t kRtTexturesPerMaterial = 3;       // base, normal, orm
+    static constexpr uint32_t kRtIblSrvCount = 3;               // BRDF LUT, IBL diffuse, IBL specular
     static constexpr uint32_t kRtSrvTableCount =
-        kRtGeometrySrvCount + (kRtTexturesPerMaterial * kMaxRtMaterials);
+        kRtGeometrySrvCount + (kRtTexturesPerMaterial * kMaxRtMaterials) + kRtIblSrvCount;
 }
 
 static std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path)

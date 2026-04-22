@@ -292,10 +292,7 @@ void Renderer::RenderFrame(
             }
         }
 
-        if (m_rtDenoise && m_debugView == 0 
-            && m_rtAccumulateThisFrame 
-            && m_rtAovReady 
-            && m_rtDenoiseSrvTableReady)
+        if (m_rtDenoise && m_debugView == 0 && m_rtAccumulateThisFrame && m_rtAovReady)
         {
             CmdBeginEvent(cmdList, "RT Denoise");
 
@@ -305,18 +302,19 @@ void Renderer::RenderFrame(
             cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.FlushBarriers();
 
-            UpdateRtDenoiseSrvTable(device);
-
-            m_rtDenoisePass.Dispatch(
-                cl,
-                m_rtDenoiseSrvTable.gpu,
-                m_rtOutputUav.gpu, // base of UAV table; u0 is rtOutput
-                width,
-                height,
-                m_rtDenoiseRadius,
-                m_rtDenoiseSigmaDepth,
-                m_rtDenoiseSigmaNormal);
-
+            const bool ok = UpdateRtDenoiseSrvTable(device);
+            if (ok)
+            {
+                m_rtDenoisePass.Dispatch(
+                    cl,
+                    m_rtDenoiseSrvTable.gpu,
+                    m_rtOutputUav.gpu, // base of UAV table; u0 is rtOutput
+                    width,
+                    height,
+                    m_rtDenoiseRadius,
+                    m_rtDenoiseSigmaDepth,
+                    m_rtDenoiseSigmaNormal);
+            }
             cl.Transition(m_rtAccum.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1405,11 +1403,11 @@ void Renderer::UpdateRtGeometryTable(uint32_t frameIndex)
 {
     auto& frame = m_rtFrames[frameIndex];
 
-    static constexpr uint32_t kRtTableDescriptorCount =
-        kRtGeometrySrvCount + (kRtTexturesPerMaterial * kMaxRtMaterials);
+    //static constexpr uint32_t kRtTableDescriptorCount =
+    //    kRtGeometrySrvCount + (kRtTexturesPerMaterial * kMaxRtMaterials);
 
     if (!frame.geometryTable.IsValid())
-        frame.geometryTable = m_srvHeap.Allocate(kRtTableDescriptorCount);
+        frame.geometryTable = m_srvHeap.Allocate(kRtSrvTableCount);
 
     auto HandleAt = [&](uint32_t i)
     {
@@ -1551,6 +1549,16 @@ void Renderer::UpdateRtGeometryTable(uint32_t frameIndex)
         m_glossyBaseTex.IsValid() ? &m_glossyBaseTex : &m_albedoTex,
         m_glossyNormalTex.IsValid() ? &m_glossyNormalTex : &m_normalTex,
         m_glossyOrmTex.IsValid() ? &m_glossyOrmTex : &m_metalRoughTex);
+
+    // Leave IBL slots null unless real textures are valid.
+    if (m_brdfLutTex.IsValid())
+        WriteRtTextureSrv(m_device5.Get(), HandleAt(kRtSrv_BrdfLut), m_brdfLutTex);
+
+    if (m_iblDiffuseTex.IsValid())
+        WriteRtTextureSrv(m_device5.Get(), HandleAt(kRtSrv_IblDiff), m_iblDiffuseTex);
+
+    if (m_iblSpecularTex.IsValid())
+        WriteRtTextureSrv(m_device5.Get(), HandleAt(kRtSrv_IblSpec), m_iblSpecularTex);
 
     m_rtMaterialCount = 4;
 }
