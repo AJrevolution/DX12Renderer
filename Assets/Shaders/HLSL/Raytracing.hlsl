@@ -381,7 +381,7 @@ float2 DirToLatLongUV(float3 d)
 {
     d = SafeNormalize(d);
     float u = atan2(d.z, d.x) / (2.0f * kPi) + 0.5f;
-    float v = acos(saturate(d.y)) / kPi;
+    float v = asin(clamp(d.y, -1.0f, 1.0f)) / kPi + 0.5f;
     return float2(u, 1.0f - v);
 }
 
@@ -391,17 +391,25 @@ float3 EvalIBLDiffuse(float3 N)
     return g_IBLDiffuse.SampleLevel(g_LinearClamp, uv, 0.0f).rgb;
 }
 
-float3 EvalIBLSpecular(float3 R, float roughness, float NdotV, float3 F0)
+float3 EvalIBLSpecular(float3 R, float3 Rrough, float roughness, float NdotV, float3 F0)
 {
-    float2 uv = DirToLatLongUV(R);
+    float2 uvSharp = DirToLatLongUV(R);
+    float2 uvBlur = DirToLatLongUV(Rrough);
+    
+    float3 specSharp = g_IBLSpecular.SampleLevel(g_LinearClamp, uvSharp, 0.0f).rgb;
+    float3 specBlur = g_IBLSpecular.SampleLevel(g_LinearClamp, uvBlur, 0.0f).rgb;
 
-    // Simple bring-up mip choice.
-    float mip = roughness * 6.0f;
-    float3 prefiltered = g_IBLSpecular.SampleLevel(g_LinearClamp, uv, mip).rgb;
+    float3 prefiltered = lerp(specSharp, specBlur, roughness);
 
     float2 brdf = g_BRDFLut.SampleLevel(g_LinearClamp, float2(NdotV, roughness), 0.0f).rg;
     return prefiltered * (F0 * brdf.x + brdf.y);
 }
+
+// RT IBL parity target:
+// - same latlong UV mapping convention as raster
+// - same BRDF LUT usage
+// - same roughness blur approximation (sharp R vs roughened R lerp)
+// - same metallic/roughness interpretation from ORM
 
 [shader("raygeneration")]
 void RayGen()
@@ -545,20 +553,21 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
     float NdotV = saturate(dot(worldNormal, V));
     float3 R = reflect(-V, worldNormal);
-
+    float3 Rrough = SafeNormalize(lerp(R, worldNormal, roughness * roughness));
+    
     float3 iblDiffuse = 0.0f.xxx;
     float3 iblSpecular = 0.0f.xxx;
 
     if (HasIBL != 0 && HasBRDFLut != 0)
     {
         iblDiffuse = EvalIBLDiffuse(worldNormal) * diffuseAlbedo;
-        iblSpecular = EvalIBLSpecular(R, roughness, NdotV, F0);
+        iblSpecular = EvalIBLSpecular(R, Rrough, roughness, NdotV, F0);
     }
 
     if (payload.rayType == 0)
     {
         uint2 pixel = DispatchRaysIndex().xy;
-        g_AovNormal[pixel] = float4(worldNormal * 0.5f + 0.5f, 1.0f);
+        g_AovNormal[pixel] = float4(geomNormal * 0.5f + 0.5f, 1.0f);
         g_AovDepth[pixel] = depth01;
     }
     
@@ -784,6 +793,19 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     if (DebugView == 15)
     {
         payload.color = iblSpecular;
+        return;
+    }
+    
+    if (DebugView == 16)
+    {
+        float2 uvDbg = DirToLatLongUV(worldNormal);
+        payload.color = float3(frac(uvDbg), 0.0f);
+        return;
+    }
+
+    if (DebugView == 17)
+    {
+        payload.color = Rrough * 0.5f + 0.5f;
         return;
     }
     float3 ambient = base * 0.03f;

@@ -306,4 +306,7 @@ private:
     float m_rtDenoiseSigmaNormal = 0.25f;
 
     bool m_rtDenoiseSrvTableReady = false;
+
+    bool m_prevRtHasIbl = false;
+    bool m_prevRtHasBrdfLut = false;
 };

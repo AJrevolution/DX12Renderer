@@ -153,7 +153,20 @@ void Renderer::RenderFrame(
         (m_rtEnableIndirect != m_prevRtEnableIndirect) ||
         (std::fabs(m_rtIndirectScale - m_prevRtIndirectScale) > 1e-6f);
 
-    if (cameraChanged || drawListChanged || debugViewChanged || accumulationModeChanged || integratorChanged)
+    const bool rtHasBrdfLut = m_brdfLutTex.IsValid();
+    const bool rtHasIbl = m_iblDiffuseTex.IsValid() && m_iblSpecularTex.IsValid();
+
+    const bool iblAvailabilityChanged =
+        !m_rtHistoryValid ||
+        (rtHasBrdfLut != m_prevRtHasBrdfLut) ||
+        (rtHasIbl != m_prevRtHasIbl);
+
+    if (cameraChanged || 
+        drawListChanged || 
+        debugViewChanged || 
+        accumulationModeChanged || 
+        integratorChanged ||
+        iblAvailabilityChanged)
     {
         ResetRtAccumulation();
     }
@@ -164,6 +177,8 @@ void Renderer::RenderFrame(
     m_prevRtCamPitch = m_camPitch;
     m_prevRtCamRadius = m_camRadius;
     m_prevRtDebugView = m_debugView;
+    m_prevRtHasBrdfLut = rtHasBrdfLut;
+    m_prevRtHasIbl = rtHasIbl;
     m_rtAccumulatingLastFrame = allowRtAccumulation;
 
     m_prevRtWorlds.resize(m_draws.size());
@@ -1492,15 +1507,24 @@ void Renderer::UpdateRtGeometryTable(uint32_t frameIndex)
         );
     }
 
-    // Fill the whole RT material block with deterministic fallback textures first.
-    for (uint32_t materialId = 0; materialId < kMaxRtMaterials; ++materialId)
+    //// Fill the whole RT material block with deterministic fallback textures first.
+    //for (uint32_t materialId = 0; materialId < kMaxRtMaterials; ++materialId)
+    //{
+    //    const uint32_t firstSlot =
+    //        kRtGeometrySrvCount + materialId * kRtTexturesPerMaterial;
+    //
+    //    WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 0), m_rtFallbackWhiteTex);
+    //    WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 1), m_rtFallbackFlatNormalTex);
+    //    WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 2), m_rtFallbackOrmTex);
+    //}
+    
+    // Clear every non-geometry slot to deterministic nulls first.
+    // This covers:
+    // - t6.. material textures
+    // - t30..t32 IBL textures
+    for (uint32_t slot = kRtGeometrySrvCount; slot < kRtSrvTableCount; ++slot)
     {
-        const uint32_t firstSlot =
-            kRtGeometrySrvCount + materialId * kRtTexturesPerMaterial;
-
-        WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 0), m_rtFallbackWhiteTex);
-        WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 1), m_rtFallbackFlatNormalTex);
-        WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 2), m_rtFallbackOrmTex);
+        CreateNullTexture2DSRV(m_device5.Get(), HandleAt(slot), DXGI_FORMAT_R8G8B8A8_UNORM);
     }
 
     auto WriteMaterial = [&](uint32_t materialId, const Texture* base, const Texture* normal, const Texture* orm)
