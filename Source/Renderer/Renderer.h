@@ -1,6 +1,7 @@
 #pragma once
 #include <filesystem>
 #include <vector>
+#include <array>
 #include "Common.h"
 #include "Source/Renderer/Passes/TrianglePass.h"
 #include "Source/Renderer/Passes/ForwardPBRPass.h"
@@ -20,6 +21,7 @@
 #include "Source/RHI/Raytracing/RaytracingPipeline.h"
 #include "Source/RHI/Pipeline/RTInstanceData.h"
 #include "Source/Renderer/Passes/RtDenoisePass.h"
+#include "Source/Renderer/Passes/RtTemporalPass.h"
 
 class Renderer
 {
@@ -46,6 +48,22 @@ public:
 
 
 private:
+    struct RtTemporalConstants
+    {
+        DirectX::XMFLOAT4X4 currInvViewProj{};
+        DirectX::XMFLOAT4X4 prevViewProj{};
+
+        DirectX::XMFLOAT2 invResolution{};
+        float temporalAlpha = 0.10f;
+        float depthSigma = 0.02f;
+        float normalSigma = 0.25f;
+
+        uint32_t temporalEnabled = 1;
+        uint32_t historyValid = 0;
+        uint32_t debugView = 0;
+        uint32_t pad0 = 0;
+    };
+
     struct DrawItem
     {
         Mesh* mesh = nullptr;
@@ -122,8 +140,12 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE RtUavCpuAt(uint32_t slot) const;
 
     void CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t height);
-    bool UpdateRtDenoiseSrvTable(ID3D12Device* device);
+    bool UpdateRtDenoiseSrvTable(ID3D12Device* device, ID3D12Resource* signalResource);
     
+    void CreateRtHistoryResources(ID3D12Device* device, uint32_t width, uint32_t height);
+    bool UpdateRtTemporalTables(ID3D12Device* device);
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtTemporalConstants(uint32_t frameIndex, uint32_t width, uint32_t height);
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -309,4 +331,23 @@ private:
 
     bool m_prevRtHasIbl = false;
     bool m_prevRtHasBrdfLut = false;
+
+    RtTemporalPass m_rtTemporalPass;
+    DescriptorAllocator::Allocation m_rtTemporalSrvTable{};
+    DescriptorAllocator::Allocation m_rtTemporalUavTable{};
+
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryAccum{};
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryNormal{};
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryDepth{};
+    bool m_rtTemporalHistoryValid = false;
+    uint32_t m_rtHistoryReadIndex = 0;
+
+    bool  m_rtTemporal = true;
+    float m_rtTemporalAlpha = 0.10f;
+    float m_rtTemporalDepthSigma = 0.02f;
+    float m_rtTemporalNormalSigma = 0.25f;
+
+    DirectX::XMFLOAT4X4 m_currViewProj{};
+    DirectX::XMFLOAT4X4 m_currInvViewProj{};
+    DirectX::XMFLOAT4X4 m_prevViewProj{};
 };
