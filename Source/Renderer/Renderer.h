@@ -140,10 +140,10 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE RtUavCpuAt(uint32_t slot) const;
 
     void CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t height);
-    bool UpdateRtDenoiseSrvTable(ID3D12Device* device, ID3D12Resource* signalResource);
+    bool UpdateRtDenoiseSrvTable(uint32_t frameIndex, ID3D12Device* device, ID3D12Resource* signalResource);
     
     void CreateRtHistoryResources(ID3D12Device* device, uint32_t width, uint32_t height);
-    bool UpdateRtTemporalTables(ID3D12Device* device);
+    bool UpdateRtTemporalTables(uint32_t frameIndex, ID3D12Device* device);
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtTemporalConstants(uint32_t frameIndex, uint32_t width, uint32_t height);
 
     TrianglePass m_triangle;
@@ -161,7 +161,7 @@ private:
     uint32_t m_debugView = 0;
     bool  m_autoOrbit = true;
     bool m_pauseAnimation = false;
-    bool m_useRaytracing = false; // Toggle for raytracing vs rasterization (for testing/debugging)
+    bool m_useRaytracing = false;        // Toggle for raytracing vs rasterization (for testing/debugging)
     bool m_rtAccumulate = true;          // validation / progressive mode
     
     uint32_t m_rtSamplesPerFrame = 1;    // 1..N
@@ -256,6 +256,11 @@ private:
         // per-frame RT table: geometry + instance data + material textures
         DescriptorAllocator::Allocation geometryTable{};
 
+        // Per-frame temporal / denoise descriptor tables.
+        DescriptorAllocator::Allocation temporalSrvTable{}; // 6 SRVs
+        DescriptorAllocator::Allocation temporalUavTable{}; // 2 UAVs
+        DescriptorAllocator::Allocation denoiseSrvTable{};  // 3 SRVs
+
         uint32_t capacity = 0;
     };
 
@@ -319,7 +324,7 @@ private:
     ComPtr<ID3D12Resource> m_rtAovDepth;
     bool m_rtAovReady = false;
 
-    DescriptorAllocator::Allocation m_rtDenoiseSrvTable{};
+    //DescriptorAllocator::Allocation m_rtDenoiseSrvTable{};
     RtDenoisePass m_rtDenoisePass;
 
     bool  m_rtDenoise = true;
@@ -327,14 +332,14 @@ private:
     float m_rtDenoiseSigmaDepth = 0.02f;
     float m_rtDenoiseSigmaNormal = 0.25f;
 
-    bool m_rtDenoiseSrvTableReady = false;
+    //bool m_rtDenoiseSrvTableReady = false;
 
     bool m_prevRtHasIbl = false;
     bool m_prevRtHasBrdfLut = false;
 
     RtTemporalPass m_rtTemporalPass;
-    DescriptorAllocator::Allocation m_rtTemporalSrvTable{};
-    DescriptorAllocator::Allocation m_rtTemporalUavTable{};
+    //DescriptorAllocator::Allocation m_rtTemporalSrvTable{};
+    //DescriptorAllocator::Allocation m_rtTemporalUavTable{};
 
     std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryAccum{};
     std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryNormal{};

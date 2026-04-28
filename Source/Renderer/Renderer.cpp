@@ -114,7 +114,7 @@ void Renderer::RenderFrame(
 
     BuildDrawList(sceneTime);
 
-    const bool wantsTemporalDebug = (m_debugView >= 18 && m_debugView <= 21);
+    const bool wantsTemporalDebug = (m_debugView >= 18 && m_debugView <= 23);
 
     const bool allowRtAccumulation =
         m_rtAccumulate &&
@@ -347,7 +347,7 @@ void Renderer::RenderFrame(
             cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.FlushBarriers();
 
-            const bool ok = UpdateRtTemporalTables(device);
+            const bool ok = UpdateRtTemporalTables(frameIndex, device);
             if (ok)
             {
                 const D3D12_GPU_VIRTUAL_ADDRESS temporalCb =
@@ -356,8 +356,8 @@ void Renderer::RenderFrame(
                 m_rtTemporalPass.Dispatch(
                     cl,
                     temporalCb,
-                    m_rtTemporalSrvTable.gpu,
-                    m_rtTemporalUavTable.gpu,
+                    m_rtFrames[frameIndex].temporalSrvTable.gpu,
+                    m_rtFrames[frameIndex].temporalUavTable.gpu,
                     width,
                     height);
 
@@ -391,12 +391,12 @@ void Renderer::RenderFrame(
             cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.FlushBarriers();
 
-            const bool ok = UpdateRtDenoiseSrvTable(device, denoiseSignal);
+            const bool ok = UpdateRtDenoiseSrvTable(frameIndex, device, denoiseSignal);
             if (ok)
             {
                 m_rtDenoisePass.Dispatch(
                     cl,
-                    m_rtDenoiseSrvTable.gpu,
+                    m_rtFrames[frameIndex].denoiseSrvTable.gpu,
                     m_rtOutputUav.gpu, // base of UAV table; u0 is rtOutput
                     width,
                     height,
@@ -612,7 +612,7 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_depthReady = false;
     m_gbufferReady = false;
     m_rtOutputReady = false;
-    m_rtDenoiseSrvTableReady = false;
+ 
 
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
@@ -642,7 +642,7 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
         CreateRtAccum(m_device5.Get(), width, height);
         CreateRtAovs(m_device5.Get(), width, height);
         CreateRtHistoryResources(m_device5.Get(), width, height);
-        m_rtDenoiseSrvTableReady = false;
+        
         ResetRtAccumulation();
         m_rtTemporalHistoryValid = false;
     }
@@ -808,7 +808,7 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         m_rtDenoisePass.Initialize(device, Paths::ShaderDir());
         m_rtTemporalPass.Initialize(device, Paths::ShaderDir());
         CreateRtHistoryResources(m_device5.Get(), m_widthCached, m_heightCached);
-        m_rtDenoiseSrvTableReady = false;
+     
     }
 
     // Load a real texture from disk 
@@ -1408,7 +1408,7 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         CreateRtAccum(m_device5.Get(), width, height);
         CreateRtAovs(m_device5.Get(), width, height);
         CreateRtHistoryResources(m_device5.Get(), width, height);
-        m_rtDenoiseSrvTableReady = false;
+     
         m_rtTemporalHistoryValid = false;
         ResetRtAccumulation();
     }
@@ -1905,9 +1905,9 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
     m_rtAovReady = true;
 }
 
-bool Renderer::UpdateRtDenoiseSrvTable(ID3D12Device* device, ID3D12Resource* signalResource)
+bool Renderer::UpdateRtDenoiseSrvTable(uint32_t frameIndex, ID3D12Device* device, ID3D12Resource* signalResource)
 {
-    m_rtDenoiseSrvTableReady = false;
+    auto& frame = m_rtFrames[frameIndex];
     
     if (!device ||
         !signalResource || !m_rtAovNormal || !m_rtAovDepth ||
@@ -1916,12 +1916,12 @@ bool Renderer::UpdateRtDenoiseSrvTable(ID3D12Device* device, ID3D12Resource* sig
         return false;
     }
 
-    if (!m_rtDenoiseSrvTable.IsValid())
-        m_rtDenoiseSrvTable = m_srvHeap.Allocate(3);
+    if (!frame.denoiseSrvTable.IsValid())
+        frame.denoiseSrvTable = m_srvHeap.Allocate(3);
 
     auto HandleAt = [&](uint32_t i)
     {
-        D3D12_CPU_DESCRIPTOR_HANDLE h = m_rtDenoiseSrvTable.cpu;
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.denoiseSrvTable.cpu;
         h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
         return h;
     };
@@ -1956,7 +1956,6 @@ bool Renderer::UpdateRtDenoiseSrvTable(ID3D12Device* device, ID3D12Resource* sig
         device->CreateShaderResourceView(m_rtAovDepth.Get(), &srv, HandleAt(2));
     }
 
-    m_rtDenoiseSrvTableReady = true;
     return true;
 }
 
@@ -2047,8 +2046,10 @@ void Renderer::CreateRtHistoryResources(ID3D12Device* device, uint32_t width, ui
     }
 }
 
-bool Renderer::UpdateRtTemporalTables(ID3D12Device* device)
+bool Renderer::UpdateRtTemporalTables(uint32_t frameIndex, ID3D12Device* device)
 {
+    auto& frame = m_rtFrames[frameIndex];
+
     if (!device ||
         !m_rtAccum || !m_rtAovNormal || !m_rtAovDepth ||
         !m_rtHistoryAccum[0] || !m_rtHistoryAccum[1] ||
@@ -2059,25 +2060,25 @@ bool Renderer::UpdateRtTemporalTables(ID3D12Device* device)
         return false;
     }
 
-    if (!m_rtTemporalSrvTable.IsValid())
-        m_rtTemporalSrvTable = m_srvHeap.Allocate(6);
+    if (!frame.temporalSrvTable.IsValid())
+        frame.temporalSrvTable = m_srvHeap.Allocate(6);
 
-    if (!m_rtTemporalUavTable.IsValid())
-        m_rtTemporalUavTable = m_srvHeap.Allocate(2);
+    if (!frame.temporalUavTable.IsValid())
+        frame.temporalUavTable = m_srvHeap.Allocate(2);
 
     const uint32_t readIndex = m_rtHistoryReadIndex;
     const uint32_t writeIndex = 1u - m_rtHistoryReadIndex;
 
     auto SrvAt = [&](uint32_t i)
     {
-        D3D12_CPU_DESCRIPTOR_HANDLE h = m_rtTemporalSrvTable.cpu;
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.temporalSrvTable.cpu;
         h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
         return h;
     };
 
     auto UavAt = [&](uint32_t i)
     {
-        D3D12_CPU_DESCRIPTOR_HANDLE h = m_rtTemporalUavTable.cpu;
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.temporalUavTable.cpu;
         h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
         return h;
     };
@@ -2092,8 +2093,6 @@ bool Renderer::UpdateRtTemporalTables(ID3D12Device* device)
 
         device->CreateShaderResourceView(m_rtAccum.Get(), &srv, SrvAt(0));
         device->CreateShaderResourceView(m_rtAovNormal.Get(), &srv, SrvAt(1));
-
-        srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         device->CreateShaderResourceView(m_rtHistoryAccum[readIndex].Get(), &srv, SrvAt(3));
         device->CreateShaderResourceView(m_rtHistoryNormal[readIndex].Get(), &srv, SrvAt(4));
     }

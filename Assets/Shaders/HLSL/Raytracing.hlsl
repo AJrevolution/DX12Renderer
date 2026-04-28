@@ -417,10 +417,13 @@ void RayGen()
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 dim = DispatchRaysDimensions().xy;
     
+    bool isRtShadingDebug = (DebugView != 0 && DebugView <= 17);
+    bool bypassAccum = (RtAccumulate == 0) || isRtShadingDebug;
+    
     uint rng = InitRng(pixel, RtSampleIndex, RtResetId);
 
     float2 jitter = 0.0f.xx;
-    if (RtAccumulate != 0 && DebugView == 0)
+    if (!bypassAccum)
     {
         jitter = float2(Rand01(rng), Rand01(rng)) - 0.5f;
     }
@@ -466,7 +469,7 @@ void RayGen()
     float3 sampleColor = payload.color;
 
     // Debug views and non-accumulating mode bypass the running average.
-    if (DebugView != 0 || RtAccumulate == 0)
+    if (bypassAccum)
     {
         g_Accum[pixel] = float4(sampleColor, 1.0f);
         g_Output[pixel] = float4(LinearToSRGB(sampleColor), 1.0f);

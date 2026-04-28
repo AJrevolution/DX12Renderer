@@ -92,6 +92,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float3 prevColor = 0.0f.xxx;
     float3 prevNormal = 0.0f.xxx;
     float prevDepth = 1.0f;
+    float prevLen = 0.0f;
 
     if (TemporalEnabled != 0 && HistoryValid != 0 && currDepth < 0.9999f)
     {
@@ -105,6 +106,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
         if (inBounds)
         {
             prevColor = g_PrevAccum.SampleLevel(g_LinearClamp, prevUV, 0.0f).rgb;
+            prevLen = g_PrevAccum.SampleLevel(g_LinearClamp, prevUV, 0.0f).a;
             prevNormal = UnpackNormal(g_PrevNormal.SampleLevel(g_LinearClamp, prevUV, 0.0f));
             prevDepth = g_PrevDepth.SampleLevel(g_LinearClamp, prevUV, 0.0f);
 
@@ -119,8 +121,18 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float3 currMin, currMax;
     NeighborhoodMinMax(pixel, currMin, currMax);
     float3 prevClamped = clamp(prevColor, currMin, currMax);
+    
+    float newLen = validReuse ? min(prevLen + 1.0f, 255.0f) : 1.0f;
 
-    float3 history = validReuse ? lerp(currColor, prevClamped, TemporalAlpha) : currColor;
+    float alphaUsed = 0.0f;
+    float3 history = currColor;
+    
+    if (validReuse)
+    {
+        float k = saturate(newLen / 8.0f);
+        alphaUsed = lerp(0.25f, TemporalAlpha, k);
+        history = lerp(currColor, prevClamped, alphaUsed);
+    }
 
     float3 display = history;
 
@@ -140,10 +152,17 @@ void main(uint3 dtid : SV_DispatchThreadID)
     {
         display = saturate(abs(prevClamped - currColor) * 4.0f);
     }
+    else if (DebugView == 22)
+    {
+        display = (newLen / 255.0f).xxx;
+    }
+    else if (DebugView == 23)
+    {
+        display = alphaUsed.xxx;
+    }
+    g_HistoryOut[pixel] = float4(history, newLen);
 
-    g_HistoryOut[pixel] = float4(history, 1.0f);
-
-    if (DebugView >= 18 && DebugView <= 21)
+    if (DebugView >= 18 && DebugView <= 23)
         g_Output[pixel] = float4(display, 1.0f);
     else
         g_Output[pixel] = float4(LinearToSRGB(history), 1.0f);
