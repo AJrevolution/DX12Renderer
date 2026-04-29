@@ -58,11 +58,11 @@ private:
         float temporalAlpha = 0.10f;
         float depthSigma = 0.02f;
         float normalSigma = 0.25f;
-
+        float roughnessSigma = 0.15f;
         uint32_t temporalEnabled = 1;
         uint32_t historyValid = 0;
         uint32_t debugView = 0;
-        uint32_t pad0 = 0;
+        uint32_t pad0[3] = {};
     };
 
     struct RtAtrousConstants
@@ -77,7 +77,8 @@ private:
         uint32_t useMoments = 1;
 
         uint32_t finalOutputSrgb = 1;
-        uint32_t pad0[3] = {};
+        uint32_t debugView = 0;
+        uint32_t pad0[2] = {};
     };
 
     struct DrawItem
@@ -410,4 +411,7 @@ private:
     float m_prevRtVarianceScale = 1.0f;
 
     DescriptorAllocator::Allocation m_rtSvgfPingUavTable{};
+
+    float m_rtTemporalRoughnessSigma = 0.15f;
+    float m_prevRtTemporalRoughnessSigma = 0.15f;
 };

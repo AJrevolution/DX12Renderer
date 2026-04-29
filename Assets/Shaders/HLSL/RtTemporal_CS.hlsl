@@ -23,11 +23,11 @@ cbuffer RtTemporalConstants : register(b0)
     float TemporalAlpha;
     float DepthSigma;
     float NormalSigma;
-
+    float RoughnessSigma;
     uint TemporalEnabled;
     uint HistoryValid;
     uint DebugView;
-    uint _pad0;
+    uint3 _pad0;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -93,7 +93,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float3 currColor = g_CurrAccum[pixel].rgb;
     float3 currNormal = UnpackNormal(g_CurrNormal[pixel]);
     float currDepth = g_CurrDepth[pixel];
-
+    float currR = g_CurrNormal[pixel].a;
+    
     bool validReuse = false;
     float2 prevUV = 0.0f.xx;
     float3 prevColor = 0.0f.xxx;
@@ -113,17 +114,20 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
         if (inBounds)
         {
+            float4 prevNormalPacked = g_PrevNormal.SampleLevel(g_LinearClamp, prevUV, 0.0f);
             prevColor = g_PrevAccum.SampleLevel(g_LinearClamp, prevUV, 0.0f).rgb;
             prevLen = g_PrevAccum.SampleLevel(g_LinearClamp, prevUV, 0.0f).a;
-            prevNormal = UnpackNormal(g_PrevNormal.SampleLevel(g_LinearClamp, prevUV, 0.0f));
+            prevNormal = UnpackNormal(prevNormalPacked);
+            float prevR = prevNormalPacked.a;
             prevDepth = g_PrevDepth.SampleLevel(g_LinearClamp, prevUV, 0.0f);
             prevMoments = g_PrevMoments.SampleLevel(g_LinearClamp, prevUV, 0.0f);
             
             float nd = saturate(dot(currNormal, prevNormal));
             bool normalOk = nd > (1.0f - NormalSigma);
             bool depthOk = abs(currDepth - prevDepth) < DepthSigma;
-
-            validReuse = normalOk && depthOk;
+            bool roughOk = abs(currR - prevR) < RoughnessSigma;
+            
+            validReuse = normalOk && depthOk && roughOk;
         }
     }
 

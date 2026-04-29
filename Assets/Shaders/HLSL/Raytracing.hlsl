@@ -466,6 +466,14 @@ void RayGen()
         return;
     }
     
+    if (DebugView == 27)
+    {
+        float r = g_AovNormal[pixel].w;
+        g_Accum[pixel] = float4(r.xxx, 1.0f);
+        g_Output[pixel] = float4(r.xxx, 1.0f);
+        return;
+    }
+    
     float3 sampleColor = payload.color;
 
     // Debug views and non-accumulating mode bypass the running average.
@@ -570,7 +578,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     if (payload.rayType == 0)
     {
         uint2 pixel = DispatchRaysIndex().xy;
-        g_AovNormal[pixel] = float4(geomNormal * 0.5f + 0.5f, 1.0f);
+        g_AovNormal[pixel] = float4(geomNormal * 0.5f + 0.5f, roughness);
         g_AovDepth[pixel] = depth01;
     }
     

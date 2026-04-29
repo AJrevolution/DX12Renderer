@@ -174,13 +174,20 @@ void Renderer::RenderFrame(
         (rtHasBrdfLut != m_prevRtHasBrdfLut) ||
         (rtHasIbl != m_prevRtHasIbl);
 
+    const bool temporalSettingsChanged =
+        !m_rtHistoryValid ||
+        (std::fabs(m_rtTemporalRoughnessSigma - m_prevRtTemporalRoughnessSigma) > 1e-6f);
+
+    const bool wantsSvgfDebug = (m_debugView == 28);
+
     if (cameraChanged || 
         drawListChanged || 
         debugViewChanged || 
         accumulationModeChanged || 
         integratorChanged ||
         iblAvailabilityChanged ||
-        svgfChanged)
+        svgfChanged ||
+        temporalSettingsChanged)
     {
         ResetRtAccumulation();
     }
@@ -192,7 +199,8 @@ void Renderer::RenderFrame(
         iblAvailabilityChanged ||
         bigCameraChanged ||
         !m_rtTemporal ||
-        svgfChanged)
+        svgfChanged ||
+        temporalSettingsChanged)
     {
         m_rtTemporalHistoryValid = false;
     }
@@ -212,6 +220,7 @@ void Renderer::RenderFrame(
     m_prevRtSvgf = m_rtSvgf;
     m_prevRtAtrousIterations = m_rtAtrousIterations;
     m_prevRtVarianceScale = m_rtVarianceScale;
+    m_prevRtTemporalRoughnessSigma = m_rtTemporalRoughnessSigma;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -399,7 +408,10 @@ void Renderer::RenderFrame(
             denoiseSignal = m_rtHistoryAccum[writeIndex].Get();
             useMoments = true;
         }
-        if (m_rtSvgf && m_debugView == 0 && m_rtAccumulateThisFrame && m_rtAovReady)
+        if (m_rtSvgf && 
+            (m_debugView == 0 || wantsSvgfDebug) && 
+            (m_rtAccumulateThisFrame || wantsSvgfDebug) && 
+            m_rtAovReady)
         {
             CmdBeginEvent(cmdList, "RT A-Trous");
 
@@ -2301,6 +2313,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(uint32_t frameInde
     cb->temporalAlpha = m_rtTemporalAlpha;
     cb->depthSigma = m_rtTemporalDepthSigma;
     cb->normalSigma = m_rtTemporalNormalSigma;
+    cb->roughnessSigma = m_rtTemporalRoughnessSigma;
     cb->temporalEnabled = m_rtTemporal ? 1u : 0u;
     cb->historyValid = m_rtTemporalHistoryValid ? 1u : 0u;
     cb->debugView = m_debugView;
@@ -2401,6 +2414,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtAtrousConstants(
     cb->varianceScale = m_rtVarianceScale;
     cb->useMoments = useMoments ? 1u : 0u;
     cb->finalOutputSrgb = finalOutputSrgb ? 1u : 0u;
+    cb->debugView = m_debugView;
 
     return alloc.gpu;
 }

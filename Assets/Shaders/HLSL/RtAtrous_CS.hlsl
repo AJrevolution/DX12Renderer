@@ -21,7 +21,8 @@ cbuffer RtAtrousConstants : register(b0)
     uint UseMoments;
 
     uint FinalOutputSrgb;
-    uint3 _pad0;
+    uint DebugView;
+    uint2 _pad0;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -47,7 +48,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
     static const float kernel[3] = { 1.0f, 2.0f, 1.0f };
 
     float3 c0 = g_Signal[pixel].rgb;
-    float3 n0 = UnpackNormal(g_Normal[pixel]);
+    float4 n0Packed = g_Normal[pixel];
+    float3 n0 = UnpackNormal(n0Packed);
+    float rough0 = n0Packed.a;
     float z0 = g_Depth[pixel];
     
     float l0 = 0.0f;
@@ -60,7 +63,13 @@ void main(uint3 dtid : SV_DispatchThreadID)
         sigmaL = max(1e-4f, VarianceScale * sqrt(variance));
         l0 = Luminance(c0);
     }
-
+    
+    if (DebugView == 28)
+    {
+        float protectionProxy = lerp(128.0f, 32.0f, rough0) / 128.0f;
+        g_Output[pixel] = float4(protectionProxy.xxx, 1.0f);
+        return;
+    }
     float3 sum = 0.0f.xxx;
     float wsum = 0.0f;
 
@@ -73,13 +82,19 @@ void main(uint3 dtid : SV_DispatchThreadID)
             p = clamp(p, int2(0, 0), int2(int(width) - 1, int(height) - 1));
 
             float3 c = g_Signal[uint2(p)].rgb;
-            float3 n = UnpackNormal(g_Normal[uint2(p)]);
+            float4 nPacked = g_Normal[uint2(p)];
+            float3 n = UnpackNormal(nPacked);
+            float rough = nPacked.a;
             float z = g_Depth[uint2(p)];
 
             float ws = kernel[abs(x)] * kernel[abs(y)];
 
-            float nd = saturate(dot(n0, n));
-            float wn = pow(nd, 32.0f / max(1e-4f, SigmaNormal));
+            //float nd = saturate(dot(n0, n));
+            float roughMin = min(rough0, rough);
+            float basePow = lerp(128.0f, 32.0f, roughMin);
+            float normalScale = clamp(0.25f / max(1e-4f, SigmaNormal), 0.5f, 2.0f);
+            float normalPow = basePow * normalScale;
+            float wn = pow(saturate(dot(n0, n)), normalPow);
 
             float wz = exp(-abs(z0 - z) / max(1e-4f, SigmaDepth));
 
@@ -87,7 +102,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
             if (UseMoments != 0)
             {
                 float l = Luminance(c);
-                wl = exp(-abs(l - l0) / sigmaL);
+                float sigmaLUsed = max(1e-4f, sigmaL * lerp(0.5f, 1.0f, roughMin));
+                wl = exp(-abs(l - l0) / sigmaLUsed);
+
             }
 
             float w = ws * wn * wz * wl;
