@@ -132,6 +132,9 @@
     <ClInclude Include="Source\Renderer\Passes\RtTemporalPass.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\RtAtrousPass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -227,6 +230,9 @@
     <ClCompile Include="Source\Renderer\Passes\RtTemporalPass.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\RtAtrousPass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -250,5 +256,6 @@
     <CustomBuild Include="Assets\Shaders\HLSL\Raytracing.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\RtDenoise_CS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\RtTemporal_CS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\RtAtrous_CS.hlsl" />
   </ItemGroup>
 </Project>

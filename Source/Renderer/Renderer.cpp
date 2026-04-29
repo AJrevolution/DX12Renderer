@@ -114,7 +114,7 @@ void Renderer::RenderFrame(
 
     BuildDrawList(sceneTime);
 
-    const bool wantsTemporalDebug = (m_debugView >= 18 && m_debugView <= 23);
+    const bool wantsTemporalDebug = (m_debugView >= 18 && m_debugView <= 26);
 
     const bool allowRtAccumulation =
         m_rtAccumulate &&
@@ -122,6 +122,12 @@ void Renderer::RenderFrame(
         (m_rtTemporal || (!m_autoOrbit && m_pauseAnimation));
 
     bool drawListChanged = !m_rtHistoryValid || (m_draws.size() != m_prevRtWorlds.size());
+
+    const bool svgfChanged =
+        !m_rtHistoryValid ||
+        (m_rtSvgf != m_prevRtSvgf) ||
+        (m_rtAtrousIterations != m_prevRtAtrousIterations) ||
+        (std::fabs(m_rtVarianceScale - m_prevRtVarianceScale) > 1e-6f);
 
     if (!drawListChanged)
     {
@@ -173,7 +179,8 @@ void Renderer::RenderFrame(
         debugViewChanged || 
         accumulationModeChanged || 
         integratorChanged ||
-        iblAvailabilityChanged)
+        iblAvailabilityChanged ||
+        svgfChanged)
     {
         ResetRtAccumulation();
     }
@@ -184,7 +191,8 @@ void Renderer::RenderFrame(
         integratorChanged ||
         iblAvailabilityChanged ||
         bigCameraChanged ||
-        !m_rtTemporal)
+        !m_rtTemporal ||
+        svgfChanged)
     {
         m_rtTemporalHistoryValid = false;
     }
@@ -201,6 +209,9 @@ void Renderer::RenderFrame(
 
     m_prevRtWorlds.resize(m_draws.size());
     m_prevRtMaterials.resize(m_draws.size());
+    m_prevRtSvgf = m_rtSvgf;
+    m_prevRtAtrousIterations = m_rtAtrousIterations;
+    m_prevRtVarianceScale = m_rtVarianceScale;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -380,8 +391,84 @@ void Renderer::RenderFrame(
             CmdEndEvent(cmdList);
         }
 
+        bool useMoments = false;
+
+        if (ranTemporal)
+        {
+            const uint32_t writeIndex = 1u - m_rtHistoryReadIndex;
+            denoiseSignal = m_rtHistoryAccum[writeIndex].Get();
+            useMoments = true;
+        }
+        if (m_rtSvgf && m_debugView == 0 && m_rtAccumulateThisFrame && m_rtAovReady)
+        {
+            CmdBeginEvent(cmdList, "RT A-Trous");
+
+            const uint32_t iterCount = std::min(m_rtAtrousIterations, kMaxRtAtrousIterations);
+            ID3D12Resource* svgfSignal = denoiseSignal;
+            ID3D12Resource* momentsSignal = useMoments ? m_rtHistoryMoments[1u - m_rtHistoryReadIndex].Get() : nullptr;
+
+            for (uint32_t iter = 0; iter < iterCount; ++iter)
+            {
+                const bool finalIter = (iter + 1 == iterCount);
+
+                ID3D12Resource* outRes = nullptr;
+                if (finalIter)
+                {
+                    outRes = m_rtOutput.Get();
+                }
+                else
+                {
+                    outRes = m_rtSvgfPing[iter & 1u].Get();
+                }
+
+                cl.Transition(svgfSignal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                if (momentsSignal)
+                    cl.Transition(momentsSignal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                cl.Transition(outRes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cl.FlushBarriers();
+
+                const bool ok = UpdateRtSvgfSrvTable(frameIndex, iter, device, svgfSignal, momentsSignal ? momentsSignal : m_rtHistoryMoments[m_rtHistoryReadIndex].Get());
+                if (ok)
+                {
+                    const D3D12_GPU_VIRTUAL_ADDRESS cb =
+                        UpdateRtAtrousConstants(frameIndex, width, height, iter, useMoments, finalIter);
+
+                    D3D12_GPU_DESCRIPTOR_HANDLE outUav = {};
+                    if (finalIter)
+                        outUav = m_rtOutputUav.gpu;              // u0 = rtOutput
+                    else
+                        outUav = RtSvgfPingUavGpuAt(iter & 1u);  // ping[0/1]
+
+                    m_rtAtrousPass.Dispatch(
+                        cl,
+                        cb,
+                        m_rtFrames[frameIndex].svgfSrvTables[iter].gpu,
+                        outUav,
+                        width,
+                        height);
+
+                    D3D12_RESOURCE_BARRIER b{};
+                    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                    b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                    b.UAV.pResource = outRes;
+                    cmdList->ResourceBarrier(1, &b);
+
+                    if (!finalIter)
+                        svgfSignal = outRes;
+                }
+            }
+
+            cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.FlushBarriers();
+
+            CmdEndEvent(cmdList);
+        }
+
         //Denoise
-        if (m_rtDenoise && m_debugView == 0 && m_rtAccumulateThisFrame && m_rtAovReady)
+        else if (m_rtDenoise && m_debugView == 0 && m_rtAccumulateThisFrame && m_rtAovReady)
         {
             CmdBeginEvent(cmdList, "RT Denoise");
 
@@ -437,8 +524,11 @@ void Renderer::RenderFrame(
 
             CmdEndEvent(cmdList);
         }
-        
+
+        // Restore all RT writeable resources to UAV state for the next frame
         cl.Transition(m_rtAccum.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.FlushBarriers();
 
         if (m_rtOutputReady)
@@ -808,7 +898,7 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         m_rtDenoisePass.Initialize(device, Paths::ShaderDir());
         m_rtTemporalPass.Initialize(device, Paths::ShaderDir());
         CreateRtHistoryResources(m_device5.Get(), m_widthCached, m_heightCached);
-     
+        m_rtAtrousPass.Initialize(device, Paths::ShaderDir());
     }
 
     // Load a real texture from disk 
@@ -1967,6 +2057,8 @@ void Renderer::CreateRtHistoryResources(ID3D12Device* device, uint32_t width, ui
     for (auto& r : m_rtHistoryAccum)  r.Reset();
     for (auto& r : m_rtHistoryNormal) r.Reset();
     for (auto& r : m_rtHistoryDepth)  r.Reset();
+    for (auto& r : m_rtHistoryMoments) r.Reset();
+    for (auto& r : m_rtSvgfPing) r.Reset();
 
     CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
 
@@ -2043,7 +2135,56 @@ void Renderer::CreateRtHistoryResources(ID3D12Device* device, uint32_t width, ui
 
             CommandList::SetGlobalState(m_rtHistoryDepth[i].Get(), D3D12_RESOURCE_STATE_COPY_DEST);
         }
+        {
+            auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+                DXGI_FORMAT_R16G16_FLOAT,
+                width,
+                height,
+                1,
+                1,
+                1,
+                0,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+            ThrowIfFailed(
+                device->CreateCommittedResource(
+                    &heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &desc,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    nullptr,
+                    IID_PPV_ARGS(&m_rtHistoryMoments[i])),
+                "Create RT history moments");
+
+            CommandList::SetGlobalState(m_rtHistoryMoments[i].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
+
+        {
+            auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+                DXGI_FORMAT_R16G16B16A16_FLOAT,
+                width,
+                height,
+                1,
+                1,
+                1,
+                0,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+            ThrowIfFailed(
+                device->CreateCommittedResource(
+                    &heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &desc,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    nullptr,
+                    IID_PPV_ARGS(&m_rtSvgfPing[i])),
+                "Create RT SVGF ping");
+
+            CommandList::SetGlobalState(m_rtSvgfPing[i].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            
+        }
     }
+    UpdateRtSvgfPingUavTable(device);
 }
 
 bool Renderer::UpdateRtTemporalTables(uint32_t frameIndex, ID3D12Device* device)
@@ -2055,16 +2196,17 @@ bool Renderer::UpdateRtTemporalTables(uint32_t frameIndex, ID3D12Device* device)
         !m_rtHistoryAccum[0] || !m_rtHistoryAccum[1] ||
         !m_rtHistoryNormal[0] || !m_rtHistoryNormal[1] ||
         !m_rtHistoryDepth[0] || !m_rtHistoryDepth[1] ||
+        !m_rtHistoryMoments[0] || !m_rtHistoryMoments[1] ||
         !m_rtAccumReady || !m_rtAovReady)
     {
         return false;
     }
 
     if (!frame.temporalSrvTable.IsValid())
-        frame.temporalSrvTable = m_srvHeap.Allocate(6);
+        frame.temporalSrvTable = m_srvHeap.Allocate(7);
 
     if (!frame.temporalUavTable.IsValid())
-        frame.temporalUavTable = m_srvHeap.Allocate(2);
+        frame.temporalUavTable = m_srvHeap.Allocate(3);
 
     const uint32_t readIndex = m_rtHistoryReadIndex;
     const uint32_t writeIndex = 1u - m_rtHistoryReadIndex;
@@ -2119,6 +2261,24 @@ bool Renderer::UpdateRtTemporalTables(uint32_t frameIndex, ID3D12Device* device)
         device->CreateUnorderedAccessView(m_rtOutput.Get(), nullptr, &uav, UavAt(1));
     }
 
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(m_rtHistoryMoments[readIndex].Get(), &srv, SrvAt(6));
+    }
+
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16G16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        device->CreateUnorderedAccessView(m_rtHistoryMoments[writeIndex].Get(), nullptr, &uav, UavAt(2));
+    }
+
     return true;
 }
 
@@ -2146,4 +2306,132 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(uint32_t frameInde
     cb->debugView = m_debugView;
 
     return alloc.gpu;
+}
+
+bool Renderer::UpdateRtSvgfSrvTable(
+    uint32_t frameIndex,
+    uint32_t iterationIndex,
+    ID3D12Device* device,
+    ID3D12Resource* signalResource,
+    ID3D12Resource* momentsResource)
+{
+    auto& frame = m_rtFrames[frameIndex];
+
+    if (!device ||
+        !signalResource ||
+        !m_rtAovNormal || !m_rtAovDepth ||
+        !momentsResource ||
+        !m_rtAovReady ||
+        iterationIndex >= kMaxRtAtrousIterations)
+    {
+        return false;
+    }
+
+    if (!frame.svgfSrvTables[iterationIndex].IsValid())
+        frame.svgfSrvTables[iterationIndex] = m_srvHeap.Allocate(4);
+
+    auto HandleAt = [&](uint32_t i)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.svgfSrvTables[iterationIndex].cpu;
+        h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
+        return h;
+    };
+
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(signalResource, &srv, HandleAt(0));
+        device->CreateShaderResourceView(m_rtAovNormal.Get(), &srv, HandleAt(1));
+    }
+
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(m_rtAovDepth.Get(), &srv, HandleAt(2));
+    }
+
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(momentsResource, &srv, HandleAt(3));
+    }
+
+    return true;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtAtrousConstants(
+    uint32_t frameIndex,
+    uint32_t width,
+    uint32_t height,
+    uint32_t iterationIndex,
+    bool useMoments,
+    bool finalOutputSrgb)
+{
+    auto alloc = m_upload.Allocate(
+        frameIndex,
+        sizeof(RtAtrousConstants),
+        D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+
+    auto* cb = reinterpret_cast<RtAtrousConstants*>(alloc.cpu);
+    *cb = {};
+
+    cb->invResolution = {
+        1.0f / static_cast<float>(width),
+        1.0f / static_cast<float>(height)
+    };
+    cb->iterationIndex = iterationIndex;
+    cb->stepWidth = 1u << iterationIndex;
+    cb->sigmaDepth = m_rtDenoiseSigmaDepth;
+    cb->sigmaNormal = m_rtDenoiseSigmaNormal;
+    cb->varianceScale = m_rtVarianceScale;
+    cb->useMoments = useMoments ? 1u : 0u;
+    cb->finalOutputSrgb = finalOutputSrgb ? 1u : 0u;
+
+    return alloc.gpu;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE Renderer::RtSvgfPingUavGpuAt(uint32_t i) const
+{
+    D3D12_GPU_DESCRIPTOR_HANDLE h = m_rtSvgfPingUavTable.gpu;
+    h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
+    return h;
+}
+
+void Renderer::UpdateRtSvgfPingUavTable(ID3D12Device* device)
+{
+    if (!device || !m_rtSvgfPing[0] || !m_rtSvgfPing[1])
+        return;
+
+    if (!m_rtSvgfPingUavTable.IsValid())
+        m_rtSvgfPingUavTable = m_srvHeap.Allocate(2);
+
+    auto HandleAt = [&](uint32_t i)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_rtSvgfPingUavTable.cpu;
+        h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
+        return h;
+    };
+
+    for (uint32_t i = 0; i < 2; ++i)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        device->CreateUnorderedAccessView(m_rtSvgfPing[i].Get(), nullptr, &uav, HandleAt(i));
+    }
 }

@@ -6,9 +6,11 @@ Texture2D<float> g_CurrDepth : register(t2);
 Texture2D<float4> g_PrevAccum : register(t3);
 Texture2D<float4> g_PrevNormal : register(t4);
 Texture2D<float> g_PrevDepth : register(t5);
+Texture2D<float2> g_PrevMoments : register(t6);
 
 RWTexture2D<float4> g_HistoryOut : register(u0); // linear
 RWTexture2D<float4> g_Output : register(u1); // display
+RWTexture2D<float2> g_MomentsOut : register(u2);
 
 SamplerState g_LinearClamp : register(s0);
 
@@ -73,6 +75,11 @@ void NeighborhoodMinMax(uint2 pixel, out float3 cmin, out float3 cmax)
     }
 }
 
+float Luminance(float3 c)
+{
+    return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -93,6 +100,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float3 prevNormal = 0.0f.xxx;
     float prevDepth = 1.0f;
     float prevLen = 0.0f;
+    float2 prevMoments = 0.0f.xx;
 
     if (TemporalEnabled != 0 && HistoryValid != 0 && currDepth < 0.9999f)
     {
@@ -109,7 +117,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
             prevLen = g_PrevAccum.SampleLevel(g_LinearClamp, prevUV, 0.0f).a;
             prevNormal = UnpackNormal(g_PrevNormal.SampleLevel(g_LinearClamp, prevUV, 0.0f));
             prevDepth = g_PrevDepth.SampleLevel(g_LinearClamp, prevUV, 0.0f);
-
+            prevMoments = g_PrevMoments.SampleLevel(g_LinearClamp, prevUV, 0.0f);
+            
             float nd = saturate(dot(currNormal, prevNormal));
             bool normalOk = nd > (1.0f - NormalSigma);
             bool depthOk = abs(currDepth - prevDepth) < DepthSigma;
@@ -127,13 +136,20 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float alphaUsed = 0.0f;
     float3 history = currColor;
     
+    float currLuma = Luminance(currColor);
+    float2 currMoments = float2(currLuma, currLuma * currLuma);
+    float2 moments = currMoments;
+    
     if (validReuse)
     {
         float k = saturate(newLen / 8.0f);
         alphaUsed = lerp(0.25f, TemporalAlpha, k);
         history = lerp(currColor, prevClamped, alphaUsed);
+        moments = lerp(currMoments, prevMoments, alphaUsed);
     }
-
+    
+    float variance = max(moments.y - moments.x * moments.x, 0.0f);
+    
     float3 display = history;
 
     if (DebugView == 18)
@@ -154,15 +170,37 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
     else if (DebugView == 22)
     {
-        display = (newLen / 255.0f).xxx;
+        display = (newLen / 255.0f).xxx;            // accumulated history length
     }
     else if (DebugView == 23)
     {
-        display = alphaUsed.xxx;
+        display = alphaUsed.xxx;                    // final blend weight actually used
     }
-    g_HistoryOut[pixel] = float4(history, newLen);
+    else if (DebugView == 24)
+    {
+        display = saturate(variance * 16.0f).xxx;   // variance / noise estimate
+    }
+    else if (DebugView == 25)
+    {
+        float k = saturate(newLen / 8.0f);
+        display = k.xxx;                            // history warm-up / convergence factor
+    }
+    else if (DebugView == 26)
+    {
+        float reprojErr = 0.0f;
 
-    if (DebugView >= 18 && DebugView <= 23)
+        if (validReuse)
+            reprojErr = saturate(abs(currDepth - prevDepth) / max(1e-4f, DepthSigma));
+        else
+            reprojErr = 1.0f;
+
+        display = reprojErr.xxx;                   // depth mismatch / rejection pressure
+    }
+    
+    g_HistoryOut[pixel] = float4(history, newLen);
+    g_MomentsOut[pixel] = moments;
+    
+    if (DebugView >= 18 && DebugView <= 26)
         g_Output[pixel] = float4(display, 1.0f);
     else
         g_Output[pixel] = float4(LinearToSRGB(history), 1.0f);

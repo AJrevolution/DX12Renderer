@@ -22,6 +22,7 @@
 #include "Source/RHI/Pipeline/RTInstanceData.h"
 #include "Source/Renderer/Passes/RtDenoisePass.h"
 #include "Source/Renderer/Passes/RtTemporalPass.h"
+#include "Source/Renderer/Passes/RtAtrousPass.h"
 
 class Renderer
 {
@@ -62,6 +63,21 @@ private:
         uint32_t historyValid = 0;
         uint32_t debugView = 0;
         uint32_t pad0 = 0;
+    };
+
+    struct RtAtrousConstants
+    {
+        DirectX::XMFLOAT2 invResolution{};
+        uint32_t iterationIndex = 0;
+        uint32_t stepWidth = 1;
+
+        float sigmaDepth = 0.02f;
+        float sigmaNormal = 0.25f;
+        float varianceScale = 1.0f;
+        uint32_t useMoments = 1;
+
+        uint32_t finalOutputSrgb = 1;
+        uint32_t pad0[3] = {};
     };
 
     struct DrawItem
@@ -145,6 +161,24 @@ private:
     void CreateRtHistoryResources(ID3D12Device* device, uint32_t width, uint32_t height);
     bool UpdateRtTemporalTables(uint32_t frameIndex, ID3D12Device* device);
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtTemporalConstants(uint32_t frameIndex, uint32_t width, uint32_t height);
+
+    bool UpdateRtSvgfSrvTable(
+        uint32_t frameIndex,
+        uint32_t iterationIndex,
+        ID3D12Device* device,
+        ID3D12Resource* signalResource,
+        ID3D12Resource* momentsResource);
+
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtAtrousConstants(
+        uint32_t frameIndex,
+        uint32_t width,
+        uint32_t height,
+        uint32_t iterationIndex,
+        bool useMoments,
+        bool finalOutputSrgb);
+
+    void UpdateRtSvgfPingUavTable(ID3D12Device* device);
+    D3D12_GPU_DESCRIPTOR_HANDLE RtSvgfPingUavGpuAt(uint32_t i) const;
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -247,6 +281,9 @@ private:
 
     AccelerationStructure m_blasQuad;
     AccelerationStructure m_blasFloor;
+    
+    static constexpr uint32_t kMaxRtAtrousIterations = 4;
+
     struct FrameRaytracingResources
     {
         AccelerationStructure tlas;
@@ -257,9 +294,12 @@ private:
         DescriptorAllocator::Allocation geometryTable{};
 
         // Per-frame temporal / denoise descriptor tables.
-        DescriptorAllocator::Allocation temporalSrvTable{}; // 6 SRVs
-        DescriptorAllocator::Allocation temporalUavTable{}; // 2 UAVs
+        DescriptorAllocator::Allocation temporalSrvTable{}; // 7 SRVs
+        DescriptorAllocator::Allocation temporalUavTable{}; // 3 UAVs
         DescriptorAllocator::Allocation denoiseSrvTable{};  // 3 SRVs
+
+        // Per-frame, per-iteration SVGF input tables.
+        std::array<DescriptorAllocator::Allocation, kMaxRtAtrousIterations> svgfSrvTables{};
 
         uint32_t capacity = 0;
     };
@@ -320,6 +360,8 @@ private:
     static constexpr uint32_t kRtSrv_IblSpec =
         kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 2; // t32
 
+
+
     ComPtr<ID3D12Resource> m_rtAovNormal;
     ComPtr<ID3D12Resource> m_rtAovDepth;
     bool m_rtAovReady = false;
@@ -338,8 +380,6 @@ private:
     bool m_prevRtHasBrdfLut = false;
 
     RtTemporalPass m_rtTemporalPass;
-    //DescriptorAllocator::Allocation m_rtTemporalSrvTable{};
-    //DescriptorAllocator::Allocation m_rtTemporalUavTable{};
 
     std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryAccum{};
     std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryNormal{};
@@ -355,4 +395,19 @@ private:
     DirectX::XMFLOAT4X4 m_currViewProj{};
     DirectX::XMFLOAT4X4 m_currInvViewProj{};
     DirectX::XMFLOAT4X4 m_prevViewProj{};
+
+    RtAtrousPass m_rtAtrousPass;
+
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryMoments{};
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtSvgfPing{};
+
+    bool m_rtSvgf = true;
+    uint32_t m_rtAtrousIterations = 2;
+    float m_rtVarianceScale = 1.0f;
+
+    bool m_prevRtSvgf = true;
+    uint32_t m_prevRtAtrousIterations = 2;
+    float m_prevRtVarianceScale = 1.0f;
+
+    DescriptorAllocator::Allocation m_rtSvgfPingUavTable{};
 };
