@@ -23,6 +23,7 @@
 #include "Source/Renderer/Passes/RtDenoisePass.h"
 #include "Source/Renderer/Passes/RtTemporalPass.h"
 #include "Source/Renderer/Passes/RtAtrousPass.h"
+#include "Source/Renderer/Passes/RtHistorySelectPass.h"
 
 class Renderer
 {
@@ -86,6 +87,14 @@ private:
         Mesh* mesh = nullptr;
         Material* material = nullptr;
         DirectX::XMFLOAT4X4 world{};
+    };
+
+    struct RtHistorySelectConstants
+    {
+        float roughnessThreshold = 0.25f;
+        float roughnessRange = 0.20f;
+        uint32_t debugView = 0;
+        uint32_t pad0 = 0;
     };
 
     std::vector<DrawItem> m_draws;
@@ -160,8 +169,6 @@ private:
     bool UpdateRtDenoiseSrvTable(uint32_t frameIndex, ID3D12Device* device, ID3D12Resource* signalResource);
     
     void CreateRtHistoryResources(ID3D12Device* device, uint32_t width, uint32_t height);
-    bool UpdateRtTemporalTables(uint32_t frameIndex, ID3D12Device* device);
-    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtTemporalConstants(uint32_t frameIndex, uint32_t width, uint32_t height);
 
     bool UpdateRtSvgfSrvTable(
         uint32_t frameIndex,
@@ -179,7 +186,32 @@ private:
         bool finalOutputSrgb);
 
     void UpdateRtSvgfPingUavTable(ID3D12Device* device);
+
+    bool UpdateRtTemporalTables(
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        ID3D12Resource* prevAccumResource,
+        ID3D12Resource* prevMomentsResource,
+        ID3D12Resource* outAccumResource,
+        ID3D12Resource* outMomentsResource,
+        DescriptorAllocator::Allocation& srvTable,
+        DescriptorAllocator::Allocation& uavTable);
+
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtTemporalConstants(
+        uint32_t frameIndex,
+        uint32_t width,
+        uint32_t height,
+        float temporalAlpha,
+        float roughnessSigma);
+
     D3D12_GPU_DESCRIPTOR_HANDLE RtSvgfPingUavGpuAt(uint32_t i) const;
+
+
+    bool UpdateRtHistorySelectTables(
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        ID3D12Resource* stableSignal,
+        ID3D12Resource* responsiveSignal);
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -294,9 +326,14 @@ private:
         // per-frame RT table: geometry + instance data + material textures
         DescriptorAllocator::Allocation geometryTable{};
 
-        // Per-frame temporal / denoise descriptor tables.
-        DescriptorAllocator::Allocation temporalSrvTable{}; // 7 SRVs
-        DescriptorAllocator::Allocation temporalUavTable{}; // 3 UAVs
+        DescriptorAllocator::Allocation temporalStableSrvTable{}; // 7 SRVs
+        DescriptorAllocator::Allocation temporalStableUavTable{}; // 3 UAVs
+
+        DescriptorAllocator::Allocation temporalRespSrvTable{};   // 7 SRVs
+        DescriptorAllocator::Allocation temporalRespUavTable{};   // 3 UAVs
+
+        DescriptorAllocator::Allocation historySelectSrvTable{};  // 4 SRVs
+        DescriptorAllocator::Allocation historySelectUavTable{};  // 2 UAVs
         DescriptorAllocator::Allocation denoiseSrvTable{};  // 3 SRVs
 
         // Per-frame, per-iteration SVGF input tables.
@@ -414,4 +451,24 @@ private:
 
     float m_rtTemporalRoughnessSigma = 0.15f;
     float m_prevRtTemporalRoughnessSigma = 0.15f;
+
+    RtHistorySelectPass m_rtHistorySelectPass;
+
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryAccumResp{};
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryMomentsResp{};
+
+    float m_rtTemporalAlphaResp = 0.35f;
+    float m_rtTemporalRoughnessSigmaResp = 0.08f;
+
+    float m_rtHistorySelectThreshold = 0.25f;
+    float m_rtHistorySelectRange = 0.20f;
+
+    float m_prevRtTemporalAlpha = 0.10f;
+    float m_prevRtTemporalAlphaResp = 0.35f;
+    float m_prevRtTemporalRoughnessSigmaResp = 0.08f;
+    float m_prevRtHistorySelectThreshold = 0.25f;
+    float m_prevRtHistorySelectRange = 0.20f;
+
+
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };
