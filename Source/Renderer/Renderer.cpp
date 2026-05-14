@@ -4,7 +4,7 @@
 #include "ThirdParty\DirectX-Headers\include\directx\d3dx12.h"
 #include "DrawConstants.h"
 #include "Source/RHI/Resources/NullSrvHelpers.h"
-
+#include <algorithm>
 #include <cstring>
 #include <cmath>
 
@@ -116,7 +116,7 @@ void Renderer::RenderFrame(
 
     const bool wantsTemporalDebug =
         (m_debugView >= 18 && m_debugView <= 26) ||
-        (m_debugView >= 32 && m_debugView <= 33);
+        (m_debugView >= 32 && m_debugView <= 36);
     const bool wantsSvgfDebug = (m_debugView == 28);
     const bool wantsHistorySelectDebug = (m_debugView >= 29 && m_debugView <= 31);
     const bool wantsRtPostDebug =
@@ -188,6 +188,8 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtTemporalRoughnessSigmaResp - m_prevRtTemporalRoughnessSigmaResp) > 1e-6f) ||
         (std::fabs(m_rtTemporalSpecDirSigma - m_prevRtTemporalSpecDirSigma) > 1e-6f) ||
         (std::fabs(m_rtTemporalSpecDirRoughCutoff - m_prevRtTemporalSpecDirRoughCutoff) > 1e-6f) ||
+        (m_rtTemporalReprojectRadius != m_prevRtTemporalReprojectRadius) ||
+        (std::fabs(m_rtTemporalReprojectMinConf - m_prevRtTemporalReprojectMinConf) > 1e-6f) ||
         (std::fabs(m_rtHistorySelectThreshold - m_prevRtHistorySelectThreshold) > 1e-6f) ||
         (std::fabs(m_rtHistorySelectRange - m_prevRtHistorySelectRange) > 1e-6f);
 
@@ -239,6 +241,8 @@ void Renderer::RenderFrame(
     m_prevRtHistorySelectRange = m_rtHistorySelectRange;
     m_prevRtTemporalSpecDirSigma = m_rtTemporalSpecDirSigma;
     m_prevRtTemporalSpecDirRoughCutoff = m_rtTemporalSpecDirRoughCutoff;
+    m_prevRtTemporalReprojectRadius = m_rtTemporalReprojectRadius;
+    m_prevRtTemporalReprojectMinConf = m_rtTemporalReprojectMinConf;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -2524,6 +2528,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     cb->temporalEnabled = m_rtTemporal ? 1u : 0u;
     cb->historyValid = m_rtTemporalHistoryValid ? 1u : 0u;
     cb->debugView = m_debugView;
+    cb->reprojectRadius = std::min(m_rtTemporalReprojectRadius, 2u);
+    cb->reprojectMinConf = std::clamp(m_rtTemporalReprojectMinConf, 0.0f, 1.0f);
     
     cb->currCameraPos = {
     m_currRtCameraPos.x,
@@ -2538,6 +2544,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
         m_prevRtCameraPos.z,
         0.0f
     };
+
+
     return alloc.gpu;
 }
 

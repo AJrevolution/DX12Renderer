@@ -66,7 +66,11 @@ private:
         uint32_t temporalEnabled = 1;
         uint32_t historyValid = 0;
         uint32_t debugView = 0;
-        uint32_t pad0 = {};
+        uint32_t pad0 = 0;
+
+        uint32_t reprojectRadius = 1;
+        float reprojectMinConf = 0.25f;
+        uint32_t pad1[2] = {};
 
         DirectX::XMFLOAT4 currCameraPos{};
         DirectX::XMFLOAT4 prevCameraPos{};
@@ -484,6 +488,12 @@ private:
 
     DirectX::XMFLOAT3 m_currRtCameraPos{};
     DirectX::XMFLOAT3 m_prevRtCameraPos{};
+
+    uint32_t m_rtTemporalReprojectRadius = 1;
+    float    m_rtTemporalReprojectMinConf = 0.25f;
+
+    uint32_t m_prevRtTemporalReprojectRadius = 1;
+    float    m_prevRtTemporalReprojectMinConf = 0.25f;
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

@@ -33,6 +33,10 @@ cbuffer RtTemporalConstants : register(b0)
     uint DebugView;
     uint _pad0;
     
+    uint ReprojectRadius;
+    float ReprojectMinConf;
+    uint2 _pad1;
+    
     float4 CurrCameraPos;
     float4 PrevCameraPos;
 };
@@ -99,6 +103,34 @@ float3 RoughReflect(float3 R, float3 N, float rough)
     return SafeNormalize(lerp(R, N, t));
 }
 
+float EvalSpecWeight(
+    float3 worldPos,
+    float3 currNormal,
+    float currR,
+    float3 prevNormal,
+    float prevR,
+    out bool specOk,
+    out float specDot)
+{
+    specOk = true;
+    specDot = 1.0f;
+
+    float rMin = min(currR, prevR);
+    if (rMin >= SpecDirRoughCutoff)
+        return 1.0f;
+
+    float3 R0 = ReflectDir(CurrCameraPos.xyz, worldPos, currNormal);
+    float3 R1 = ReflectDir(PrevCameraPos.xyz, worldPos, prevNormal);
+
+    float3 RR0 = RoughReflect(R0, currNormal, currR);
+    float3 RR1 = RoughReflect(R1, prevNormal, prevR);
+
+    specDot = saturate(dot(RR0, RR1));
+    specOk = specDot > (1.0f - SpecDirSigma);
+
+    return saturate((specDot - (1.0f - SpecDirSigma)) / max(1e-4f, SpecDirSigma));
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -124,48 +156,123 @@ void main(uint3 dtid : SV_DispatchThreadID)
     
     bool specOk = true;
     float specDot = 1.0f;
+    
+    float bestScore = 0.0f;
+    int2 chosenOffset = int2(0, 0);
 
     if (TemporalEnabled != 0 && HistoryValid != 0 && currDepth < 0.9999f)
     {
         float3 worldPos = ReconstructWorldPos(pixel, currDepth);
         prevUV = ProjectPrevUV(worldPos);
-
-        bool inBounds =
+        
+        uint radius = min(ReprojectRadius, 2u);
+        
+        bool centerInBounds =
             prevUV.x >= 0.0f && prevUV.x <= 1.0f &&
             prevUV.y >= 0.0f && prevUV.y <= 1.0f;
 
-        if (inBounds)
+        if (centerInBounds)
         {
-            float4 prevNormalPacked = g_PrevNormal.SampleLevel(g_LinearClamp, prevUV, 0.0f);
-            prevColor = g_PrevAccum.SampleLevel(g_LinearClamp, prevUV, 0.0f).rgb;
-            prevLen = g_PrevAccum.SampleLevel(g_LinearClamp, prevUV, 0.0f).a;
-            prevNormal = UnpackNormal(prevNormalPacked);
-            float prevR = prevNormalPacked.a;
-            prevDepth = g_PrevDepth.SampleLevel(g_LinearClamp, prevUV, 0.0f);
-            prevMoments = g_PrevMoments.SampleLevel(g_LinearClamp, prevUV, 0.0f);
-            
-            float nd = saturate(dot(currNormal, prevNormal));
-            bool normalOk = nd > (1.0f - NormalSigma);
-            bool depthOk = abs(currDepth - prevDepth) < DepthSigma;
-            bool roughOk = abs(currR - prevR) < RoughnessSigma;
-            
-            specOk = true;
-            specDot = 1.0f;
+            int2 basePrevPixel = int2(prevUV * float2(width, height));
+            basePrevPixel = clamp(basePrevPixel, int2(0, 0), int2(int(width) - 1, int(height) - 1));
 
-            float rMin = min(currR, prevR);
-            if (rMin < SpecDirRoughCutoff)
+            float bestCandidateScore = -1.0f;
+            float2 bestPrevUV = prevUV;
+            float3 bestPrevColor = 0.0f.xxx;
+            float3 bestPrevNormal = 0.0f.xxx;
+            float bestPrevDepth = 1.0f;
+            float bestPrevLen = 0.0f;
+            float2 bestPrevMoments = 0.0f.xx;
+            float bestSpecDot = 1.0f;
+            bool bestSpecOk = true;
+            int2 bestOffset = int2(0, 0);
+        
+            float normalPow = max(1.0f, 1.0f / max(1e-4f, NormalSigma));
+        
+            [unroll]
+            for (int y = -2; y <= 2; ++y)
             {
-                float3 R0 = ReflectDir(CurrCameraPos.xyz, worldPos, currNormal);
-                float3 R1 = ReflectDir(PrevCameraPos.xyz, worldPos, prevNormal);
+                [unroll]
+                for (int x = -2; x <= 2; ++x)
+                {
+                    
+                    if (abs(x) > int(radius) || abs(y) > int(radius))
+                        continue;
 
-                float3 RR0 = RoughReflect(R0, currNormal, currR);
-                float3 RR1 = RoughReflect(R1, prevNormal, prevR);
+             
+                    int2 candidatePixel = basePrevPixel + int2(x, y);
+                    bool inBounds =
+                    candidatePixel.x >= 0 && candidatePixel.x < int(width) &&
+                    candidatePixel.y >= 0 && candidatePixel.y < int(height);
+                
+                    if (!inBounds)
+                        continue;
+                    uint2 cp = uint2(candidatePixel);
+                    float2 candidateUV = (float2(cp) + 0.5f) * InvResolution;
+                
+                    float4 prevAccumSample = g_PrevAccum.Load(int3(cp, 0));
+                    float4 prevNormalPacked = g_PrevNormal.Load(int3(cp, 0));
 
-                specDot = saturate(dot(RR0, RR1));
-                specOk = specDot > (1.0f - SpecDirSigma);
+                    float3 candPrevColor = prevAccumSample.rgb;
+                    float candPrevLen = prevAccumSample.a;
+                    float3 candPrevNormal = UnpackNormal(prevNormalPacked);
+                    float candPrevR = prevNormalPacked.a;
+                    float candPrevDepth = g_PrevDepth.Load(int3(cp, 0));
+                    float2 candPrevMoments = g_PrevMoments.Load(int3(cp, 0));
+
+                    float depthDelta = abs(currDepth - candPrevDepth);
+                    float roughDelta = abs(currR - candPrevR);
+                    float nd = saturate(dot(currNormal, candPrevNormal));
+
+                    float wDepth = exp(-depthDelta / max(1e-4f, DepthSigma));
+                    float wNormal = pow(nd, normalPow);
+                    float wRough = exp(-roughDelta / max(1e-4f, RoughnessSigma));
+
+                    bool candSpecOk = true;
+                    float candSpecDot = 1.0f;
+                    float wSpec = EvalSpecWeight(
+                                                    worldPos,
+                                                    currNormal,
+                                                    currR,
+                                                    candPrevNormal,
+                                                    candPrevR,
+                                                    candSpecOk,
+                                                    candSpecDot);
+
+                    float score = wDepth * wNormal * wRough * wSpec;
+
+                    if (score > bestCandidateScore)
+                    {
+                        bestCandidateScore = score;
+                        bestPrevUV = candidateUV;
+                        bestPrevColor = candPrevColor;
+                        bestPrevLen = candPrevLen;
+                        bestPrevNormal = candPrevNormal;
+                        bestPrevDepth = candPrevDepth;
+                        bestPrevMoments = candPrevMoments;
+                        bestSpecDot = candSpecDot;
+                        bestSpecOk = candSpecOk;
+                        bestOffset = int2(x, y);
+                    }
+                }
             }
-            
-            validReuse = normalOk && depthOk && roughOk && specOk;
+        
+            bestScore = saturate(max(bestCandidateScore, 0.0f));
+
+            if (bestCandidateScore >= ReprojectMinConf)
+            {
+                prevUV = bestPrevUV;
+                prevColor = bestPrevColor;
+                prevLen = bestPrevLen;
+                prevNormal = bestPrevNormal;
+                prevDepth = bestPrevDepth;
+                prevMoments = bestPrevMoments;
+                specDot = bestSpecDot;
+                specOk = bestSpecOk;
+                chosenOffset = bestOffset;
+
+                validReuse = true;
+            }
         }
     }
 
@@ -186,6 +293,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     {
         float k = saturate(newLen / 8.0f);
         alphaUsed = lerp(0.25f, TemporalAlpha, k);
+        alphaUsed *= saturate(bestScore);
         history = lerp(currColor, prevClamped, alphaUsed);
         moments = lerp(currMoments, prevMoments, alphaUsed);
     }
@@ -247,12 +355,26 @@ void main(uint3 dtid : SV_DispatchThreadID)
     {
         display = specDot.xxx;
     }
+    else if (DebugView == 34)
+    {
+        float r = max(1.0f, float(min(ReprojectRadius, 2u)));
+        float2 v = float2(chosenOffset) / r;
+        display = float3(v * 0.5f + 0.5f, validReuse ? 1.0f : 0.0f);
+    }
+    else if (DebugView == 35)
+    {
+        display = bestScore.xxx;
+    }
+    else if (DebugView == 36)
+    {
+        display = alphaUsed.xxx;
+    }
     
     g_HistoryOut[pixel] = float4(history, newLen);
     g_MomentsOut[pixel] = moments;
     
     if ((DebugView >= 18 && DebugView <= 26) ||
-        (DebugView >= 32 && DebugView <= 33))
+        (DebugView >= 32 && DebugView <= 36))
         g_Output[pixel] = float4(display, 1.0f);
     else
         g_Output[pixel] = float4(LinearToSRGB(history), 1.0f);
