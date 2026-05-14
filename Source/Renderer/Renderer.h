@@ -60,11 +60,18 @@ private:
         float depthSigma = 0.02f;
         float normalSigma = 0.25f;
         float roughnessSigma = 0.15f;
+        float specDirSigma = 0.08f;
+        float specDirRoughCutoff = 0.35f;
+
         uint32_t temporalEnabled = 1;
         uint32_t historyValid = 0;
         uint32_t debugView = 0;
-        uint32_t pad0[3] = {};
+        uint32_t pad0 = {};
+
+        DirectX::XMFLOAT4 currCameraPos{};
+        DirectX::XMFLOAT4 prevCameraPos{};
     };
+    static_assert((sizeof(RtTemporalConstants) % 16) == 0, "RtTemporalConstants must be 16-byte aligned.");
 
     struct RtAtrousConstants
     {
@@ -469,6 +476,14 @@ private:
     float m_prevRtHistorySelectThreshold = 0.25f;
     float m_prevRtHistorySelectRange = 0.20f;
 
+    float m_rtTemporalSpecDirSigma = 0.08f;
+    float m_rtTemporalSpecDirRoughCutoff = 0.35f;
+
+    float m_prevRtTemporalSpecDirSigma = 0.08f;
+    float m_prevRtTemporalSpecDirRoughCutoff = 0.35f;
+
+    DirectX::XMFLOAT3 m_currRtCameraPos{};
+    DirectX::XMFLOAT3 m_prevRtCameraPos{};
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

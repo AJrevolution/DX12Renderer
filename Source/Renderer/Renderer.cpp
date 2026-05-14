@@ -114,7 +114,9 @@ void Renderer::RenderFrame(
 
     BuildDrawList(sceneTime);
 
-    const bool wantsTemporalDebug = (m_debugView >= 18 && m_debugView <= 26);
+    const bool wantsTemporalDebug =
+        (m_debugView >= 18 && m_debugView <= 26) ||
+        (m_debugView >= 32 && m_debugView <= 33);
     const bool wantsSvgfDebug = (m_debugView == 28);
     const bool wantsHistorySelectDebug = (m_debugView >= 29 && m_debugView <= 31);
     const bool wantsRtPostDebug =
@@ -184,6 +186,8 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtTemporalAlphaResp - m_prevRtTemporalAlphaResp) > 1e-6f) ||
         (std::fabs(m_rtTemporalRoughnessSigma - m_prevRtTemporalRoughnessSigma) > 1e-6f) ||
         (std::fabs(m_rtTemporalRoughnessSigmaResp - m_prevRtTemporalRoughnessSigmaResp) > 1e-6f) ||
+        (std::fabs(m_rtTemporalSpecDirSigma - m_prevRtTemporalSpecDirSigma) > 1e-6f) ||
+        (std::fabs(m_rtTemporalSpecDirRoughCutoff - m_prevRtTemporalSpecDirRoughCutoff) > 1e-6f) ||
         (std::fabs(m_rtHistorySelectThreshold - m_prevRtHistorySelectThreshold) > 1e-6f) ||
         (std::fabs(m_rtHistorySelectRange - m_prevRtHistorySelectRange) > 1e-6f);
 
@@ -233,6 +237,8 @@ void Renderer::RenderFrame(
     m_prevRtTemporalRoughnessSigmaResp = m_rtTemporalRoughnessSigmaResp;
     m_prevRtHistorySelectThreshold = m_rtHistorySelectThreshold;
     m_prevRtHistorySelectRange = m_rtHistorySelectRange;
+    m_prevRtTemporalSpecDirSigma = m_rtTemporalSpecDirSigma;
+    m_prevRtTemporalSpecDirRoughCutoff = m_rtTemporalSpecDirRoughCutoff;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -845,6 +851,7 @@ void Renderer::RenderFrame(
     CmdEndEvent(cmdList);
     
     m_prevViewProj = m_currViewProj;
+    m_prevRtCameraPos = m_currRtCameraPos;
 }
 
 void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
@@ -953,6 +960,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     DirectX::XMStoreFloat4x4(&cb->lightViewProj, lightViewProj);
 
     cb->cameraPos = cam.position;
+    m_currRtCameraPos = cb->cameraPos;
     cb->time = time; 
     cb->frameIndex = frameIndex;
 
@@ -2507,14 +2515,29 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
         1.0f / static_cast<float>(width),
         1.0f / static_cast<float>(height)
     };
-    cb->temporalAlpha = m_rtTemporalAlpha;
+    cb->temporalAlpha = temporalAlpha;
     cb->depthSigma = m_rtTemporalDepthSigma;
     cb->normalSigma = m_rtTemporalNormalSigma;
-    cb->roughnessSigma = m_rtTemporalRoughnessSigma;
+    cb->roughnessSigma = roughnessSigma;
+    cb->specDirSigma = m_rtTemporalSpecDirSigma;
+    cb->specDirRoughCutoff = m_rtTemporalSpecDirRoughCutoff;
     cb->temporalEnabled = m_rtTemporal ? 1u : 0u;
     cb->historyValid = m_rtTemporalHistoryValid ? 1u : 0u;
     cb->debugView = m_debugView;
+    
+    cb->currCameraPos = {
+    m_currRtCameraPos.x,
+    m_currRtCameraPos.y,
+    m_currRtCameraPos.z,
+    0.0f
+    };
 
+    cb->prevCameraPos = {
+        m_prevRtCameraPos.x,
+        m_prevRtCameraPos.y,
+        m_prevRtCameraPos.z,
+        0.0f
+    };
     return alloc.gpu;
 }
 

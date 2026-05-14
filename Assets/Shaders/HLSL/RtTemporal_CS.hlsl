@@ -22,12 +22,19 @@ cbuffer RtTemporalConstants : register(b0)
     float2 InvResolution;
     float TemporalAlpha;
     float DepthSigma;
+    
     float NormalSigma;
     float RoughnessSigma;
+    float SpecDirSigma;
+    float SpecDirRoughCutoff;
+    
     uint TemporalEnabled;
     uint HistoryValid;
     uint DebugView;
-    uint3 _pad0;
+    uint _pad0;
+    
+    float4 CurrCameraPos;
+    float4 PrevCameraPos;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -80,6 +87,18 @@ float Luminance(float3 c)
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
+float3 ReflectDir(float3 camPos, float3 worldPos, float3 N)
+{
+    float3 V = SafeNormalize(camPos - worldPos); // surface -> camera
+    return SafeNormalize(reflect(-V, N));
+}
+
+float3 RoughReflect(float3 R, float3 N, float rough)
+{
+    float t = rough * rough;
+    return SafeNormalize(lerp(R, N, t));
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -102,6 +121,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float prevDepth = 1.0f;
     float prevLen = 0.0f;
     float2 prevMoments = 0.0f.xx;
+    
+    bool specOk = true;
+    float specDot = 1.0f;
 
     if (TemporalEnabled != 0 && HistoryValid != 0 && currDepth < 0.9999f)
     {
@@ -127,7 +149,23 @@ void main(uint3 dtid : SV_DispatchThreadID)
             bool depthOk = abs(currDepth - prevDepth) < DepthSigma;
             bool roughOk = abs(currR - prevR) < RoughnessSigma;
             
-            validReuse = normalOk && depthOk && roughOk;
+            specOk = true;
+            specDot = 1.0f;
+
+            float rMin = min(currR, prevR);
+            if (rMin < SpecDirRoughCutoff)
+            {
+                float3 R0 = ReflectDir(CurrCameraPos.xyz, worldPos, currNormal);
+                float3 R1 = ReflectDir(PrevCameraPos.xyz, worldPos, prevNormal);
+
+                float3 RR0 = RoughReflect(R0, currNormal, currR);
+                float3 RR1 = RoughReflect(R1, prevNormal, prevR);
+
+                specDot = saturate(dot(RR0, RR1));
+                specOk = specDot > (1.0f - SpecDirSigma);
+            }
+            
+            validReuse = normalOk && depthOk && roughOk && specOk;
         }
     }
 
@@ -201,10 +239,20 @@ void main(uint3 dtid : SV_DispatchThreadID)
         display = reprojErr.xxx;                   // depth mismatch / rejection pressure
     }
     
+    else if (DebugView == 32)
+    {
+        display = specOk ? 1.0f.xxx : 0.0f.xxx;
+    }
+    else if (DebugView == 33)
+    {
+        display = specDot.xxx;
+    }
+    
     g_HistoryOut[pixel] = float4(history, newLen);
     g_MomentsOut[pixel] = moments;
     
-    if (DebugView >= 18 && DebugView <= 26)
+    if ((DebugView >= 18 && DebugView <= 26) ||
+        (DebugView >= 32 && DebugView <= 33))
         g_Output[pixel] = float4(display, 1.0f);
     else
         g_Output[pixel] = float4(LinearToSRGB(history), 1.0f);
