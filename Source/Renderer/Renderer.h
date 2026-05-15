@@ -106,7 +106,7 @@ private:
         float roughnessRange = 0.20f;
 
         float lengthBias = 0.0f;
-        float lengthScale = 0.02f;
+        float lengthScale = 0.01f;
 
         uint32_t debugView = 0;
         uint32_t  pad0[3] = {};
@@ -499,9 +499,9 @@ private:
     uint32_t m_prevRtTemporalReprojectRadius = 1;
     float    m_prevRtTemporalReprojectMinConf = 0.25f;
     float m_rtHistorySelectLengthBias = 0.0f;
-    float m_rtHistorySelectLengthScale = 0.02f;
+    float m_rtHistorySelectLengthScale = 0.01f;
 
     float m_prevRtHistorySelectLengthBias = 0.0f;
-    float m_prevRtHistorySelectLengthScale = 0.02f;
+    float m_prevRtHistorySelectLengthScale = 0.01f;
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

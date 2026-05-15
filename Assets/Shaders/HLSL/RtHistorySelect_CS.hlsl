@@ -14,8 +14,9 @@ cbuffer RtHistorySelectConstants : register(b0)
     float RoughnessRange;
     float LengthBias;
     float LengthScale;
+    
     uint DebugView;
-    uint _pad0;
+    uint3 _pad0;
 };
 
 [numthreads(8, 8, 1)]
@@ -45,11 +46,13 @@ void main(uint3 dtid : SV_DispatchThreadID)
     (RoughnessThreshold - roughness) / max(RoughnessRange, 1e-4f));
 
     float lenDelta = (respLen - stableLen) + LengthBias;
-    float tLen = saturate(0.5f + lenDelta * LengthScale);
     
-    // Roughness remains the material-intent base. Length can pull the decision
-    // toward the history that has accumulated more trustworthy samples.
-    float t = lerp(tRough, tLen, 0.5f);
+    // Treat length as an adjustment to the roughness decision, not as a second
+    // vote that always pulls toward 0.5 when lengths are equal.
+    float lenAdjust = clamp(lenDelta * LengthScale, -0.5f, 0.5f);
+    
+    float tLen = saturate(0.5f + lenAdjust);
+    float t = saturate(tRough + lenAdjust);
 
     // Sky / miss path stays on stable.
     if (depth >= 0.9999f)
