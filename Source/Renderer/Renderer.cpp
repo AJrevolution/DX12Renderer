@@ -118,11 +118,11 @@ void Renderer::RenderFrame(
         (m_debugView >= 18 && m_debugView <= 26) ||
         (m_debugView >= 32 && m_debugView <= 36);
 
-    const bool wantsSvgfDebug = (m_debugView == 28);
+    const bool wantsSvgfDebug = (m_debugView == 28) || (m_debugView == 43);
 
     const bool wantsHistorySelectDebug = 
         (m_debugView >= 29 && m_debugView <= 31) ||
-        (m_debugView >= 37 && m_debugView <= 41);
+        (m_debugView >= 37 && m_debugView <= 42);
 
     const bool wantsRtPostDebug =
         wantsTemporalDebug || wantsSvgfDebug || wantsHistorySelectDebug;
@@ -138,7 +138,9 @@ void Renderer::RenderFrame(
         !m_rtHistoryValid ||
         (m_rtSvgf != m_prevRtSvgf) ||
         (m_rtAtrousIterations != m_prevRtAtrousIterations) ||
-        (std::fabs(m_rtVarianceScale - m_prevRtVarianceScale) > 1e-6f);
+        (std::fabs(m_rtVarianceScale - m_prevRtVarianceScale) > 1e-6f) ||
+        (std::fabs(m_rtAtrousLengthAttenuation - m_prevRtAtrousLengthAttenuation) > 1e-6f) ||
+        (std::fabs(m_rtAtrousLengthPower - m_prevRtAtrousLengthPower) > 1e-6f);
 
     if (!drawListChanged)
     {
@@ -197,6 +199,7 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtTemporalReprojectMinConf - m_prevRtTemporalReprojectMinConf) > 1e-6f) ||
         (std::fabs(m_rtHistorySelectLengthBias - m_prevRtHistorySelectLengthBias) > 1e-6f) ||
         (std::fabs(m_rtHistorySelectLengthScale - m_prevRtHistorySelectLengthScale) > 1e-6f) ||
+        (std::fabs(m_rtHistorySelectLengthInfluence - m_prevRtHistorySelectLengthInfluence) > 1e-6f) ||
         (std::fabs(m_rtHistorySelectThreshold - m_prevRtHistorySelectThreshold) > 1e-6f) ||
         (std::fabs(m_rtHistorySelectRange - m_prevRtHistorySelectRange) > 1e-6f);
 
@@ -252,6 +255,9 @@ void Renderer::RenderFrame(
     m_prevRtTemporalReprojectMinConf = m_rtTemporalReprojectMinConf;
     m_prevRtHistorySelectLengthBias = m_rtHistorySelectLengthBias;
     m_prevRtHistorySelectLengthScale = m_rtHistorySelectLengthScale;
+    m_prevRtHistorySelectLengthInfluence = m_rtHistorySelectLengthInfluence;
+    m_prevRtAtrousLengthAttenuation = m_rtAtrousLengthAttenuation;
+    m_prevRtAtrousLengthPower = m_rtAtrousLengthPower;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -2651,6 +2657,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtAtrousConstants(
     cb->varianceScale = m_rtVarianceScale;
     cb->useMoments = useMoments ? 1u : 0u;
     cb->finalOutputSrgb = finalOutputSrgb ? 1u : 0u;
+    cb->lengthAttenuation = m_rtAtrousLengthAttenuation;
+    cb->lengthPower = m_rtAtrousLengthPower;
     cb->debugView = m_debugView;
 
     return alloc.gpu;
@@ -2778,6 +2786,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtHistorySelectConstants(uint32_t fram
     cb->roughnessRange = m_rtHistorySelectRange;
     cb->lengthBias = m_rtHistorySelectLengthBias;
     cb->lengthScale = m_rtHistorySelectLengthScale;
+    cb->lengthInfluence = m_rtHistorySelectLengthInfluence;
     cb->debugView = m_debugView;
 
     return alloc.gpu;

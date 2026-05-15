@@ -14,9 +14,9 @@ cbuffer RtHistorySelectConstants : register(b0)
     float RoughnessRange;
     float LengthBias;
     float LengthScale;
-    
+    float LengthInfluence;
     uint DebugView;
-    uint3 _pad0;
+    uint2 _pad0;
 };
 
 [numthreads(8, 8, 1)]
@@ -46,13 +46,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
     (RoughnessThreshold - roughness) / max(RoughnessRange, 1e-4f));
 
     float lenDelta = (respLen - stableLen) + LengthBias;
-    
-    // Treat length as an adjustment to the roughness decision, not as a second
-    // vote that always pulls toward 0.5 when lengths are equal.
     float lenAdjust = clamp(lenDelta * LengthScale, -0.5f, 0.5f);
-    
     float tLen = saturate(0.5f + lenAdjust);
-    float t = saturate(tRough + lenAdjust);
+    
+    // 0 = roughness only, 1 = length vote only.
+    float t = lerp(tRough, tLen, saturate(LengthInfluence));
 
     // Sky / miss path stays on stable.
     if (depth >= 0.9999f)
@@ -89,6 +87,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
     else if (DebugView == 41)
     {
         display = (respLen / 255.0f).xxx;
+    }
+    else if (DebugView == 42)
+    {
+        display = (selectedLen / 255.0f).xxx;
     }
 
     g_Output[pixel] = float4(LinearToSRGB(display), 1.0f);

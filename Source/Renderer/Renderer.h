@@ -87,11 +87,14 @@ private:
         float sigmaNormal = 0.25f;
         float varianceScale = 1.0f;
         uint32_t useMoments = 1;
+        
+        float lengthAttenuation = 0.35f;
+        float lengthPower = 1.0f;
 
         uint32_t finalOutputSrgb = 1;
         uint32_t debugView = 0;
-        uint32_t pad0[2] = {};
     };
+    static_assert((sizeof(RtAtrousConstants) % 16) == 0, "RtAtrousConstants must be 16-byte aligned.");
 
     struct DrawItem
     {
@@ -107,9 +110,10 @@ private:
 
         float lengthBias = 0.0f;
         float lengthScale = 0.01f;
+        float lengthInfluence = 0.5f;
 
         uint32_t debugView = 0;
-        uint32_t  pad0[3] = {};
+        uint32_t  pad0[2] = {};
     };
 
     std::vector<DrawItem> m_draws;
@@ -462,6 +466,12 @@ private:
     uint32_t m_prevRtAtrousIterations = 2;
     float m_prevRtVarianceScale = 1.0f;
 
+    float m_rtAtrousLengthAttenuation = 0.35f;
+    float m_rtAtrousLengthPower = 1.0f;
+
+    float m_prevRtAtrousLengthAttenuation = 0.35f;
+    float m_prevRtAtrousLengthPower = 1.0f;
+
     DescriptorAllocator::Allocation m_rtSvgfPingUavTable{};
 
     float m_rtTemporalRoughnessSigma = 0.15f;
@@ -503,5 +513,8 @@ private:
 
     float m_prevRtHistorySelectLengthBias = 0.0f;
     float m_prevRtHistorySelectLengthScale = 0.01f;
+
+    float m_rtHistorySelectLengthInfluence = 0.5f;
+    float m_prevRtHistorySelectLengthInfluence = 0.5f;
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

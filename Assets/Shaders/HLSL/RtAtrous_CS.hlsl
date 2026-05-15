@@ -20,9 +20,10 @@ cbuffer RtAtrousConstants : register(b0)
     float VarianceScale;
     uint UseMoments;
 
+    float LengthAttenuation;
+    float LengthPower;
     uint FinalOutputSrgb;
     uint DebugView;
-    uint2 _pad0;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -47,7 +48,14 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     static const float kernel[3] = { 1.0f, 2.0f, 1.0f };
 
-    float3 c0 = g_Signal[pixel].rgb;
+    float4 centerSig = g_Signal[pixel];
+    float3 c0 = centerSig.rgb;
+    float len0 = centerSig.a;
+    float lenN0 = saturate(len0 / 255.0f);
+
+    float lenCurve = pow(lenN0, max(1e-4f, LengthPower));
+    float wLenCenter = lerp(1.0f, LengthAttenuation, lenCurve);
+    
     float4 n0Packed = g_Normal[pixel];
     float3 n0 = UnpackNormal(n0Packed);
     float rough0 = n0Packed.a;
@@ -70,6 +78,13 @@ void main(uint3 dtid : SV_DispatchThreadID)
         g_Output[pixel] = float4(protectionProxy.xxx, 1.0f);
         return;
     }
+    
+    if (DebugView == 43)
+    {
+        g_Output[pixel] = float4(wLenCenter.xxx, 1.0f);
+        return;
+    }
+    
     float3 sum = 0.0f.xxx;
     float wsum = 0.0f;
 
@@ -81,7 +96,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
             int2 p = int2(pixel) + offset;
             p = clamp(p, int2(0, 0), int2(int(width) - 1, int(height) - 1));
 
-            float3 c = g_Signal[uint2(p)].rgb;
+            float4 sig = g_Signal[uint2(p)];
+            float3 c = sig.rgb;
+
             float4 nPacked = g_Normal[uint2(p)];
             float3 n = UnpackNormal(nPacked);
             float rough = nPacked.a;
@@ -106,8 +123,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 wl = exp(-abs(l - l0) / sigmaLUsed);
 
             }
+            bool isCenterTap = (offset.x == 0 && offset.y == 0);
 
-            float w = ws * wn * wz * wl;
+            float wLen = isCenterTap ? 1.0f : wLenCenter;
+            
+            float w = ws * wn * wz * wl * wLen;
             sum += c * w;
             wsum += w;
         }
@@ -116,7 +136,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float3 filtered = (wsum > 1e-6f) ? (sum / wsum) : c0;
 
     if (FinalOutputSrgb != 0)
-        g_Output[pixel] = float4(LinearToSRGB(filtered), 1.0f);
+        g_Output[pixel] = float4(LinearToSRGB(filtered), len0);
     else
-        g_Output[pixel] = float4(filtered, 1.0f);
+        g_Output[pixel] = float4(filtered, len0);
 }
