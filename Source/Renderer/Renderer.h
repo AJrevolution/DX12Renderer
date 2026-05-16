@@ -93,6 +93,10 @@ private:
 
         uint32_t finalOutputSrgb = 1;
         uint32_t debugView = 0;
+
+        float lengthSkipThreshold = 0.80f;
+        uint32_t enableLengthSkip = 1;
+        uint32_t pad1[2] = {};
     };
     static_assert((sizeof(RtAtrousConstants) % 16) == 0, "RtAtrousConstants must be 16-byte aligned.");
 
@@ -471,6 +475,12 @@ private:
 
     float m_prevRtAtrousLengthAttenuation = 0.35f;
     float m_prevRtAtrousLengthPower = 1.0f;
+
+    float    m_rtAtrousLengthSkipThreshold = 0.80f;
+    uint32_t m_rtAtrousEnableLengthSkip = 1;
+
+    float    m_prevRtAtrousLengthSkipThreshold = 0.80f;
+    uint32_t m_prevRtAtrousEnableLengthSkip = 1;
 
     DescriptorAllocator::Allocation m_rtSvgfPingUavTable{};
 

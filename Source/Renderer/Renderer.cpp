@@ -118,7 +118,10 @@ void Renderer::RenderFrame(
         (m_debugView >= 18 && m_debugView <= 26) ||
         (m_debugView >= 32 && m_debugView <= 36);
 
-    const bool wantsSvgfDebug = (m_debugView == 28) || (m_debugView == 43);
+    const bool wantsSvgfDebug = 
+        (m_debugView == 28) || 
+        (m_debugView == 43) ||
+        (m_debugView == 44);
 
     const bool wantsHistorySelectDebug = 
         (m_debugView >= 29 && m_debugView <= 31) ||
@@ -140,7 +143,9 @@ void Renderer::RenderFrame(
         (m_rtAtrousIterations != m_prevRtAtrousIterations) ||
         (std::fabs(m_rtVarianceScale - m_prevRtVarianceScale) > 1e-6f) ||
         (std::fabs(m_rtAtrousLengthAttenuation - m_prevRtAtrousLengthAttenuation) > 1e-6f) ||
-        (std::fabs(m_rtAtrousLengthPower - m_prevRtAtrousLengthPower) > 1e-6f);
+        (std::fabs(m_rtAtrousLengthPower - m_prevRtAtrousLengthPower) > 1e-6f) ||
+        (std::fabs(m_rtAtrousLengthSkipThreshold - m_prevRtAtrousLengthSkipThreshold) > 1e-6f) ||
+        (m_rtAtrousEnableLengthSkip != m_prevRtAtrousEnableLengthSkip);
 
     if (!drawListChanged)
     {
@@ -258,6 +263,8 @@ void Renderer::RenderFrame(
     m_prevRtHistorySelectLengthInfluence = m_rtHistorySelectLengthInfluence;
     m_prevRtAtrousLengthAttenuation = m_rtAtrousLengthAttenuation;
     m_prevRtAtrousLengthPower = m_rtAtrousLengthPower;
+    m_prevRtAtrousLengthSkipThreshold = m_rtAtrousLengthSkipThreshold;
+    m_prevRtAtrousEnableLengthSkip = m_rtAtrousEnableLengthSkip;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -2660,6 +2667,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtAtrousConstants(
     cb->lengthAttenuation = m_rtAtrousLengthAttenuation;
     cb->lengthPower = m_rtAtrousLengthPower;
     cb->debugView = m_debugView;
+    cb->lengthSkipThreshold = std::clamp(m_rtAtrousLengthSkipThreshold, 0.0f, 1.0f);
+    cb->enableLengthSkip = m_rtAtrousEnableLengthSkip ? 1u : 0u;
 
     return alloc.gpu;
 }

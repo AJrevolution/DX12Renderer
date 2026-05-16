@@ -24,6 +24,10 @@ cbuffer RtAtrousConstants : register(b0)
     float LengthPower;
     uint FinalOutputSrgb;
     uint DebugView;
+    
+    float LengthSkipThreshold;
+    uint EnableLengthSkip;
+    uint2 _pad1;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -56,6 +60,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float lenCurve = pow(lenN0, max(1e-4f, LengthPower));
     float wLenCenter = lerp(1.0f, LengthAttenuation, lenCurve);
     
+    bool skipWide =
+    (EnableLengthSkip != 0) &&
+    (IterationIndex > 0) &&
+    (lenN0 >= LengthSkipThreshold);
+    
     float4 n0Packed = g_Normal[pixel];
     float3 n0 = UnpackNormal(n0Packed);
     float rough0 = n0Packed.a;
@@ -82,6 +91,22 @@ void main(uint3 dtid : SV_DispatchThreadID)
     if (DebugView == 43)
     {
         g_Output[pixel] = float4(wLenCenter.xxx, 1.0f);
+        return;
+    }
+    
+    if (DebugView == 44)
+    {
+        g_Output[pixel] = float4(skipWide ? 1.0f.xxx : 0.0f.xxx, 1.0f);
+        return;
+    }
+
+    if (skipWide)
+    {
+        if (FinalOutputSrgb != 0)
+            g_Output[pixel] = float4(LinearToSRGB(c0), len0);
+        else
+            g_Output[pixel] = float4(c0, len0);
+
         return;
     }
     
