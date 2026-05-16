@@ -37,6 +37,11 @@ cbuffer RtTemporalConstants : register(b0)
     float ReprojectMinConf;
     uint2 _pad1;
     
+    float VarianceScale;
+    float VarianceBias;
+    float VarianceAlphaBoost;
+    uint EnableVarianceBoost;
+    
     float4 CurrCameraPos;
     float4 PrevCameraPos;
 };
@@ -159,6 +164,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
     
     float bestScore = 0.0f;
     int2 chosenOffset = int2(0, 0);
+    
+    float varNorm = 0.0f;
+    float alphaConfidence = 0.0f;
 
     if (TemporalEnabled != 0 && HistoryValid != 0 && currDepth < 0.9999f)
     {
@@ -280,7 +288,19 @@ void main(uint3 dtid : SV_DispatchThreadID)
     NeighborhoodMinMax(pixel, currMin, currMax);
     float3 prevClamped = clamp(prevColor, currMin, currMax);
     
-    float newLen = validReuse ? min(prevLen + 1.0f, 255.0f) : 1.0f;
+    if (validReuse)
+    {
+        float prevVar = max(prevMoments.y - prevMoments.x * prevMoments.x, 0.0f);
+        varNorm = saturate(prevVar * VarianceScale + VarianceBias);
+    }
+
+    float newLen = 1.0f;
+
+    if (validReuse)
+    {
+        float inc = saturate(bestScore) * lerp(1.0f, 0.25f, varNorm);
+        newLen = min(prevLen + inc, 255.0f);
+    }
 
     float alphaUsed = 0.0f;
     float3 history = currColor;
@@ -294,6 +314,13 @@ void main(uint3 dtid : SV_DispatchThreadID)
         float k = saturate(newLen / 8.0f);
         alphaUsed = lerp(0.25f, TemporalAlpha, k);
         alphaUsed *= saturate(bestScore);
+        alphaConfidence = alphaUsed; //alphaConfidence separate so DebugView 36 remains the old “confidence-scaled alpha before variance boost,”
+        
+        if (EnableVarianceBoost != 0)
+        {
+            alphaUsed = saturate(alphaUsed * (1.0f + VarianceAlphaBoost * varNorm));
+        }
+
         history = lerp(currColor, prevClamped, alphaUsed);
         moments = lerp(currMoments, prevMoments, alphaUsed);
     }
@@ -367,6 +394,18 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
     else if (DebugView == 36)
     {
+        display = alphaConfidence.xxx;
+    }
+    else if (DebugView == 45)
+    {
+        display = varNorm.xxx;
+    }
+    else if (DebugView == 46)
+    {
+        display = bestScore.xxx;
+    }
+    else if (DebugView == 47)
+    {
         display = alphaUsed.xxx;
     }
     
@@ -374,7 +413,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     g_MomentsOut[pixel] = moments;
     
     if ((DebugView >= 18 && DebugView <= 26) ||
-        (DebugView >= 32 && DebugView <= 36))
+        (DebugView >= 32 && DebugView <= 47))
         g_Output[pixel] = float4(display, 1.0f);
     else
         g_Output[pixel] = float4(LinearToSRGB(history), 1.0f);

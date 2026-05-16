@@ -116,7 +116,8 @@ void Renderer::RenderFrame(
 
     const bool wantsTemporalDebug =
         (m_debugView >= 18 && m_debugView <= 26) ||
-        (m_debugView >= 32 && m_debugView <= 36);
+        (m_debugView >= 32 && m_debugView <= 36) ||
+        (m_debugView >= 45 && m_debugView <= 47);
 
     const bool wantsSvgfDebug = 
         (m_debugView == 28) || 
@@ -206,7 +207,11 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtHistorySelectLengthScale - m_prevRtHistorySelectLengthScale) > 1e-6f) ||
         (std::fabs(m_rtHistorySelectLengthInfluence - m_prevRtHistorySelectLengthInfluence) > 1e-6f) ||
         (std::fabs(m_rtHistorySelectThreshold - m_prevRtHistorySelectThreshold) > 1e-6f) ||
-        (std::fabs(m_rtHistorySelectRange - m_prevRtHistorySelectRange) > 1e-6f);
+        (std::fabs(m_rtHistorySelectRange - m_prevRtHistorySelectRange) > 1e-6f) ||
+        (std::fabs(m_rtTemporalVarianceScale - m_prevRtTemporalVarianceScale) > 1e-6f) ||
+        (std::fabs(m_rtTemporalVarianceBias - m_prevRtTemporalVarianceBias) > 1e-6f) ||
+        (std::fabs(m_rtTemporalVarianceAlphaBoost - m_prevRtTemporalVarianceAlphaBoost) > 1e-6f) ||
+        (m_rtTemporalEnableVarianceBoost != m_prevRtTemporalEnableVarianceBoost);
 
     if (cameraChanged || 
         drawListChanged || 
@@ -265,6 +270,10 @@ void Renderer::RenderFrame(
     m_prevRtAtrousLengthPower = m_rtAtrousLengthPower;
     m_prevRtAtrousLengthSkipThreshold = m_rtAtrousLengthSkipThreshold;
     m_prevRtAtrousEnableLengthSkip = m_rtAtrousEnableLengthSkip;
+    m_prevRtTemporalVarianceScale = m_rtTemporalVarianceScale;
+    m_prevRtTemporalVarianceBias = m_rtTemporalVarianceBias;
+    m_prevRtTemporalVarianceAlphaBoost = m_rtTemporalVarianceAlphaBoost;
+    m_prevRtTemporalEnableVarianceBoost = m_rtTemporalEnableVarianceBoost;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -2552,7 +2561,11 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     cb->debugView = m_debugView;
     cb->reprojectRadius = std::min(m_rtTemporalReprojectRadius, 2u);
     cb->reprojectMinConf = std::clamp(m_rtTemporalReprojectMinConf, 0.0f, 1.0f);
-    
+    cb->varianceScale = std::max(0.0f, m_rtTemporalVarianceScale);
+    cb->varianceBias = m_rtTemporalVarianceBias;
+    cb->varianceAlphaBoost = std::max(0.0f, m_rtTemporalVarianceAlphaBoost);
+    cb->enableVarianceBoost = m_rtTemporalEnableVarianceBoost ? 1u : 0u;
+
     cb->currCameraPos = {
     m_currRtCameraPos.x,
     m_currRtCameraPos.y,

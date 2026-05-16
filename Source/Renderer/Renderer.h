@@ -72,6 +72,11 @@ private:
         float reprojectMinConf = 0.25f;
         uint32_t pad1[2] = {};
 
+        float varianceScale = 16.0f;
+        float varianceBias = 0.0f;
+        float varianceAlphaBoost = 0.5f;
+        uint32_t enableVarianceBoost = 1;
+
         DirectX::XMFLOAT4 currCameraPos{};
         DirectX::XMFLOAT4 prevCameraPos{};
     };
@@ -526,5 +531,16 @@ private:
 
     float m_rtHistorySelectLengthInfluence = 0.5f;
     float m_prevRtHistorySelectLengthInfluence = 0.5f;
+
+    float    m_rtTemporalVarianceScale = 16.0f;
+    float    m_rtTemporalVarianceBias = 0.0f;
+    float    m_rtTemporalVarianceAlphaBoost = 0.5f;
+    uint32_t m_rtTemporalEnableVarianceBoost = 1;
+
+    float    m_prevRtTemporalVarianceScale = 16.0f;
+    float    m_prevRtTemporalVarianceBias = 0.0f;
+    float    m_prevRtTemporalVarianceAlphaBoost = 0.5f;
+    uint32_t m_prevRtTemporalEnableVarianceBoost = 1;
+
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };
