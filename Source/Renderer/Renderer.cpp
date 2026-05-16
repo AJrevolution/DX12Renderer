@@ -23,6 +23,26 @@ namespace
 
         return true;
     }
+
+    static bool IsTemporalDebug(uint32_t dv)
+    {
+        return (dv >= 18 && dv <= 26) ||
+            (dv >= 32 && dv <= 36) ||
+            (dv >= 45 && dv <= 47);
+    }
+
+    static bool IsSvgfDebug(uint32_t dv)
+    {
+        return (dv == 28) ||
+            (dv == 43) ||
+            (dv == 44);
+    }
+
+    static bool IsHistorySelectDebug(uint32_t dv)
+    {
+        return (dv >= 29 && dv <= 31) ||
+            (dv >= 37 && dv <= 42);
+    }
 }
 
 void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
@@ -114,20 +134,9 @@ void Renderer::RenderFrame(
 
     BuildDrawList(sceneTime);
 
-    const bool wantsTemporalDebug =
-        (m_debugView >= 18 && m_debugView <= 26) ||
-        (m_debugView >= 32 && m_debugView <= 36) ||
-        (m_debugView >= 45 && m_debugView <= 47);
-
-    const bool wantsSvgfDebug = 
-        (m_debugView == 28) || 
-        (m_debugView == 43) ||
-        (m_debugView == 44);
-
-    const bool wantsHistorySelectDebug = 
-        (m_debugView >= 29 && m_debugView <= 31) ||
-        (m_debugView >= 37 && m_debugView <= 42);
-
+    const bool wantsTemporalDebug = IsTemporalDebug(m_debugView);
+    const bool wantsSvgfDebug = IsSvgfDebug(m_debugView);
+    const bool wantsHistorySelectDebug = IsHistorySelectDebug(m_debugView);
     const bool wantsRtPostDebug =
         wantsTemporalDebug || wantsSvgfDebug || wantsHistorySelectDebug;
 
@@ -2540,6 +2549,9 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
         frameIndex,
         sizeof(RtTemporalConstants),
         D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+    
+    // Variance bias is intentionally clamped to [-1, 1]. It is an offset after
+    // Variance scaling, so wider values tend to saturate the debug/alpha response.
 
     auto* cb = reinterpret_cast<RtTemporalConstants*>(alloc.cpu);
     *cb = {};
@@ -2561,8 +2573,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     cb->debugView = m_debugView;
     cb->reprojectRadius = std::min(m_rtTemporalReprojectRadius, 2u);
     cb->reprojectMinConf = std::clamp(m_rtTemporalReprojectMinConf, 0.0f, 1.0f);
+    cb->varianceBias = std::clamp(m_rtTemporalVarianceBias, -1.0f, 1.0f);
     cb->varianceScale = std::max(0.0f, m_rtTemporalVarianceScale);
-    cb->varianceBias = m_rtTemporalVarianceBias;
     cb->varianceAlphaBoost = std::max(0.0f, m_rtTemporalVarianceAlphaBoost);
     cb->enableVarianceBoost = m_rtTemporalEnableVarianceBoost ? 1u : 0u;
 

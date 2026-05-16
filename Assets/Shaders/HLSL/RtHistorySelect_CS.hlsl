@@ -1,5 +1,17 @@
 #include "Common.hlsli"
 
+// RT DebugView ownership for this pass:
+// History select owns:
+//   29 = final selector mask
+//   30 = stable history signal
+//   31 = responsive history signal
+//   37 = roughness selector vote
+//   38 = length selector vote
+//   39 = final selector value
+//   40 = stable history length
+//   41 = responsive history length
+//   42 = selected history length
+
 Texture2D<float4> g_StableHistory : register(t0);
 Texture2D<float4> g_RespHistory : register(t1);
 Texture2D<float4> g_GuideNormal : register(t2);

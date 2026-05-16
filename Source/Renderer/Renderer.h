@@ -124,6 +124,7 @@ private:
         uint32_t debugView = 0;
         uint32_t  pad0[2] = {};
     };
+    static_assert((sizeof(RtHistorySelectConstants) % 16) == 0, "RtHistorySelectConstants must be 16-byte aligned.");
 
     std::vector<DrawItem> m_draws;
 
@@ -253,6 +254,66 @@ private:
     float m_camRadius = 4.0f;
     
     //Toggles
+    // -----------------------------------------------------------------------------
+    // RT DebugView registry - locked namespaces
+    //
+    // Core RT / raygen-style views:
+    //   0  = final shaded output
+    //   27 = stored guide roughness from g_AovNormal.a
+    //
+    // Temporal pass owns:
+    //   18 = reprojection validity
+    //   19 = rejection / disocclusion
+    //   20 = chosen previous UV
+    //   21 = history-current difference
+    //   22 = history length
+    //   23 = temporal alpha
+    //   24 = temporal moments variance
+    //   25 = history warm-up / convergence factor
+    //   26 = depth reprojection error
+    //   32 = spec-direction reuse mask
+    //   33 = spec-direction dot
+    //   34 = reprojection search chosen offset
+    //   35 = reprojection best score
+    //   36 = confidence-scaled alpha
+    //   45 = variance-normalized signal
+    //   46 = reprojection best score
+    //   47 = final alpha after variance shaping
+    //
+    // History-select pass owns:
+    //   29 = final history selector mask
+    //   30 = stable history signal
+    //   31 = responsive history signal
+    //   37 = roughness selector vote
+    //   38 = length selector vote
+    //   39 = final selector value
+    //   40 = stable history length
+    //   41 = responsive history length
+    //   42 = selected history length
+    //
+    // SVGF / A-Trous pass owns:
+    //   28 = roughness/specular protection proxy
+    //   43 = center-history length attenuation factor
+    //   44 = wide-iteration skip mask
+    //
+    // Future rule:
+    //   Do not use broad contiguous checks such as 32..47.
+    //   Always route by the owning pass namespace.
+    // -----------------------------------------------------------------------------
+    //
+    // RT post-stack validation checklist after future tuning:
+    //   Temporal:
+    //     45 = varNorm bright in noisy regions
+    //     46 = reprojection score behaves smoothly
+    //     47 = final alpha increases when variance boost is enabled
+    //   History select:
+    //     42 = selectedLen looks plausible and stable
+    //   A-Trous:
+    //     43 = attenuation darkens where selectedLen is high
+    //     44 = skip mask responds to threshold after convergence
+    //   Integration:
+    //     40/41/42/43/44 must not be captured by temporal debug output.
+    // -----------------------------------------------------------------------------
     uint32_t m_debugView = 0;
     bool  m_autoOrbit = true;
     bool m_pauseAnimation = false;

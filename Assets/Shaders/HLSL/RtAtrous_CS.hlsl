@@ -1,5 +1,11 @@
 #include "Common.hlsli"
 
+// RT DebugView ownership for this pass:
+// SVGF / A-Trous owns:
+//   28 = roughness/specular protection proxy
+//   43 = center-history length attenuation factor
+//   44 = wide-iteration skip mask
+
 Texture2D<float4> g_Signal : register(t0);
 Texture2D<float4> g_Normal : register(t1);
 Texture2D<float> g_Depth : register(t2);

@@ -1,5 +1,28 @@
 #include "Common.hlsli"
 
+// RT DebugView ownership for this pass:
+// Temporal owns:
+//   18 = reprojection validity
+//   19 = rejection / disocclusion
+//   20 = chosen previous UV
+//   21 = history-current difference
+//   22 = history length
+//   23 = temporal alpha
+//   24 = moments variance
+//   25 = warm-up / history factor
+//   26 = depth reprojection error
+//   32 = spec-direction reuse mask
+//   33 = spec-direction dot
+//   34 = reprojection search chosen offset
+//   35 = reprojection best score
+//   36 = confidence-scaled alpha
+//   45 = variance-normalized signal
+//   46 = reprojection best score
+//   47 = final alpha after variance shaping
+//
+// Do not include 37..44 here.
+// Those are history-select / A-Trous debug IDs.
+
 Texture2D<float4> g_CurrAccum : register(t0);
 Texture2D<float4> g_CurrNormal : register(t1);
 Texture2D<float> g_CurrDepth : register(t2);
@@ -412,9 +435,17 @@ void main(uint3 dtid : SV_DispatchThreadID)
     g_HistoryOut[pixel] = float4(history, newLen);
     g_MomentsOut[pixel] = moments;
     
-    if ((DebugView >= 18 && DebugView <= 26) ||
-        (DebugView >= 32 && DebugView <= 47))
+    bool isTemporalDebug =
+        (DebugView >= 18 && DebugView <= 26) ||
+        (DebugView >= 32 && DebugView <= 36) ||
+        (DebugView >= 45 && DebugView <= 47);
+
+    if (isTemporalDebug)
+    {
         g_Output[pixel] = float4(display, 1.0f);
+    }
     else
+    {
         g_Output[pixel] = float4(LinearToSRGB(history), 1.0f);
+    }
 }
