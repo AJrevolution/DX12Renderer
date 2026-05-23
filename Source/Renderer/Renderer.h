@@ -24,6 +24,7 @@
 #include "Source/Renderer/Passes/RtTemporalPass.h"
 #include "Source/Renderer/Passes/RtAtrousPass.h"
 #include "Source/Renderer/Passes/RtHistorySelectPass.h"
+#include "Source/Renderer/Passes/RtCombinePass.h"
 
 class Renderer
 {
@@ -126,6 +127,91 @@ private:
     };
     static_assert((sizeof(RtHistorySelectConstants) % 16) == 0, "RtHistorySelectConstants must be 16-byte aligned.");
 
+    enum class RtSignal : uint32_t
+    {
+        Diffuse,
+        Specular,
+
+        // Planned finer splits. Do not allocate these yet.
+        DiffuseDirect,
+        DiffuseIndirect,
+        SpecularDirect,
+        SpecularIndirect,
+
+        Emission,
+        Transmission,
+
+        NormalRoughness,
+        Depth,
+        Albedo,
+        Motion,
+        MaterialId,
+        Variance,
+        HistoryConfidence,
+
+        BeautyLinear,
+        OutputDisplay
+    };
+
+    enum class RtPostMode : uint32_t
+    {
+        Disabled = 0,
+
+        // Production path:
+        // accum diffuse/spec
+        // -> temporal
+        // -> spec history select
+        // -> spec A-Trous
+        // -> diffuse A-Trous
+        // -> final combine
+        Full,
+
+        // Diagnostic stop-points.
+        RawCombineOnly,
+        TemporalOnly,
+        HistorySelectOnly,
+        SpecAtrousOnly,
+        DiffuseAtrousOnly
+    };
+
+    struct RtSignalState
+    {
+        ID3D12Resource* signal = nullptr;
+        ID3D12Resource* moments = nullptr;
+    };
+
+    struct RtPostSignals
+    {
+        RtSignalState diffuse;
+        RtSignalState specStable;
+        RtSignalState specResponsive;
+        RtSignalState specSelected;
+
+        bool ranDiffuseTemporal = false;
+        bool ranSpecStableTemporal = false;
+        bool ranSpecResponsiveTemporal = false;
+        bool ranHistorySelect = false;
+        bool ranSpecAtrous = false;
+        bool ranDiffuseAtrous = false;
+
+        bool TemporalReady() const
+        {
+            return ranDiffuseTemporal && ranSpecStableTemporal;
+        }
+
+        bool AdvancedSplitHistoryReady() const
+        {
+            return ranDiffuseTemporal &&
+                ranSpecStableTemporal &&
+                ranSpecResponsiveTemporal;
+        }
+    };
+
+    static bool IsSplitDebug(uint32_t dv)
+    {
+        return dv >= 48 && dv <= 50;
+    }
+
     std::vector<DrawItem> m_draws;
 
     void BuildDrawList(float time);
@@ -201,8 +287,9 @@ private:
 
     bool UpdateRtSvgfSrvTable(
         uint32_t frameIndex,
-        uint32_t iterationIndex,
+        uint32_t iter,
         ID3D12Device* device,
+        DescriptorAllocator::Allocation& table,
         ID3D12Resource* signalResource,
         ID3D12Resource* momentsResource);
 
@@ -219,6 +306,7 @@ private:
     bool UpdateRtTemporalTables(
         uint32_t frameIndex,
         ID3D12Device* device,
+        ID3D12Resource* currAccumResource,
         ID3D12Resource* prevAccumResource,
         ID3D12Resource* prevMomentsResource,
         ID3D12Resource* outAccumResource,
@@ -241,6 +329,80 @@ private:
         ID3D12Device* device,
         ID3D12Resource* stableSignal,
         ID3D12Resource* responsiveSignal);
+
+    void CreateRtPostResources(ID3D12Device* device, uint32_t width, uint32_t height);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE RtPostUavCpuAt(uint32_t index) const;
+    D3D12_GPU_DESCRIPTOR_HANDLE RtPostUavGpuAt(uint32_t index) const;
+
+
+    bool UpdateRtCombineSrvTable(uint32_t frameIndex, ID3D12Device* device, 
+        ID3D12Resource* diffuseResource, ID3D12Resource* specularResource);
+
+    static bool RtPostModeRunsTemporal(RtPostMode mode);
+    static bool RtPostModeRunsHistorySelect(RtPostMode mode);
+    static bool RtPostModeRunsSpecAtrous(RtPostMode mode);
+    static bool RtPostModeRunsDiffuseAtrous(RtPostMode mode);
+    static bool RtPostModeRunsAnyAtrous(RtPostMode mode);
+    static bool RtPostModeCommitsHistory(RtPostMode mode);
+
+    bool CombineRtSignalsToOutput(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Resource* diffuseResource,
+        ID3D12Resource* specularResource,
+        uint32_t width,
+        uint32_t height,
+        const char* markerName);
+
+    bool RunRtRawCombineOnly(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex,
+        uint32_t width,
+        uint32_t height);
+
+    bool RunRtTemporalOnlyCombine(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Resource* diffuseSignal,
+        ID3D12Resource* specStableSignal,
+        uint32_t width,
+        uint32_t height);
+
+    bool RunRtHistorySelectOnlyCombine(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Resource* diffuseSignal,
+        ID3D12Resource* specSelectedSignal,
+        uint32_t width,
+        uint32_t height);
+
+    bool RunRtSpecAtrousOnlyCombine(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Resource* diffuseSignal,
+        uint32_t width,
+        uint32_t height);
+
+    bool RunRtDiffuseAtrousOnlyCombine(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Resource* specStableSignal,
+        uint32_t width,
+        uint32_t height);
+
+    bool RunRtFinalCombine(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex,
+        uint32_t width,
+        uint32_t height);
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -296,6 +458,11 @@ private:
     //   43 = center-history length attenuation factor
     //   44 = wide-iteration skip mask
     //
+    // Split / RayGen-owned views:
+    //   48 = diffuse accumulation
+    //   49 = specular accumulation
+    //   50 = diffuse + specular accumulation
+    // 
     // Future rule:
     //   Do not use broad contiguous checks such as 32..47.
     //   Always route by the owning pass namespace.
@@ -319,7 +486,14 @@ private:
     bool m_pauseAnimation = false;
     bool m_useRaytracing = false;        // Toggle for raytracing vs rasterization (for testing/debugging)
     bool m_rtAccumulate = true;          // validation / progressive mode
-    
+
+    // RT post-stack mode.
+    // Full is the production path.
+    // Diagnostic modes stop the post stack at known signal boundaries and combine
+    // the current diffuse/spec pair into m_rtOutput for inspection.
+    bool m_rtEnablePostStack = true;
+    RtPostMode m_rtPostMode = RtPostMode::Full;
+
     uint32_t m_rtSamplesPerFrame = 1;    // 1..N
     uint32_t m_rtMaxSamples = 256;       // hard cap
 
@@ -415,18 +589,23 @@ private:
         // per-frame RT table: geometry + instance data + material textures
         DescriptorAllocator::Allocation geometryTable{};
 
-        DescriptorAllocator::Allocation temporalStableSrvTable{}; // 7 SRVs
-        DescriptorAllocator::Allocation temporalStableUavTable{}; // 3 UAVs
+        DescriptorAllocator::Allocation temporalDiffuseSrvTable{};     // 7 SRVs
+        DescriptorAllocator::Allocation temporalDiffuseUavTable{};     // 3 UAVs
 
-        DescriptorAllocator::Allocation temporalRespSrvTable{};   // 7 SRVs
-        DescriptorAllocator::Allocation temporalRespUavTable{};   // 3 UAVs
+        DescriptorAllocator::Allocation temporalSpecStableSrvTable{};  // 7 SRVs
+        DescriptorAllocator::Allocation temporalSpecStableUavTable{};  // 3 UAVs
+
+        DescriptorAllocator::Allocation temporalSpecRespSrvTable{};    // 7 SRVs
+        DescriptorAllocator::Allocation temporalSpecRespUavTable{};    // 3 UAVs
 
         DescriptorAllocator::Allocation historySelectSrvTable{};  // 4 SRVs
         DescriptorAllocator::Allocation historySelectUavTable{};  // 2 UAVs
         DescriptorAllocator::Allocation denoiseSrvTable{};  // 3 SRVs
+        DescriptorAllocator::Allocation combineSrvTable{};             // 2 SRVs
 
         // Per-frame, per-iteration SVGF input tables.
-        std::array<DescriptorAllocator::Allocation, kMaxRtAtrousIterations> svgfSrvTables{};
+        std::array<DescriptorAllocator::Allocation, kMaxRtAtrousIterations> svgfSpecSrvTables{};
+        std::array<DescriptorAllocator::Allocation, kMaxRtAtrousIterations> svgfDiffuseSrvTables{};
 
         uint32_t capacity = 0;
     };
@@ -439,15 +618,17 @@ private:
 
     // RT output
     ComPtr<ID3D12Resource> m_rtOutput;
-    // Contiguous UAV table:
-    // u0 = m_rtOutput
-    // u1 = m_rtAccum
+    // Contiguous DXR UAV table:
+    // u0 = m_rtOutput          R8G8B8A8_UNORM display
+    // u1 = m_rtAccumDiffuse    R16G16B16A16_FLOAT linear
+    // u2 = m_rtAccumSpec       R16G16B16A16_FLOAT linear
+    // u3 = m_rtAovNormal       R16G16B16A16_FLOAT rgb=geom normal, a=roughness
+    // u4 = m_rtAovDepth        R32_FLOAT
     DescriptorAllocator::Allocation m_rtOutputUav{};
     uint32_t m_rtOutputWidth = 0;
     uint32_t m_rtOutputHeight = 0;
-    // Progressive accumulation target
-    ComPtr<ID3D12Resource> m_rtAccum;
-    bool m_rtAccumReady = false;
+
+
     uint32_t m_rtMaterialCount = 4;
     bool m_rtOutputReady = false;
     uint32_t m_rtSampleIndex = 0;
@@ -455,6 +636,12 @@ private:
     uint32_t m_rtResetId = 0;
     bool m_rtAccumulateThisFrame = false;
     bool m_rtAccumulatingLastFrame = false;
+
+    ComPtr<ID3D12Resource> m_rtAccumDiffuse;
+    ComPtr<ID3D12Resource> m_rtAccumSpec;
+
+    bool m_rtAccumDiffuseReady = false;
+    bool m_rtAccumSpecReady = false;
 
     bool m_rtHistoryValid = false;
     uint32_t m_prevRtDebugView = 0;
@@ -555,9 +742,6 @@ private:
 
     RtHistorySelectPass m_rtHistorySelectPass;
 
-    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryAccumResp{};
-    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryMomentsResp{};
-
     float m_rtTemporalAlphaResp = 0.35f;
     float m_rtTemporalRoughnessSigmaResp = 0.08f;
 
@@ -603,5 +787,25 @@ private:
     float    m_prevRtTemporalVarianceAlphaBoost = 0.5f;
     uint32_t m_prevRtTemporalEnableVarianceBoost = 1;
 
+    ComPtr<ID3D12Resource> m_rtPostDiffuse;
+    ComPtr<ID3D12Resource> m_rtPostSpec;
+    bool m_rtPostReady = false;
+
+    DescriptorAllocator::Allocation m_rtPostUavTable{};
+
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistorySpec{};
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistorySpecResp{};
+
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryMomentsSpec{};
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryMomentsSpecResp{};
+
+    RtCombinePass m_rtCombinePass;
+
+    uint32_t m_rtAtrousIterationsSpec = 1;
+    uint32_t m_prevRtAtrousIterationsSpec = 1;
+
+    static constexpr uint32_t kRtUavTableCount = 5;
+
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };
+ 

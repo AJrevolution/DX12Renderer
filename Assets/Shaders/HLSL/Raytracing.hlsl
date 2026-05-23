@@ -53,10 +53,15 @@ cbuffer PerFrameConstants : register(b0)
     float RtIndirectScale;
 };
 
+static const uint RT_RAY_PRIMARY_DIFFUSE = 0u;
+static const uint RT_RAY_SHADOW = 1u;
+static const uint RT_RAY_INDIRECT = 2u;
+static const uint RT_RAY_PRIMARY_SPECULAR = 3u;
+
 struct RayPayload
 {
-    float3 color; // returned radiance
-    uint rayType; // 0 = primary, 1 = shadow, 2 = indirect
+    float3 color; // returned radiance / signal
+    uint rayType; // 0 = primary, 1 = shadow, 2 = indirect, 3 = primary specular
     uint occluded;
     uint rng;
 };
@@ -72,9 +77,10 @@ struct SurfaceBasisRT
 
 RaytracingAccelerationStructure     g_Scene : register(t0);
 RWTexture2D<float4>                 g_Output : register(u0);
-RWTexture2D<float4>                 g_Accum : register(u1);
-RWTexture2D<float4>                 g_AovNormal : register(u2);
-RWTexture2D<float>                  g_AovDepth : register(u3);
+RWTexture2D<float4>                 g_AccumDiff : register(u1);
+RWTexture2D<float4>                 g_AccumSpec : register(u2);
+RWTexture2D<float4>                 g_AovNormal : register(u3);
+RWTexture2D<float>                  g_AovDepth : register(u4);
 StructuredBuffer<VertexRT>          g_QuadVerts : register(t1);
 ByteAddressBuffer                   g_QuadIndices : register(t2);
 StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);
@@ -347,11 +353,54 @@ float3 EvalDirectAtSurface(
     return EvalDirectPBR(pbr, LightColor) * shadowVisibility;
 }
 
+struct PbrSplit
+{
+    float3 diffuse;
+    float3 spec;
+};
+
+
+PbrSplit EvalDirectPbrSplit(
+    float3 base,
+    float metallic,
+    float roughness,
+    float3 N,
+    float3 V,
+    float3 L)
+{
+    PbrSplit r;
+    r.diffuse = 0.0f.xxx;
+    r.spec = 0.0f.xxx;
+
+    float NdotL = saturate(dot(N, L));
+    float NdotV = saturate(dot(N, V));
+    if (NdotL <= 1e-4f || NdotV <= 1e-4f)
+        return r;
+
+    float3 H = SafeNormalize(V + L);
+    float NdotH = saturate(dot(N, H));
+    float VdotH = saturate(dot(V, H));
+
+    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
+    float3 F = F_Schlick(VdotH, F0);
+    float D = D_GGX(NdotH, roughness);
+    float G = G_Smith(NdotV, NdotL, roughness);
+
+    float3 specBrdf = (D * G * F) / max(1e-4f, 4.0f * NdotV * NdotL);
+
+    float3 kd = (1.0f - F) * (1.0f - metallic);
+    float3 diffuseBrdf = kd * base / kPi;
+
+    r.diffuse = diffuseBrdf * LightColor * NdotL;
+    r.spec = specBrdf * LightColor * NdotL;
+    return r;
+}
+
 float TraceShadowVisibility(float3 worldPos, float3 geomNormal, float3 L)
 {
     RayPayload shadowPayload;
     shadowPayload.color = 0.0f.xxx;
-    shadowPayload.rayType = 1;
+    shadowPayload.rayType = RT_RAY_SHADOW;
     shadowPayload.occluded = 0;
     shadowPayload.rng = 0u;
 
@@ -405,6 +454,8 @@ float3 EvalIBLSpecular(float3 R, float3 Rrough, float roughness, float NdotV, fl
     return prefiltered * (F0 * brdf.x + brdf.y);
 }
 
+
+
 // RT IBL parity target:
 // - same latlong UV mapping convention as raster
 // - same BRDF LUT usage
@@ -417,11 +468,20 @@ void RayGen()
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 dim = DispatchRaysDimensions().xy;
     
-    bool isRtShadingDebug = (DebugView != 0 && DebugView <= 17);
+    bool isRtShadingDebug =
+        (DebugView != 0 && DebugView <= 17) ||
+        DebugView == 27;
+
+
     bool bypassAccum = (RtAccumulate == 0) || isRtShadingDebug;
     
     uint rng = InitRng(pixel, RtSampleIndex, RtResetId);
 
+    // Keep camera jitter shared, but decorrelate the two primary signal traces.
+    // Otherwise diffuse/spec indirect sampling can walk the same RNG sequence.
+    uint diffRng = rng;
+    uint specRng = HashUint(rng ^ 0x9E3779B9u ^ 0xD1B54A35u);
+    
     float2 jitter = 0.0f.xx;
     if (!bypassAccum)
     {
@@ -442,18 +502,27 @@ void RayGen()
     ray.TMin = 0.001;
     ray.TMax = 10000.0;
 
-    RayPayload payload;
-    payload.color = float3(0.02, 0.03, 0.05);
-    payload.rayType = 0;
-    payload.occluded = 0;
-    payload.rng = rng;
+    float3 oldDiff =
+        (!bypassAccum && RtSampleIndex != 0) ? g_AccumDiff[pixel].rgb : 0.0f.xxx;
 
-    TraceRay(g_Scene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 1, 0, ray, payload);
-    
+    float3 oldSpec =
+        (!bypassAccum && RtSampleIndex != 0) ? g_AccumSpec[pixel].rgb : 0.0f.xxx;
+     
+
+    RayPayload diffPayload;
+    diffPayload.color = 0.0f.xxx;
+    diffPayload.rayType = RT_RAY_PRIMARY_DIFFUSE;
+    diffPayload.occluded = 0u;
+    diffPayload.rng = diffRng;
+
+    TraceRay(g_Scene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 1, 0, ray, diffPayload);
+
+    // AOV debug views are produced by the diffuse primary trace.
     if (DebugView == 12)
     {
         float3 n = g_AovNormal[pixel].xyz;
-        g_Accum[pixel] = float4(n, 1.0f);
+        g_AccumDiff[pixel] = float4(n, 1.0f);
+        g_AccumSpec[pixel] = float4(0.0f.xxx, 1.0f);
         g_Output[pixel] = float4(n, 1.0f);
         return;
     }
@@ -461,7 +530,8 @@ void RayGen()
     if (DebugView == 13)
     {
         float d = g_AovDepth[pixel];
-        g_Accum[pixel] = float4(d.xxx, 1.0f);
+        g_AccumDiff[pixel] = float4(d.xxx, 1.0f);
+        g_AccumSpec[pixel] = float4(0.0f.xxx, 1.0f);
         g_Output[pixel] = float4(d.xxx, 1.0f);
         return;
     }
@@ -469,52 +539,128 @@ void RayGen()
     if (DebugView == 27)
     {
         float r = g_AovNormal[pixel].w;
-        g_Accum[pixel] = float4(r.xxx, 1.0f);
+        g_AccumDiff[pixel] = float4(r.xxx, 1.0f);
+        g_AccumSpec[pixel] = float4(0.0f.xxx, 1.0f);
         g_Output[pixel] = float4(r.xxx, 1.0f);
         return;
     }
-    
-    float3 sampleColor = payload.color;
 
-    // Debug views and non-accumulating mode bypass the running average.
-    if (bypassAccum)
+    if (isRtShadingDebug)
     {
-        g_Accum[pixel] = float4(sampleColor, 1.0f);
+        float3 sampleColor = diffPayload.color;
+        g_AccumDiff[pixel] = float4(sampleColor, 1.0f);
+        g_AccumSpec[pixel] = float4(0.0f.xxx, 1.0f);
         g_Output[pixel] = float4(LinearToSRGB(sampleColor), 1.0f);
         return;
     }
+    
+    RayPayload specPayload;
+    specPayload.color = 0.0f.xxx;
+    specPayload.rayType = RT_RAY_PRIMARY_SPECULAR;
+    specPayload.occluded = 0u;
+    specPayload.rng = specRng;
 
+    TraceRay(
+    g_Scene,
+    RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+    0xFF,
+    0,
+    1,
+    0,
+    ray,
+    specPayload);
+    
+    float3 sampleDiff = diffPayload.color;
+    float3 sampleSpec = specPayload.color;
+    
+    if (bypassAccum)
+    {
+        g_AccumDiff[pixel] = float4(sampleDiff, 1.0f);
+        g_AccumSpec[pixel] = float4(sampleSpec, 1.0f);
+        
+        if (DebugView == 48)
+        {
+            g_Output[pixel] = float4(LinearToSRGB(sampleDiff), 1.0f);
+            return;
+        }
+
+        if (DebugView == 49)
+        {
+            g_Output[pixel] = float4(LinearToSRGB(sampleSpec), 1.0f);
+            return;
+        }
+
+        if (DebugView == 50)
+        {
+            g_Output[pixel] = float4(LinearToSRGB(sampleDiff + sampleSpec), 1.0f);
+            return;
+        }
+        
+        g_Output[pixel] = float4(LinearToSRGB(sampleDiff + sampleSpec), 1.0f);
+        return;
+    }
     float sampleIndex = (float) RtSampleIndex;
-    float3 oldAccum = (RtSampleIndex == 0) ? 0.0f.xxx : g_Accum[pixel].rgb;
-    float3 avg = (oldAccum * sampleIndex + sampleColor) / (sampleIndex + 1.0f);
+    
+    float3 avgDiff = (oldDiff * sampleIndex + sampleDiff) / (sampleIndex + 1.0f);
+    float3 avgSpec = (oldSpec * sampleIndex + sampleSpec) / (sampleIndex + 1.0f);
+    
+    g_AccumDiff[pixel] = float4(avgDiff, 1.0f);
+    g_AccumSpec[pixel] = float4(avgSpec, 1.0f);
+    
 
-    g_Accum[pixel] = float4(avg, 1.0f);
-    g_Output[pixel] = float4(LinearToSRGB(avg), 1.0f);
+    if (DebugView == 48)
+    {
+        g_Output[pixel] = float4(LinearToSRGB(avgDiff), 1.0f);
+        return;
+    }
+    else if (DebugView == 49)
+    {
+        g_Output[pixel] = float4(LinearToSRGB(avgSpec), 1.0f);
+        return;
+    }
+    else if (DebugView == 50)
+    {
+        g_Output[pixel] = float4(LinearToSRGB(avgDiff + avgSpec), 1.0f);
+        return;
+    }
+
+    g_Output[pixel] = float4(LinearToSRGB(avgDiff + avgSpec), 1.0f);
 }
 
 [shader("miss")]
 void Miss(inout RayPayload payload)
 {
-    if (payload.rayType == 1)
+    if (payload.rayType == RT_RAY_SHADOW)
     {
-        payload.occluded = 0;
+        payload.occluded = 0u;
         return;
     }
-    if (payload.rayType == 0)
+    
+    float3 sky = EvalSky(WorldRayDirection());
+    
+    if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE)
     {
         uint2 pixel = DispatchRaysIndex().xy;
+       
         g_AovNormal[pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
         g_AovDepth[pixel] = 1.0f;
-
+        
+        payload.color = sky;
+        return;
     }
-
-    payload.color = EvalSky(WorldRayDirection());
+    
+    if (payload.rayType == RT_RAY_PRIMARY_SPECULAR)
+    {
+        payload.color = 0.0f.xxx;
+        return;
+    }
+    payload.color = sky;
 }
 
 [shader("closesthit")]
 void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
-    if (payload.rayType == 1)
+    if (payload.rayType == RT_RAY_SHADOW)
     {
         payload.occluded = 1;
         return;
@@ -575,14 +721,14 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         iblSpecular = EvalIBLSpecular(R, Rrough, roughness, NdotV, F0);
     }
 
-    if (payload.rayType == 0)
+    if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE)
     {
         uint2 pixel = DispatchRaysIndex().xy;
         g_AovNormal[pixel] = float4(geomNormal * 0.5f + 0.5f, roughness);
         g_AovDepth[pixel] = depth01;
     }
     
-    if (payload.rayType == 2)
+    if (payload.rayType == RT_RAY_INDIRECT)
     {
         payload.color = EvalDirectAtSurface(
             base,
@@ -645,16 +791,6 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         return;
     }
 
-    
-    float3 direct = EvalDirectAtSurface(
-        base,
-        metallic,
-        roughness,
-        worldNormal,
-        V,
-        L,
-        shadowVisibility);
-
     float3 indirectDiffuse = 0.0f.xxx;
     float3 indirectSpec = 0.0f.xxx;
     float3 lobeVis = 0.0f.xxx;
@@ -665,7 +801,10 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
             (RtAccumulate != 0 && DebugView == 0) ||
             DebugView == 9 ||
             DebugView == 10 ||
-            DebugView == 11
+            DebugView == 11 ||
+            DebugView == 48 ||
+            DebugView == 49 ||
+            DebugView == 50
         );
 
     if (allowIndirect)
@@ -685,7 +824,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
         RayPayload bounce;
         bounce.color = 0.0f.xxx;
-        bounce.rayType = 2;
+        bounce.rayType = RT_RAY_INDIRECT;
         bounce.occluded = 0;
         bounce.rng = payload.rng;
 
@@ -819,7 +958,40 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         payload.color = Rrough * 0.5f + 0.5f;
         return;
     }
-    float3 ambient = base * 0.03f;
+    
+    PbrSplit directSplit = EvalDirectPbrSplit(
+        base,
+        metallic,
+        roughness,
+        worldNormal,
+        V,
+        L);
 
-    payload.color = ambient + direct + (RtIndirectScale * indirect) + iblDiffuse + iblSpecular;
+
+    float3 ambient = base * 0.03f;
+    
+    float3 sampleDiffuse =
+        ambient +
+        directSplit.diffuse * shadowVisibility +
+        iblDiffuse +
+        RtIndirectScale * indirectDiffuse;
+
+    float3 sampleSpec =
+        directSplit.spec * shadowVisibility +
+        iblSpecular +
+        RtIndirectScale * indirectSpec;
+
+    if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE)
+    {
+        payload.color = sampleDiffuse;
+        return;
+    }
+
+    if (payload.rayType == RT_RAY_PRIMARY_SPECULAR)
+    {
+        payload.color = sampleSpec;
+        return;
+    }
+
+    payload.color = sampleDiffuse + sampleSpec;
 }

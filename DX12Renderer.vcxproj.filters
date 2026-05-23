@@ -138,6 +138,9 @@
     <ClInclude Include="Source\Renderer\Passes\RtHistorySelectPass.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\RtCombinePass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -239,6 +242,9 @@
     <ClCompile Include="Source\Renderer\Passes\RtHistorySelectPass.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\RtCombinePass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -264,5 +270,6 @@
     <CustomBuild Include="Assets\Shaders\HLSL\RtTemporal_CS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\RtAtrous_CS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\RtHistorySelect_CS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\RtCombine_CS.hlsl" />
   </ItemGroup>
 </Project>
