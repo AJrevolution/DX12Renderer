@@ -1,6 +1,6 @@
 #include "Common.hlsli"
 
-Texture2D<float4> g_Accum : register(t0);
+Texture2D<float4> g_Signal : register(t0);
 Texture2D<float4> g_AovNormal : register(t1);
 Texture2D<float> g_AovDepth : register(t2);
 
@@ -33,17 +33,22 @@ void main(uint3 dtid : SV_DispatchThreadID)
     if (pixel.x >= width || pixel.y >= height)
         return;
 
-    float3 centerColor = g_Accum[pixel].rgb;
-    float3 n0 = g_AovNormal[pixel].xyz * 2.0f - 1.0f;
+    float4 centerSample = g_Signal[pixel];
+    float3 centerColor = centerSample.rgb;
+    float centerAlpha = centerSample.a;
+    
     float z0 = g_AovDepth[pixel];
 
+    
     // Sky / far plane fallback.
     if (z0 >= 0.9999f)
     {
-        g_Output[pixel] = float4(LinearToSRGB(centerColor), 1.0f);
+        g_Output[pixel] = float4(centerColor, centerAlpha);
         return;
     }
-
+    
+    float3 n0 = SafeNormalize(g_AovNormal[pixel].xyz * 2.0f - 1.0f);
+    
     float3 sum = 0.0f.xxx;
     float wsum = 0.0f;
 
@@ -54,8 +59,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
             int2 p = int2(pixel) + int2(x, y);
             p = clamp(p, int2(0, 0), int2(int(width) - 1, int(height) - 1));
 
-            float3 c = g_Accum[p].rgb;
-            float3 n1 = g_AovNormal[p].xyz * 2.0f - 1.0f;
+            float3 c = g_Signal[p].rgb;
+            float3 n1 = SafeNormalize(g_AovNormal[p].xyz * 2.0f - 1.0f);
             float z1 = g_AovDepth[p];
 
             float ws = SpatialWeight(int2(x, y));
@@ -69,5 +74,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
 
     float3 filtered = (wsum > 1e-6f) ? (sum / wsum) : centerColor;
-    g_Output[pixel] = float4(LinearToSRGB(filtered), 1.0f);
+    
+    // Linear HDR signal output. RtCombine is the only SRGB conversion owner.
+    g_Output[pixel] = float4(filtered, centerAlpha);
 }

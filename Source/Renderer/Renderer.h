@@ -180,6 +180,13 @@ private:
         ID3D12Resource* moments = nullptr;
     };
 
+    enum class RtSpatialFilter : uint32_t
+    {
+        None = 0,
+        Atrous,
+        Denoise
+    };
+
     struct RtPostSignals
     {
         RtSignalState diffuse;
@@ -187,12 +194,18 @@ private:
         RtSignalState specResponsive;
         RtSignalState specSelected;
 
+        // Final recomposition candidates.
+        // If unset, final combine falls back to diffuse/specSelected.
+        RtSignalState finalDiffuse;
+        RtSignalState finalSpec;
+
         bool ranDiffuseTemporal = false;
         bool ranSpecStableTemporal = false;
         bool ranSpecResponsiveTemporal = false;
         bool ranHistorySelect = false;
-        bool ranSpecAtrous = false;
-        bool ranDiffuseAtrous = false;
+
+        RtSpatialFilter diffuseSpatial = RtSpatialFilter::None;
+        RtSpatialFilter specSpatial = RtSpatialFilter::None;
 
         bool TemporalReady() const
         {
@@ -204,6 +217,60 @@ private:
             return ranDiffuseTemporal &&
                 ranSpecStableTemporal &&
                 ranSpecResponsiveTemporal;
+        }
+
+        bool RanDiffuseSpatial() const
+        {
+            return diffuseSpatial != RtSpatialFilter::None;
+        }
+
+        bool RanSpecSpatial() const
+        {
+            return specSpatial != RtSpatialFilter::None;
+        }
+
+        bool RanDiffuseAtrous() const
+        {
+            return diffuseSpatial == RtSpatialFilter::Atrous;
+        }
+
+        bool RanSpecAtrous() const
+        {
+            return specSpatial == RtSpatialFilter::Atrous;
+        }
+
+        bool RanDiffuseDenoise() const
+        {
+            return diffuseSpatial == RtSpatialFilter::Denoise;
+        }
+
+        bool RanSpecDenoise() const
+        {
+            return specSpatial == RtSpatialFilter::Denoise;
+        }
+
+        void SetFinalDiffuse(ID3D12Resource* signal, RtSpatialFilter filter)
+        {
+            finalDiffuse.signal = signal;
+            finalDiffuse.moments = nullptr;
+            diffuseSpatial = filter;
+        }
+
+        void SetFinalSpec(ID3D12Resource* signal, RtSpatialFilter filter)
+        {
+            finalSpec.signal = signal;
+            finalSpec.moments = nullptr;
+            specSpatial = filter;
+        }
+
+        ID3D12Resource* FinalDiffuseSignal() const
+        {
+            return finalDiffuse.signal ? finalDiffuse.signal : diffuse.signal;
+        }
+
+        ID3D12Resource* FinalSpecSignal() const
+        {
+            return finalSpec.signal ? finalSpec.signal : specSelected.signal;
         }
     };
 
@@ -281,7 +348,11 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE RtUavCpuAt(uint32_t slot) const;
 
     void CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t height);
-    bool UpdateRtDenoiseSrvTable(uint32_t frameIndex, ID3D12Device* device, ID3D12Resource* signalResource);
+    bool UpdateRtDenoiseSrvTable(
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        ID3D12Resource* signalResource,
+        DescriptorAllocator::Allocation& table);
     
     void CreateRtHistoryResources(ID3D12Device* device, uint32_t width, uint32_t height);
 
@@ -404,6 +475,18 @@ private:
         uint32_t width,
         uint32_t height);
 
+    bool RunRtDenoiseSignal(
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        const char* eventName,
+        ID3D12Resource* inputSignal,
+        DescriptorAllocator::Allocation& srvTable,
+        ID3D12Resource* outputResource,
+        D3D12_GPU_DESCRIPTOR_HANDLE outputUav,
+        uint32_t width,
+        uint32_t height);
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -486,6 +569,8 @@ private:
     bool m_pauseAnimation = false;
     bool m_useRaytracing = false;        // Toggle for raytracing vs rasterization (for testing/debugging)
     bool m_rtAccumulate = true;          // validation / progressive mode
+    bool m_rtSvgf = true;
+    bool  m_rtDenoise = true;
 
     // RT post-stack mode.
     // Full is the production path.
@@ -600,7 +685,8 @@ private:
 
         DescriptorAllocator::Allocation historySelectSrvTable{};  // 4 SRVs
         DescriptorAllocator::Allocation historySelectUavTable{};  // 2 UAVs
-        DescriptorAllocator::Allocation denoiseSrvTable{};  // 3 SRVs
+        DescriptorAllocator::Allocation denoiseDiffuseSrvTable{}; // 3 SRVs
+        DescriptorAllocator::Allocation denoiseSpecSrvTable{};    // 3 SRVs
         DescriptorAllocator::Allocation combineSrvTable{};             // 2 SRVs
 
         // Per-frame, per-iteration SVGF input tables.
@@ -683,7 +769,7 @@ private:
     //DescriptorAllocator::Allocation m_rtDenoiseSrvTable{};
     RtDenoisePass m_rtDenoisePass;
 
-    bool  m_rtDenoise = true;
+
     int   m_rtDenoiseRadius = 2;
     float m_rtDenoiseSigmaDepth = 0.02f;
     float m_rtDenoiseSigmaNormal = 0.25f;
@@ -715,7 +801,7 @@ private:
     std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryMoments{};
     std::array<ComPtr<ID3D12Resource>, 2> m_rtSvgfPing{};
 
-    bool m_rtSvgf = true;
+
     uint32_t m_rtAtrousIterations = 2;
     float m_rtVarianceScale = 1.0f;
 
