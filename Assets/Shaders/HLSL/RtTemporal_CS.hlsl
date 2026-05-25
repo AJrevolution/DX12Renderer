@@ -30,6 +30,7 @@ Texture2D<float4> g_PrevAccum : register(t3);
 Texture2D<float4> g_PrevNormal : register(t4);
 Texture2D<float> g_PrevDepth : register(t5);
 Texture2D<float2> g_PrevMoments : register(t6);
+Texture2D<float2> g_CurrPrevUV : register(t7);
 
 RWTexture2D<float4> g_HistoryOut : register(u0); // linear
 RWTexture2D<float4> g_Output : register(u1); // display
@@ -90,6 +91,22 @@ float2 ProjectPrevUV(float3 worldPos)
     float4 prevClip = mul(float4(worldPos, 1.0f), PrevViewProj);
     float2 prevNdc = prevClip.xy / max(1e-6f, prevClip.w);
     return float2(prevNdc.x * 0.5f + 0.5f, 0.5f - prevNdc.y * 0.5f);
+}
+
+bool PrevUVValid(float2 uv)
+{
+    return uv.x >= 0.0f && uv.x <= 1.0f &&
+           uv.y >= 0.0f && uv.y <= 1.0f;
+}
+
+float2 SelectPrevUV(uint2 pixel, float3 worldPos)
+{
+    float2 storedPrevUV = g_CurrPrevUV[pixel];
+
+    if (PrevUVValid(storedPrevUV))
+        return storedPrevUV;
+
+    return ProjectPrevUV(worldPos);
 }
 
 void NeighborhoodMinMax(uint2 pixel, out float3 cmin, out float3 cmax)
@@ -194,7 +211,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     if (TemporalEnabled != 0 && HistoryValid != 0 && currDepth < 0.9999f)
     {
         float3 worldPos = ReconstructWorldPos(pixel, currDepth);
-        prevUV = ProjectPrevUV(worldPos);
+        prevUV = SelectPrevUV(pixel, worldPos);
         
         uint radius = min(ReprojectRadius, 2u);
         

@@ -29,47 +29,51 @@ void RaytracingPipeline::Initialize(ID3D12Device5* device, const std::filesystem
 void RaytracingPipeline::BuildRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE uavTable;
-    uavTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 5, 0, 0); 
+    uavTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 6, 0, 0); 
     // u0 = rtOutput
     // u1 = rtAccumDiffuse
     // u2 = rtAccumSpec
     // u3 = aovNormalRough
     // u4 = aovDepth
+    // u5 = aovMotionPrevUV
 
     CD3DX12_DESCRIPTOR_RANGE srvTable;
     srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kRtSrvTableCount, 1, 0); // t1..t5 + t6.. material textures
 
-    CD3DX12_ROOT_PARAMETER params[4]{};
-    params[0].InitAsDescriptorTable(1, &uavTable); // u0..u4 RT UAV table
+    CD3DX12_ROOT_PARAMETER params[5]{};
+    params[0].InitAsDescriptorTable(1, &uavTable); // u0..u5 RT UAV table
     params[1].InitAsShaderResourceView(0);         // t0 TLAS
     params[2].InitAsConstantBufferView(0);         // b0 frame
     params[3].InitAsDescriptorTable(1, &srvTable); // t1..expanded RT table
+    params[4].InitAsConstantBufferView(1);         // b1 RtRayGenConstants
     
-    CD3DX12_STATIC_SAMPLER_DESC staticSamplers[2];
-    staticSamplers[0].Init(
+    CD3DX12_STATIC_SAMPLER_DESC linearWrap(
         0,
         D3D12_FILTER_MIN_MAG_MIP_LINEAR,
         D3D12_TEXTURE_ADDRESS_MODE_WRAP,
         D3D12_TEXTURE_ADDRESS_MODE_WRAP,
         D3D12_TEXTURE_ADDRESS_MODE_WRAP);
 
-    staticSamplers[1].Init(
+    CD3DX12_STATIC_SAMPLER_DESC linearClamp(
         1,
         D3D12_FILTER_MIN_MAG_MIP_LINEAR,
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
 
+    CD3DX12_STATIC_SAMPLER_DESC samplers[2] = { linearWrap, linearClamp };
+
     CD3DX12_ROOT_SIGNATURE_DESC desc{};
     desc.Init(
         _countof(params),
         params,
-        _countof(staticSamplers),
-        staticSamplers);
+        _countof(samplers),
+        samplers,
+        D3D12_ROOT_SIGNATURE_FLAG_NONE);
 
     ComPtr<ID3DBlob> blob, err;
     ThrowIfFailed(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err), "Serialize RT root sig");
-    ThrowIfFailed(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&m_globalRootSig)), "Create RT root sig");
+    ThrowIfFailed(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&m_globalRootSig)), "Create DXR root sig");
     SetD3D12ObjectName(m_globalRootSig.Get(), L"RootSig: DXR Global");
 }
 

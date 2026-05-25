@@ -374,18 +374,20 @@ void Renderer::RenderFrame(
     const bool wantsSvgfDebug = IsSvgfDebug(m_debugView);
     const bool wantsHistorySelectDebug = IsHistorySelectDebug(m_debugView);
     const bool wantsSplitDebug = IsSplitDebug(m_debugView);
+    const bool wantsMotionDebug = IsMotionDebug(m_debugView);
 
     const bool wantsRtPostDebug =
         wantsTemporalDebug || wantsSvgfDebug || wantsHistorySelectDebug;
 
     const bool wantsRtInspectionDebug =
-        wantsRtPostDebug || wantsSplitDebug;
+        wantsRtPostDebug || wantsSplitDebug || wantsMotionDebug;
 
     // Split debug views are RayGen-owned producer diagnostics.
     // Do not let temporal/SVGF/combine overwrite m_rtOutput for 48/49/50.
     const bool enableRtPostStack =
         m_rtEnablePostStack &&
         !wantsSplitDebug &&
+        !wantsMotionDebug &&
         (m_debugView == 0 || wantsRtPostDebug);
 
     const RtPostMode rtPostMode =
@@ -398,10 +400,42 @@ void Renderer::RenderFrame(
         (
             m_rtTemporal ||
             (!m_autoOrbit && m_pauseAnimation) ||
-            wantsSplitDebug
+            wantsSplitDebug ||
+            wantsMotionDebug
         );
 
-    bool drawListChanged = !m_rtHistoryValid || (m_draws.size() != m_prevRtWorlds.size());
+    bool drawListStructuralChanged =
+        !m_rtHistoryValid ||
+        (m_draws.size() != m_prevRtWorlds.size()) ||
+        (m_draws.size() != m_prevRtMaterials.size());
+
+    bool drawTransformChanged = !m_rtHistoryValid;
+
+    if (!drawListStructuralChanged)
+    {
+        for (size_t i = 0; i < m_draws.size(); ++i)
+        {
+            if (m_prevRtMaterials[i] != m_draws[i].material ||
+                m_draws[i].mesh == nullptr)
+            {
+                drawListStructuralChanged = true;
+                break;
+            }
+
+            if (!MatrixNear(m_prevRtWorlds[i], m_draws[i].world))
+            {
+                drawTransformChanged = true;
+            }
+        }
+    }
+
+    const bool drawListChanged =
+        drawListStructuralChanged || drawTransformChanged;
+
+    if (drawListStructuralChanged)
+    {
+        m_prevRtMotionWorldsValid = false;
+    }
 
     const bool svgfChanged =
         !m_rtHistoryValid ||
@@ -414,18 +448,6 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtAtrousLengthSkipThreshold - m_prevRtAtrousLengthSkipThreshold) > 1e-6f) ||
         (m_rtAtrousEnableLengthSkip != m_prevRtAtrousEnableLengthSkip);
 
-    if (!drawListChanged)
-    {
-        for (size_t i = 0; i < m_draws.size(); ++i)
-        {
-            if (m_prevRtMaterials[i] != m_draws[i].material ||
-                !MatrixNear(m_prevRtWorlds[i], m_draws[i].world))
-            {
-                drawListChanged = true;
-                break;
-            }
-        }
-    }
     
     const bool bigCameraChanged =
         !m_rtHistoryValid ||
@@ -479,19 +501,18 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtTemporalVarianceAlphaBoost - m_prevRtTemporalVarianceAlphaBoost) > 1e-6f) ||
         (m_rtTemporalEnableVarianceBoost != m_prevRtTemporalEnableVarianceBoost);
 
-    if (cameraChanged || 
-        drawListChanged || 
-        debugViewChanged || 
-        accumulationModeChanged || 
+    const bool resetRawAccumulation =
+        cameraChanged ||
+        drawListChanged ||
+        debugViewChanged ||
+        accumulationModeChanged ||
         integratorChanged ||
         iblAvailabilityChanged ||
         svgfChanged ||
-        temporalSettingsChanged)
-    {
-        ResetRtAccumulation();
-    }
+        temporalSettingsChanged;
 
-    if (drawListChanged ||
+    const bool resetTemporalHistory =
+        drawListStructuralChanged ||
         debugViewChanged ||
         accumulationModeChanged ||
         integratorChanged ||
@@ -499,7 +520,15 @@ void Renderer::RenderFrame(
         bigCameraChanged ||
         !m_rtTemporal ||
         svgfChanged ||
-        temporalSettingsChanged)
+        temporalSettingsChanged ||
+        !m_prevRtMotionWorldsValid;
+
+    if (resetRawAccumulation)
+    {
+        ResetRtAccumulation(resetTemporalHistory);
+    }
+
+    if (resetTemporalHistory)
     {
         m_rtTemporalHistoryValid = false;
     }
@@ -657,7 +686,11 @@ void Renderer::RenderFrame(
                     const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb =
                         UpdateGlobalConstants(frameIndex, width, height, sceneTime);
 
+                    const D3D12_GPU_VIRTUAL_ADDRESS rtRayGenCb =
+                        UpdateRtRayGenConstants(frameIndex);
+
                     cmd4->SetComputeRootConstantBufferView(2, perFrameCb);
+                    cmd4->SetComputeRootConstantBufferView(4, rtRayGenCb);
                     cmd4->DispatchRays(&rays);
 
                     if (i + 1 < dispatchCount)
@@ -718,7 +751,7 @@ void Renderer::RenderFrame(
         if (RtPostModeRunsTemporal(rtPostMode) &&
             m_rtTemporal &&
             (m_debugView == 0 || wantsTemporalDebug || wantsHistorySelectDebug) &&
-            m_rtAovReady)
+            m_rtAovReady && m_rtAovMotionReady)
         {
             CmdBeginEvent(cmdList, "RT Temporal");
 
@@ -726,6 +759,7 @@ void Renderer::RenderFrame(
             cl.Transition(m_rtAccumSpec.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(m_rtAovMotion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
             cl.Transition(m_rtHistoryAccum[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtHistoryMoments[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1312,6 +1346,7 @@ void Renderer::RenderFrame(
         cl.Transition(m_rtAccumSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl.Transition(m_rtAovMotion.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (m_rtPostReady)
         {
             cl.Transition(m_rtPostDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1481,6 +1516,7 @@ void Renderer::RenderFrame(
     
     m_prevViewProj = m_currViewProj;
     m_prevRtCameraPos = m_currRtCameraPos;
+    CommitRtMotionWorlds();
 }
 
 void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
@@ -1491,7 +1527,9 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_depthReady = false;
     m_gbufferReady = false;
     m_rtOutputReady = false;
- 
+    m_rtAovMotionReady = false;
+    m_prevRtMotionWorldsValid = false;
+    m_prevRtMotionWorlds.clear();
 
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
@@ -2283,6 +2321,8 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         !m_rtPostDiffuse ||
         !m_rtPostSpec ||
         !m_rtOutputReady ||
+        !m_rtAovMotion ||
+        !m_rtAovMotionReady ||
         !m_rtAccumDiffuseReady ||
         !m_rtAccumSpecReady ||
         !m_rtAovReady ||
@@ -2292,6 +2332,9 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
 
     if (sizeMismatch)
     {
+        m_prevRtMotionWorldsValid = false;
+        m_prevRtMotionWorlds.clear();
+
         CreateRtOutput(m_device5.Get(), width, height);
         CreateRtAccum(m_device5.Get(), width, height);
         CreateRtAovs(m_device5.Get(), width, height);
@@ -2408,7 +2451,15 @@ void Renderer::EnsureRtInstanceData(uint32_t frameIndex)
 
         data.meshType = (item.mesh == &m_floor) ? 0u : 1u;
         data.materialId = GetRtMaterialId(item.material);
+        
+        const bool hasPrevMotionWorld =
+            m_prevRtMotionWorldsValid &&
+            i < m_prevRtMotionWorlds.size();
 
+        data.prevObjectToWorld = hasPrevMotionWorld
+            ? m_prevRtMotionWorlds[i]
+            : item.world;
+        
         dst[i] = data;
     }
 
@@ -2509,16 +2560,6 @@ void Renderer::UpdateRtGeometryTable(uint32_t frameIndex)
         );
     }
 
-    //// Fill the whole RT material block with deterministic fallback textures first.
-    //for (uint32_t materialId = 0; materialId < kMaxRtMaterials; ++materialId)
-    //{
-    //    const uint32_t firstSlot =
-    //        kRtGeometrySrvCount + materialId * kRtTexturesPerMaterial;
-    //
-    //    WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 0), m_rtFallbackWhiteTex);
-    //    WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 1), m_rtFallbackFlatNormalTex);
-    //    WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 2), m_rtFallbackOrmTex);
-    //}
     
     // Clear every non-geometry slot to deterministic nulls first.
     // This covers:
@@ -2673,12 +2714,16 @@ D3D12_CPU_DESCRIPTOR_HANDLE Renderer::RtUavCpuAt(uint32_t slot) const
     return h;
 }
 
-void Renderer::ResetRtAccumulation()
+void Renderer::ResetRtAccumulation(bool resetTemporalHistory)
 {
     m_rtSampleIndex = 0;
     ++m_rtResetId;
     m_rtDispatchSampleIndex = 0;
-    m_rtTemporalHistoryValid = false;
+    if (resetTemporalHistory)
+    {
+        m_rtTemporalHistoryValid = false;
+    }
+
     m_rtHistoryValid = false;
 }
 
@@ -2766,8 +2811,10 @@ void Renderer::CreateRtAccum(ID3D12Device* device, uint32_t width, uint32_t heig
 void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t height)
 {
     m_rtAovReady = false;
+    m_rtAovMotionReady = false;
     m_rtAovNormal.Reset();
     m_rtAovDepth.Reset();
+    m_rtAovMotion.Reset();
 
     if (!m_rtOutputUav.IsValid())
         m_rtOutputUav = m_srvHeap.Allocate(kRtUavTableCount);
@@ -2834,6 +2881,45 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
         device->CreateUnorderedAccessView(m_rtAovDepth.Get(), nullptr, &uav, RtUavCpuAt(4));
     }
 
+    {
+        auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R16G16_FLOAT,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&m_rtAovMotion)),
+            "Create RT AOV motion");
+
+        SetD3D12ObjectName(m_rtAovMotion.Get(), L"RT AOV Motion PrevUV");
+
+        CommandList::SetGlobalState(
+            m_rtAovMotion.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16G16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            m_rtAovMotion.Get(),
+            nullptr,
+            &uav,
+            RtUavCpuAt(5));
+    }
+
+    m_rtAovMotionReady = true;
     m_rtAovReady = true;
 }
 
@@ -3298,6 +3384,8 @@ bool Renderer::UpdateRtTemporalTables(
         !m_rtHistoryNormal[1] ||
         !m_rtHistoryDepth[0] ||
         !m_rtHistoryDepth[1] ||
+        !m_rtAovMotion ||
+        !m_rtAovMotionReady ||
         !outAccumResource ||
         !outMomentsResource ||
         !m_rtAccumDiffuseReady ||
@@ -3309,7 +3397,7 @@ bool Renderer::UpdateRtTemporalTables(
     }
 
     if (!srvTable.IsValid())
-        srvTable = m_srvHeap.Allocate(7);
+        srvTable = m_srvHeap.Allocate(8);
 
     if (!uavTable.IsValid())
         uavTable = m_srvHeap.Allocate(3);
@@ -3369,6 +3457,21 @@ bool Renderer::UpdateRtTemporalTables(
         srv.Texture2D.MipLevels = 1;
 
         device->CreateShaderResourceView(prevMomentsResource, &srv, SrvAt(6));
+    }
+
+    // t7 = current stored previous UV / motion AOV.
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovMotion.Get(),
+            &srv,
+            SrvAt(7));
     }
 
     // u0 = output history signal, u1 = debug/output, u2 = output moments.
@@ -3755,4 +3858,42 @@ bool Renderer::RunRtDenoiseSignal(
 
     CmdEndEvent(cmdList);
     return true;
+}
+
+void Renderer::CommitRtMotionWorlds()
+{
+    m_prevRtMotionWorlds.resize(m_draws.size());
+
+    for (size_t i = 0; i < m_draws.size(); ++i)
+    {
+        m_prevRtMotionWorlds[i] = m_draws[i].world;
+    }
+
+    m_prevRtMotionWorldsValid = true;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex)
+{
+    auto alloc = m_upload.Allocate(frameIndex, sizeof(RtRayGenConstants), 256);
+    auto* cb = reinterpret_cast<RtRayGenConstants*>(alloc.cpu);
+
+    cb->prevViewProj = m_prevViewProj;
+    cb->currViewProj = m_currViewProj;
+    cb->prevCameraPos = DirectX::XMFLOAT4(
+        m_prevRtCameraPos.x,
+        m_prevRtCameraPos.y,
+        m_prevRtCameraPos.z,
+        1.0f);
+    cb->currCameraPos = DirectX::XMFLOAT4(
+        m_currRtCameraPos.x,
+        m_currRtCameraPos.y,
+        m_currRtCameraPos.z,
+        1.0f);
+    
+    cb->hasPrevMotion = m_prevRtMotionWorldsValid ? 1u : 0u;
+    cb->pad0[0] = 0u;
+    cb->pad0[1] = 0u;
+    cb->pad0[2] = 0u;
+
+    return alloc.gpu;
 }

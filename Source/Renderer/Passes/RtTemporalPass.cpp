@@ -22,7 +22,7 @@ void RtTemporalPass::Initialize(ID3D12Device* device, const std::filesystem::pat
 void RtTemporalPass::BuildRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE srvRange;
-    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0, 0); // t0..t6
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 8, 0, 0); // t0..t7
 
     CD3DX12_DESCRIPTOR_RANGE uavRange;
     uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0); // u0 history out, u1 display output, u2 moments

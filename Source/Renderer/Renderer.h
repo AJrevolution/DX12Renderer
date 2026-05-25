@@ -83,6 +83,18 @@ private:
     };
     static_assert((sizeof(RtTemporalConstants) % 16) == 0, "RtTemporalConstants must be 16-byte aligned.");
 
+    struct RtRayGenConstants
+    {
+        DirectX::XMFLOAT4X4 prevViewProj{};
+        DirectX::XMFLOAT4X4 currViewProj{};
+        DirectX::XMFLOAT4 prevCameraPos{};
+        DirectX::XMFLOAT4 currCameraPos{};
+
+        uint32_t hasPrevMotion = 0;
+        uint32_t pad0[3] = {};
+    };
+    static_assert((sizeof(RtRayGenConstants) % 16) == 0, "RtRayGenConstants must be 16-byte aligned.");
+    
     struct RtAtrousConstants
     {
         DirectX::XMFLOAT2 invResolution{};
@@ -278,7 +290,12 @@ private:
     {
         return dv >= 48 && dv <= 50;
     }
-
+    
+    static bool IsMotionDebug(uint32_t dv)
+    {
+        return dv == 51 || dv == 52;
+    }
+    
     std::vector<DrawItem> m_draws;
 
     void BuildDrawList(float time);
@@ -344,7 +361,7 @@ private:
     uint32_t GetRtMaterialId(const Material* material) const;
 
     void CreateRtAccum(ID3D12Device* device, uint32_t width, uint32_t height);
-    void ResetRtAccumulation();
+    void ResetRtAccumulation(bool resetTemporalHistory = true);
     D3D12_CPU_DESCRIPTOR_HANDLE RtUavCpuAt(uint32_t slot) const;
 
     void CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t height);
@@ -487,6 +504,9 @@ private:
         uint32_t width,
         uint32_t height);
 
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRayGenConstants(uint32_t frameIndex);
+    void CommitRtMotionWorlds();
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -545,6 +565,10 @@ private:
     //   48 = diffuse accumulation
     //   49 = specular accumulation
     //   50 = diffuse + specular accumulation
+    // 
+    // Motion / RayGen-owned views:
+    //   51 = stored previous UV visualization
+    //   52 = invalid previous UV mask
     // 
     // Future rule:
     //   Do not use broad contiguous checks such as 32..47.
@@ -674,13 +698,13 @@ private:
         // per-frame RT table: geometry + instance data + material textures
         DescriptorAllocator::Allocation geometryTable{};
 
-        DescriptorAllocator::Allocation temporalDiffuseSrvTable{};     // 7 SRVs
+        DescriptorAllocator::Allocation temporalDiffuseSrvTable{};     // 8 SRVs
         DescriptorAllocator::Allocation temporalDiffuseUavTable{};     // 3 UAVs
 
-        DescriptorAllocator::Allocation temporalSpecStableSrvTable{};  // 7 SRVs
+        DescriptorAllocator::Allocation temporalSpecStableSrvTable{};  // 8 SRVs
         DescriptorAllocator::Allocation temporalSpecStableUavTable{};  // 3 UAVs
 
-        DescriptorAllocator::Allocation temporalSpecRespSrvTable{};    // 7 SRVs
+        DescriptorAllocator::Allocation temporalSpecRespSrvTable{};    // 8 SRVs
         DescriptorAllocator::Allocation temporalSpecRespUavTable{};    // 3 UAVs
 
         DescriptorAllocator::Allocation historySelectSrvTable{};  // 4 SRVs
@@ -710,6 +734,7 @@ private:
     // u2 = m_rtAccumSpec       R16G16B16A16_FLOAT linear
     // u3 = m_rtAovNormal       R16G16B16A16_FLOAT rgb=geom normal, a=roughness
     // u4 = m_rtAovDepth        R32_FLOAT
+    // u5 = m_rtAovMotion       R16G16_FLOAT prevUV, (-1,-1) invalid
     DescriptorAllocator::Allocation m_rtOutputUav{};
     uint32_t m_rtOutputWidth = 0;
     uint32_t m_rtOutputHeight = 0;
@@ -736,6 +761,8 @@ private:
     float m_prevRtCamRadius = 0.0f;
     std::vector<DirectX::XMFLOAT4X4> m_prevRtWorlds;
     std::vector<const Material*> m_prevRtMaterials;
+    std::vector<DirectX::XMFLOAT4X4> m_prevRtMotionWorlds;
+    bool m_prevRtMotionWorldsValid = false;
 
     uint32_t m_widthCached = 1;
     uint32_t m_heightCached = 1;
@@ -764,6 +791,10 @@ private:
 
     ComPtr<ID3D12Resource> m_rtAovNormal;
     ComPtr<ID3D12Resource> m_rtAovDepth;
+
+    ComPtr<ID3D12Resource> m_rtAovMotion;
+    bool m_rtAovMotionReady = false;
+
     bool m_rtAovReady = false;
 
     //DescriptorAllocator::Allocation m_rtDenoiseSrvTable{};
@@ -890,7 +921,7 @@ private:
     uint32_t m_rtAtrousIterationsSpec = 1;
     uint32_t m_prevRtAtrousIterationsSpec = 1;
 
-    static constexpr uint32_t kRtUavTableCount = 5;
+    static constexpr uint32_t kRtUavTableCount = 6;
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

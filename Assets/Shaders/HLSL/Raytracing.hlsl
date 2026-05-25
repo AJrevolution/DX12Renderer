@@ -17,12 +17,16 @@ struct VertexRT
 struct RTInstanceData
 {
     float4 baseColorFactor;
+
     float metallic;
     float roughness;
     float2 _pad0;
+
     uint meshType;
     uint materialId;
     uint2 _pad1;
+
+    row_major float4x4 prevObjectToWorld;
 };
 
 cbuffer PerFrameConstants : register(b0)
@@ -53,6 +57,17 @@ cbuffer PerFrameConstants : register(b0)
     float RtIndirectScale;
 };
 
+cbuffer RtRayGenConstants : register(b1)
+{
+    row_major float4x4 RtPrevViewProj;
+    row_major float4x4 RtCurrViewProj;
+    float4 RtPrevCameraPos;
+    float4 RtCurrCameraPos;
+    
+    uint RtHasPrevMotion;
+    uint3 _RtRayGenPad0;
+};
+
 static const uint RT_RAY_PRIMARY_DIFFUSE = 0u;
 static const uint RT_RAY_SHADOW = 1u;
 static const uint RT_RAY_INDIRECT = 2u;
@@ -69,6 +84,7 @@ struct RayPayload
 struct SurfaceBasisRT
 {
     float2 uv;
+    float3 objPos;
     float3 worldGeomNormal;
     float3 worldTangent;
     float tangentSign;
@@ -81,6 +97,7 @@ RWTexture2D<float4>                 g_AccumDiff : register(u1);
 RWTexture2D<float4>                 g_AccumSpec : register(u2);
 RWTexture2D<float4>                 g_AovNormal : register(u3);
 RWTexture2D<float>                  g_AovDepth : register(u4);
+RWTexture2D<float2>                 g_AovMotion : register(u5); // prevUV, (-1,-1) invalid
 StructuredBuffer<VertexRT>          g_QuadVerts : register(t1);
 ByteAddressBuffer                   g_QuadIndices : register(t2);
 StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);
@@ -182,13 +199,15 @@ SurfaceBasisRT FetchSurfaceBasis(uint instanceID, uint primitiveIndex, float2 ba
     LoadTriangleVertices(inst.meshType, primitiveIndex, v0, v1, v2);
 
     float2 uv = BaryLerp2(v0.uv, v1.uv, v2.uv, bary);
-
+    float3 objPos = BaryLerp3(v0.pos, v1.pos, v2.pos, bary);
+    
     float3 nObj = SafeNormalize(BaryLerp3(v0.nrm, v1.nrm, v2.nrm, bary));
     float4 tObj4 = BaryLerp4(v0.tan, v1.tan, v2.tan, bary);
     float3 tObj = SafeNormalize(tObj4.xyz);
 
     SurfaceBasisRT s;
     s.uv = uv;
+    s.objPos = objPos;
     s.worldGeomNormal = TransformDirection(nObj);
     s.worldTangent = TransformDirection(tObj);
     s.tangentSign = (tObj4.w >= 0.0f) ? 1.0f : -1.0f;
@@ -454,7 +473,27 @@ float3 EvalIBLSpecular(float3 R, float3 Rrough, float roughness, float NdotV, fl
     return prefiltered * (F0 * brdf.x + brdf.y);
 }
 
+float3 TransformPrevObjectToWorld(RTInstanceData data, float3 objPos)
+{
+    return mul(float4(objPos, 1.0f), data.prevObjectToWorld).xyz;
+}
 
+float2 ProjectPrevUVFromWorld(float3 prevWorldPos)
+{
+    float4 prevClip = mul(float4(prevWorldPos, 1.0f), RtPrevViewProj);
+
+    if (prevClip.w <= 1e-6f)
+        return float2(-1.0f, -1.0f);
+
+    float2 prevNdc = prevClip.xy / prevClip.w;
+    return float2(prevNdc.x * 0.5f + 0.5f, 0.5f - prevNdc.y * 0.5f);
+}
+
+bool PrevUVValid(float2 uv)
+{
+    return uv.x >= 0.0f && uv.x <= 1.0f &&
+           uv.y >= 0.0f && uv.y <= 1.0f;
+}
 
 // RT IBL parity target:
 // - same latlong UV mapping convention as raster
@@ -472,8 +511,11 @@ void RayGen()
         (DebugView != 0 && DebugView <= 17) ||
         DebugView == 27;
 
-
-    bool bypassAccum = (RtAccumulate == 0) || isRtShadingDebug;
+    bool isMotionDebug =
+        DebugView == 51 ||
+        DebugView == 52;
+    
+    bool bypassAccum = (RtAccumulate == 0) || isRtShadingDebug || isMotionDebug;
     
     uint rng = InitRng(pixel, RtSampleIndex, RtResetId);
 
@@ -542,6 +584,30 @@ void RayGen()
         g_AccumDiff[pixel] = float4(r.xxx, 1.0f);
         g_AccumSpec[pixel] = float4(0.0f.xxx, 1.0f);
         g_Output[pixel] = float4(r.xxx, 1.0f);
+        return;
+    }
+    
+    if (DebugView == 51)
+    {
+        float2 prevUV = g_AovMotion[pixel];
+        float2 currUV = (float2(pixel) + 0.5f) / float2(dim);
+        bool validPrev = PrevUVValid(prevUV);
+
+        // Visualize motion as prevUV - currUV centered around 0.5.
+        float2 motion = validPrev ? (prevUV - currUV) : 0.0f.xx;
+        float2 vis = saturate(motion * 8.0f + 0.5f);
+
+        g_Output[pixel] = float4(vis, validPrev ? 0.0f : 1.0f, 1.0f);
+        return;
+    }
+
+    if (DebugView == 52)
+    {
+        float2 prevUV = g_AovMotion[pixel];
+        bool invalidPrev = !PrevUVValid(prevUV);
+
+        float v = invalidPrev ? 1.0f : 0.0f;
+        g_Output[pixel] = float4(v.xxx, 1.0f);
         return;
     }
 
@@ -644,6 +710,7 @@ void Miss(inout RayPayload payload)
        
         g_AovNormal[pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
         g_AovDepth[pixel] = 1.0f;
+        g_AovMotion[pixel] = float2(-1.0f, -1.0f);
         
         payload.color = sky;
         return;
@@ -724,8 +791,18 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE)
     {
         uint2 pixel = DispatchRaysIndex().xy;
+        
+        float2 prevUV = float2(-1.0f, -1.0f);
+
+        if (RtHasPrevMotion != 0u)
+        {
+            float3 prevWorldPos = TransformPrevObjectToWorld(data, surface.objPos);
+            prevUV = ProjectPrevUVFromWorld(prevWorldPos);
+        }
+
         g_AovNormal[pixel] = float4(geomNormal * 0.5f + 0.5f, roughness);
         g_AovDepth[pixel] = depth01;
+        g_AovMotion[pixel] = prevUV;
     }
     
     if (payload.rayType == RT_RAY_INDIRECT)
