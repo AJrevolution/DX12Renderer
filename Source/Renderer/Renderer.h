@@ -25,6 +25,7 @@
 #include "Source/Renderer/Passes/RtAtrousPass.h"
 #include "Source/Renderer/Passes/RtHistorySelectPass.h"
 #include "Source/Renderer/Passes/RtCombinePass.h"
+#include "Source/Renderer/Passes/RtMotionDilatePass.h"
 
 class Renderer
 {
@@ -139,6 +140,20 @@ private:
     };
     static_assert((sizeof(RtHistorySelectConstants) % 16) == 0, "RtHistorySelectConstants must be 16-byte aligned.");
 
+    struct RtMotionDilateConstants
+    {
+        DirectX::XMFLOAT2 invResolution{};
+        uint32_t radius = 2;
+        float depthSigma = 0.02f;
+
+        float normalSigma = 0.25f;
+        float minScore = 0.05f;
+        uint32_t debugView = 0;
+        uint32_t pad0 = 0;
+    };
+
+    static_assert((sizeof(RtMotionDilateConstants) % 16) == 0, "RtMotionDilateConstants must be 16-byte aligned.");
+    
     enum class RtSignal : uint32_t
     {
         Diffuse,
@@ -293,9 +308,14 @@ private:
     
     static bool IsMotionDebug(uint32_t dv)
     {
-        return dv == 51 || dv == 52;
+        return dv == 51 || dv == 52 || dv == 53;
     }
-    
+
+    static bool IsMotionDilateDebug(uint32_t dv)
+    {
+        return dv == 54;
+    }
+
     std::vector<DrawItem> m_draws;
 
     void BuildDrawList(float time);
@@ -507,6 +527,22 @@ private:
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRayGenConstants(uint32_t frameIndex);
     void CommitRtMotionWorlds();
 
+    bool UpdateRtMotionDilateTables(
+        uint32_t frameIndex,
+        ID3D12Device* device);
+
+    bool RunRtMotionDilate(
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height);
+
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtMotionDilateConstants(
+        uint32_t frameIndex,
+        uint32_t width,
+        uint32_t height);
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -562,13 +598,23 @@ private:
     //   44 = wide-iteration skip mask
     //
     // Split / RayGen-owned views:
+    // These write directly to m_rtOutput from RayGen.
+    // The RT post stack must stay disabled so temporal/SVGF/combine cannot overwrite them.
     //   48 = diffuse accumulation
     //   49 = specular accumulation
     //   50 = diffuse + specular accumulation
     // 
     // Motion / RayGen-owned views:
+    // These write directly to m_rtOutput from RayGen.
+    // The RT post stack must stay disabled.
     //   51 = stored previous UV visualization
     //   52 = invalid previous UV mask
+    //   53 = raw previous UV validity mask, white = invalid
+    //
+    // Motion dilation / compute-owned views:
+    // This is produced by RtMotionDilatePass and writes directly to m_rtOutput.
+    // The RT post stack must stay disabled, but RunRtMotionDilate still runs explicitly.
+    //   54 = dilated previous UV validity mask, white = invalid
     // 
     // Future rule:
     //   Do not use broad contiguous checks such as 32..47.
@@ -591,8 +637,8 @@ private:
     uint32_t m_debugView = 0;
     bool  m_autoOrbit = true;
     bool m_pauseAnimation = false;
-    bool m_useRaytracing = false;        // Toggle for raytracing vs rasterization (for testing/debugging)
-    bool m_rtAccumulate = true;          // validation / progressive mode
+    bool m_useRaytracing = true;        // Toggle for raytracing vs rasterization (for testing/debugging)
+    bool m_rtAccumulate = false;          // validation / progressive mode
     bool m_rtSvgf = true;
     bool  m_rtDenoise = true;
 
@@ -717,6 +763,9 @@ private:
         std::array<DescriptorAllocator::Allocation, kMaxRtAtrousIterations> svgfSpecSrvTables{};
         std::array<DescriptorAllocator::Allocation, kMaxRtAtrousIterations> svgfDiffuseSrvTables{};
 
+        DescriptorAllocator::Allocation motionDilateSrvTable{}; // 3 SRVs
+        DescriptorAllocator::Allocation motionDilateUavTable{}; // 2 UAVs
+
         uint32_t capacity = 0;
     };
 
@@ -794,6 +843,10 @@ private:
 
     ComPtr<ID3D12Resource> m_rtAovMotion;
     bool m_rtAovMotionReady = false;
+
+    ComPtr<ID3D12Resource> m_rtAovMotionDilated;
+    bool m_rtAovMotionDilatedReady = false;
+    
 
     bool m_rtAovReady = false;
 
@@ -922,6 +975,13 @@ private:
     uint32_t m_prevRtAtrousIterationsSpec = 1;
 
     static constexpr uint32_t kRtUavTableCount = 6;
+
+    RtMotionDilatePass m_rtMotionDilatePass;
+    static constexpr uint32_t kMaxRtMotionDilateRadius = 4;
+    uint32_t m_rtMotionDilateRadius = 2;
+    float m_rtMotionDilateDepthSigma = 0.02f;
+    float m_rtMotionDilateNormalSigma = 0.25f;
+    float m_rtMotionDilateMinScore = 0.05f;
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

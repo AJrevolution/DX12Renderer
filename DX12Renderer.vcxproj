@@ -154,6 +154,7 @@
     <ClInclude Include="Source\Renderer\Passes\RtCombinePass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtDenoisePass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtHistorySelectPass.h" />
+    <ClInclude Include="Source\Renderer\Passes\RtMotionDilatePass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtTemporalPass.h" />
     <ClInclude Include="Source\Renderer\Passes\ShadowPass.h" />
     <ClInclude Include="Source\Renderer\SceneData.h" />
@@ -195,6 +196,7 @@
     <ClCompile Include="Source\Renderer\Passes\RtCombinePass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtDenoisePass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtHistorySelectPass.cpp" />
+    <ClCompile Include="Source\Renderer\Passes\RtMotionDilatePass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtTemporalPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\ShadowPass.cpp" />
     <ClCompile Include="Source\RHI\CommandList\ResourceStateTracker.cpp" />
@@ -398,6 +400,17 @@ else (
 )
 </Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtCombine_CS.cso</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="Assets\Shaders\HLSL\RtMotionDilate_CS.hlsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if "$(Configuration)"=="Debug" (
+ dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtMotionDilate_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtMotionDilate_CS.hlsl"
+) else (
+ dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtMotionDilate_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtMotionDilate_CS.hlsl"
+)</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtMotionDilate_CS.cso</Outputs>
     </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

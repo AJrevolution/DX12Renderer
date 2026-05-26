@@ -513,7 +513,8 @@ void RayGen()
 
     bool isMotionDebug =
         DebugView == 51 ||
-        DebugView == 52;
+        DebugView == 52 ||
+        DebugView == 53;
     
     bool bypassAccum = (RtAccumulate == 0) || isRtShadingDebug || isMotionDebug;
     
@@ -611,6 +612,17 @@ void RayGen()
         return;
     }
 
+    if (DebugView == 53)
+    {
+        float2 prevUV = g_AovMotion[pixel];
+        bool invalidPrev = !PrevUVValid(prevUV);
+
+        float v = invalidPrev ? 1.0f : 0.0f;
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+        return;
+    }
+
+    
     if (isRtShadingDebug)
     {
         float3 sampleColor = diffPayload.color;

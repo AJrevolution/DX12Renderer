@@ -372,30 +372,52 @@ void Renderer::RenderFrame(
 
     const bool wantsTemporalDebug = IsTemporalDebug(m_debugView);
     const bool wantsSvgfDebug = IsSvgfDebug(m_debugView);
+    const bool wantsAtrousOutputDebug =
+        m_debugView == 43 ||
+        m_debugView == 44;
     const bool wantsHistorySelectDebug = IsHistorySelectDebug(m_debugView);
     const bool wantsSplitDebug = IsSplitDebug(m_debugView);
     const bool wantsMotionDebug = IsMotionDebug(m_debugView);
+    const bool wantsMotionDilateDebug = IsMotionDilateDebug(m_debugView);
 
     const bool wantsRtPostDebug =
-        wantsTemporalDebug || wantsSvgfDebug || wantsHistorySelectDebug;
+        wantsTemporalDebug ||
+        wantsSvgfDebug ||
+        wantsHistorySelectDebug;
 
     const bool wantsRtInspectionDebug =
-        wantsRtPostDebug || wantsSplitDebug || wantsMotionDebug;
+        wantsRtPostDebug ||
+        wantsSplitDebug ||
+        wantsMotionDebug ||
+        wantsMotionDilateDebug;
 
-    // Split debug views are RayGen-owned producer diagnostics.
-    // Do not let temporal/SVGF/combine overwrite m_rtOutput for 48/49/50.
+    // Producer-owned diagnostics write directly to m_rtOutput.
+    // Keep the post stack disabled so later temporal/SVGF/combine passes cannot overwrite them.
+    const bool wantsProducerDebug =
+        wantsSplitDebug ||
+        wantsMotionDebug ||
+        wantsMotionDilateDebug;
+
     const bool enableRtPostStack =
         m_rtEnablePostStack &&
-        !wantsSplitDebug &&
-        !wantsMotionDebug &&
+        !wantsProducerDebug &&
         (m_debugView == 0 || wantsRtPostDebug);
 
-    const RtPostMode rtPostMode =
+    RtPostMode rtPostMode =
         enableRtPostStack ? m_rtPostMode : RtPostMode::Disabled;
+
+    // A-Trous output diagnostics are post-stack-owned, not producer-owned.
+    // Keep the post stack enabled, but stop at the diffuse A-Trous stage so
+    // DebugView 43/44 are written by RtAtrousPass and are not recomposed by RtCombine.
+    if (wantsAtrousOutputDebug && rtPostMode != RtPostMode::Disabled)
+    {
+        rtPostMode = RtPostMode::DiffuseAtrousOnly;
+    }
 
 
     const bool allowRtAccumulation =
         m_rtAccumulate &&
+        !wantsMotionDilateDebug &&
         ((m_debugView == 0) || wantsRtInspectionDebug) &&
         (
             m_rtTemporal ||
@@ -537,6 +559,16 @@ void Renderer::RenderFrame(
     // RayGen receives this through PerFrameConstants::rtAccumulate.
     m_rtAccumulateThisFrame = allowRtAccumulation;
 
+    if (wantsMotionDilateDebug)
+    {
+        // Debug 54 is produced by RtMotionDilatePass.
+        // DXR still runs to author raw motion/depth/normal guides, but it must not
+        // advance progressive diffuse/spec accumulation while the compute debug
+        // pass owns the final m_rtOutput image.
+        m_rtAccumulateThisFrame = false;
+        m_rtDispatchSampleIndex = 0;
+    }
+
     // While validating the producer, the post stack is intentionally disabled.
     // Keep temporal history invalid so stale temporal/spec history cannot affect
     // the first frame after this gate is later reopened.
@@ -552,7 +584,7 @@ void Renderer::RenderFrame(
     m_prevRtDebugView = m_debugView;
     m_prevRtHasBrdfLut = rtHasBrdfLut;
     m_prevRtHasIbl = rtHasIbl;
-    m_rtAccumulatingLastFrame = allowRtAccumulation;
+    m_rtAccumulatingLastFrame = m_rtAccumulateThisFrame;
 
     m_prevRtWorlds.resize(m_draws.size());
     m_prevRtMaterials.resize(m_draws.size());
@@ -730,6 +762,29 @@ void Renderer::RenderFrame(
                 height);
         }
 
+        const bool temporalWouldRun =
+            RtPostModeRunsTemporal(rtPostMode) &&
+            m_rtTemporal &&
+            (
+                m_debugView == 0 ||
+                wantsTemporalDebug ||
+                wantsHistorySelectDebug ||
+                wantsSvgfDebug
+            ) &&
+            m_rtAovReady &&
+            m_rtAovMotionReady &&
+            m_rtAovMotionDilatedReady;
+
+        const bool ranMotionDilate =
+            (temporalWouldRun || wantsMotionDilateDebug) &&
+            RunRtMotionDilate(
+                cl,
+                frameIndex,
+                device,
+                width,
+                height);
+
+
         //Temporal
         RtPostSignals rtSignals{};
 
@@ -748,10 +803,7 @@ void Renderer::RenderFrame(
         const uint32_t writeIndex = 1u - m_rtHistoryReadIndex;
 
 
-        if (RtPostModeRunsTemporal(rtPostMode) &&
-            m_rtTemporal &&
-            (m_debugView == 0 || wantsTemporalDebug || wantsHistorySelectDebug) &&
-            m_rtAovReady && m_rtAovMotionReady)
+        if (temporalWouldRun && ranMotionDilate)
         {
             CmdBeginEvent(cmdList, "RT Temporal");
 
@@ -759,7 +811,7 @@ void Renderer::RenderFrame(
             cl.Transition(m_rtAccumSpec.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            cl.Transition(m_rtAovMotion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
             cl.Transition(m_rtHistoryAccum[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtHistoryMoments[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1076,8 +1128,8 @@ void Renderer::RenderFrame(
                                         height,
                                         iter,
                                         advancedSplitHistory,
-                                        false); // finalOutputSrgb = false
-
+                                        false);
+                                
                                 D3D12_GPU_DESCRIPTOR_HANDLE outUav = finalIter
                                     ? RtPostUavGpuAt(1)
                                     : RtSvgfPingUavGpuAt(pingIndex);
@@ -1096,8 +1148,9 @@ void Renderer::RenderFrame(
                                 cmdList->ResourceBarrier(1, &b);
 
                                 if (!finalIter)
+                                {
                                     svgfSignal = outRes;
-
+                                }
                                 else
                                 {
                                     rtSignals.SetFinalSpec(
@@ -1153,6 +1206,8 @@ void Renderer::RenderFrame(
                         const uint32_t iterCount =
                             std::min(m_rtAtrousIterations, kMaxRtAtrousIterations);
 
+                        
+                        
                         ID3D12Resource* svgfSignal = advancedSplitHistory
                             ? rtSignals.diffuse.signal
                             : m_rtAccumDiffuse.Get();
@@ -1160,14 +1215,14 @@ void Renderer::RenderFrame(
                         ID3D12Resource* svgfMoments = advancedSplitHistory
                             ? rtSignals.diffuse.moments
                             : m_rtHistoryMoments[m_rtHistoryReadIndex].Get();
-
+                        const bool diffuseAtrousDebugToOutput = wantsAtrousOutputDebug;
                         for (uint32_t iter = 0; iter < iterCount; ++iter)
                         {
                             const bool finalIter = (iter + 1 == iterCount);
                             const uint32_t pingIndex = iter & 1u;
 
                             ID3D12Resource* outRes = finalIter
-                                ? m_rtPostDiffuse.Get()
+                                ? (diffuseAtrousDebugToOutput ? m_rtOutput.Get() : m_rtPostDiffuse.Get())
                                 : m_rtSvgfPing[pingIndex].Get();
 
                             cl.Transition(svgfSignal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1194,10 +1249,10 @@ void Renderer::RenderFrame(
                                         height,
                                         iter,
                                         advancedSplitHistory,
-                                        false); // finalOutputSrgb = false
+                                        false);
 
                                 D3D12_GPU_DESCRIPTOR_HANDLE outUav = finalIter
-                                    ? RtPostUavGpuAt(0)
+                                    ? (diffuseAtrousDebugToOutput ? m_rtOutputUav.gpu : RtPostUavGpuAt(0))
                                     : RtSvgfPingUavGpuAt(pingIndex);
 
                                 m_rtAtrousPass.Dispatch(
@@ -1217,7 +1272,7 @@ void Renderer::RenderFrame(
                                 {
                                     svgfSignal = outRes;
                                 }
-                                else
+                                else if (!diffuseAtrousDebugToOutput)
                                 {
                                     rtSignals.SetFinalDiffuse(
                                         m_rtPostDiffuse.Get(),
@@ -1266,6 +1321,14 @@ void Renderer::RenderFrame(
         // These modes must still produce output even if no spatial filter ran.
         // FinalDiffuseSignal()/FinalSpecSignal() fall back to the best available
         // temporal/selected/raw signals when no A-Trous/denoise output exists.
+        //
+        // Pass-owned debug views such as temporal debug 18-26 already write their
+        // visualization into m_rtOutput. Do not let the final Full combine overwrite
+        // them with the normal beauty output.
+        const bool allowFullModeFinalCombine =
+            m_debugView == 0 ||
+            (wantsSvgfDebug && !wantsAtrousOutputDebug);
+
         if (rtPostMode == RtPostMode::SpecAtrousOnly &&
             rtSignals.diffuse.signal &&
             rtSignals.FinalSpecSignal())
@@ -1281,6 +1344,7 @@ void Renderer::RenderFrame(
                 "RT Spec Spatial Only Combine");
         }
         else if (rtPostMode == RtPostMode::DiffuseAtrousOnly &&
+            !wantsAtrousOutputDebug &&
             rtSignals.FinalDiffuseSignal() &&
             rtSignals.specSelected.signal)
         {
@@ -1295,6 +1359,7 @@ void Renderer::RenderFrame(
                 "RT Diffuse Spatial Only Combine");
         }
         else if (rtPostMode == RtPostMode::Full &&
+            allowFullModeFinalCombine &&
             rtSignals.FinalDiffuseSignal() &&
             rtSignals.FinalSpecSignal())
         {
@@ -1309,8 +1374,6 @@ void Renderer::RenderFrame(
                 "RT Combine");
         }
         
-        
-
         if (RtPostModeCommitsHistory(rtPostMode) &&
             rtSignals.AdvancedSplitHistoryReady())
         {
@@ -1347,6 +1410,7 @@ void Renderer::RenderFrame(
         cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovMotion.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (m_rtPostReady)
         {
             cl.Transition(m_rtPostDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1528,6 +1592,7 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_gbufferReady = false;
     m_rtOutputReady = false;
     m_rtAovMotionReady = false;
+    m_rtAovMotionDilatedReady = false;
     m_prevRtMotionWorldsValid = false;
     m_prevRtMotionWorlds.clear();
 
@@ -1725,6 +1790,7 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         CreateRtAovs(m_device5.Get(), m_widthCached, m_heightCached);
         
         m_rtDenoisePass.Initialize(device, Paths::ShaderDir());
+        m_rtMotionDilatePass.Initialize(device, Paths::ShaderDir());
         m_rtTemporalPass.Initialize(device, Paths::ShaderDir());
         CreateRtHistoryResources(m_device5.Get(), m_widthCached, m_heightCached);
         m_rtAtrousPass.Initialize(device, Paths::ShaderDir());
@@ -2323,6 +2389,8 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         !m_rtOutputReady ||
         !m_rtAovMotion ||
         !m_rtAovMotionReady ||
+        !m_rtAovMotionDilated ||
+        !m_rtAovMotionDilatedReady ||
         !m_rtAccumDiffuseReady ||
         !m_rtAccumSpecReady ||
         !m_rtAovReady ||
@@ -2815,6 +2883,8 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
     m_rtAovNormal.Reset();
     m_rtAovDepth.Reset();
     m_rtAovMotion.Reset();
+    m_rtAovMotionDilatedReady = false;
+    m_rtAovMotionDilated.Reset();
 
     if (!m_rtOutputUav.IsValid())
         m_rtOutputUav = m_srvHeap.Allocate(kRtUavTableCount);
@@ -2918,6 +2988,38 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
             &uav,
             RtUavCpuAt(5));
     }
+
+    {
+        auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R16G16_FLOAT,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&m_rtAovMotionDilated)),
+            "Create RT AOV motion dilated");
+
+        SetD3D12ObjectName(
+            m_rtAovMotionDilated.Get(),
+            L"RT AOV Motion PrevUV Dilated");
+
+        CommandList::SetGlobalState(
+            m_rtAovMotionDilated.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    m_rtAovMotionDilatedReady = true;
 
     m_rtAovMotionReady = true;
     m_rtAovReady = true;
@@ -3384,8 +3486,8 @@ bool Renderer::UpdateRtTemporalTables(
         !m_rtHistoryNormal[1] ||
         !m_rtHistoryDepth[0] ||
         !m_rtHistoryDepth[1] ||
-        !m_rtAovMotion ||
-        !m_rtAovMotionReady ||
+        !m_rtAovMotionDilated ||
+        !m_rtAovMotionDilatedReady ||
         !outAccumResource ||
         !outMomentsResource ||
         !m_rtAccumDiffuseReady ||
@@ -3459,7 +3561,7 @@ bool Renderer::UpdateRtTemporalTables(
         device->CreateShaderResourceView(prevMomentsResource, &srv, SrvAt(6));
     }
 
-    // t7 = current stored previous UV / motion AOV.
+    // t7 = dilated previous UV / motion AOV.
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
         srv.Format = DXGI_FORMAT_R16G16_FLOAT;
@@ -3469,7 +3571,7 @@ bool Renderer::UpdateRtTemporalTables(
         srv.Texture2D.MipLevels = 1;
 
         device->CreateShaderResourceView(
-            m_rtAovMotion.Get(),
+            m_rtAovMotionDilated.Get(),
             &srv,
             SrvAt(7));
     }
@@ -3894,6 +3996,219 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex)
     cb->pad0[0] = 0u;
     cb->pad0[1] = 0u;
     cb->pad0[2] = 0u;
+
+    return alloc.gpu;
+}
+
+bool Renderer::UpdateRtMotionDilateTables(
+    uint32_t frameIndex,
+    ID3D12Device* device)
+{
+    if (!device ||
+        !m_rtAovMotion ||
+        !m_rtAovMotionDilated ||
+        !m_rtAovNormal ||
+        !m_rtAovDepth ||
+        !m_rtOutput ||
+        !m_rtAovMotionReady ||
+        !m_rtAovMotionDilatedReady ||
+        !m_rtAovReady ||
+        !m_rtOutputReady)
+    {
+        return false;
+    }
+
+    auto& frame = m_rtFrames[frameIndex];
+
+    if (!frame.motionDilateSrvTable.IsValid())
+        frame.motionDilateSrvTable = m_srvHeap.Allocate(3);
+
+    if (!frame.motionDilateUavTable.IsValid())
+        frame.motionDilateUavTable = m_srvHeap.Allocate(2);
+
+    const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
+
+    auto SrvAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.motionDilateSrvTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    auto UavAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.motionDilateUavTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    // t0 = raw prevUV
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovMotion.Get(),
+            &srv,
+            SrvAt(0));
+    }
+
+    // t1 = normal/roughness guide
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovNormal.Get(),
+            &srv,
+            SrvAt(1));
+    }
+
+    // t2 = depth guide
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovDepth.Get(),
+            &srv,
+            SrvAt(2));
+    }
+
+    // u0 = dilated prevUV
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16G16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            m_rtAovMotionDilated.Get(),
+            nullptr,
+            &uav,
+            UavAt(0));
+    }
+
+    // u1 = debug/display output
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            m_rtOutput.Get(),
+            nullptr,
+            &uav,
+            UavAt(1));
+    }
+
+    return true;
+}
+
+bool Renderer::RunRtMotionDilate(
+    CommandList& cl,
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height)
+{
+    if (!device ||
+        !m_rtAovMotion ||
+        !m_rtAovMotionDilated ||
+        !m_rtAovNormal ||
+        !m_rtAovDepth ||
+        !m_rtOutput ||
+        !m_rtAovMotionReady ||
+        !m_rtAovMotionDilatedReady ||
+        !m_rtAovReady ||
+        !m_rtOutputReady)
+    {
+        return false;
+    }
+
+    auto* cmdList = cl.Get();
+
+    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+
+    CmdBeginEvent(cmdList, "RT Motion Dilate");
+
+    cl.Transition(m_rtAovMotion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.FlushBarriers();
+
+    const bool okTables =
+        UpdateRtMotionDilateTables(
+            frameIndex,
+            device);
+
+    if (!okTables)
+    {
+        CmdEndEvent(cmdList);
+        return false;
+    }
+
+    const D3D12_GPU_VIRTUAL_ADDRESS cb =
+        UpdateRtMotionDilateConstants(frameIndex, width, height);
+
+    m_rtMotionDilatePass.Dispatch(
+        cl,
+        cb,
+        m_rtFrames[frameIndex].motionDilateSrvTable.gpu,
+        m_rtFrames[frameIndex].motionDilateUavTable.gpu,
+        width,
+        height);
+
+    D3D12_RESOURCE_BARRIER barriers[2]{};
+
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[0].UAV.pResource = m_rtAovMotionDilated.Get();
+
+    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[1].UAV.pResource = m_rtOutput.Get();
+
+    cmdList->ResourceBarrier(2, barriers);
+
+    CmdEndEvent(cmdList);
+    return true;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtMotionDilateConstants(
+    uint32_t frameIndex,
+    uint32_t width,
+    uint32_t height)
+{
+    constexpr uint32_t cbSize =
+        (sizeof(RtMotionDilateConstants) + 255) & ~255;
+
+    auto alloc = m_upload.Allocate(frameIndex, cbSize, 256);
+    auto* cb = reinterpret_cast<RtMotionDilateConstants*>(alloc.cpu);
+
+    cb->invResolution = {
+        1.0f / static_cast<float>(width),
+        1.0f / static_cast<float>(height)
+    };
+
+    cb->radius = std::min(m_rtMotionDilateRadius, kMaxRtMotionDilateRadius);
+    cb->depthSigma = m_rtMotionDilateDepthSigma;
+    cb->normalSigma = m_rtMotionDilateNormalSigma;
+    cb->minScore = m_rtMotionDilateMinScore;
+    cb->debugView = m_debugView;
+    cb->pad0 = 0;
 
     return alloc.gpu;
 }
