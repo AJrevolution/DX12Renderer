@@ -31,7 +31,8 @@ namespace
             (dv >= 32 && dv <= 36) ||
             (dv >= 45 && dv <= 47) ||
             dv == 56 ||
-            dv == 57;
+            dv == 57 ||
+            dv == 58;
     }
 
     static bool IsSvgfDebug(uint32_t dv)
@@ -524,7 +525,10 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtTemporalVarianceScale - m_prevRtTemporalVarianceScale) > 1e-6f) ||
         (std::fabs(m_rtTemporalVarianceBias - m_prevRtTemporalVarianceBias) > 1e-6f) ||
         (std::fabs(m_rtTemporalVarianceAlphaBoost - m_prevRtTemporalVarianceAlphaBoost) > 1e-6f) ||
-        (std::fabs(m_rtTemporalMotionConfMin - m_prevRtTemporalMotionConfMin) > 1e-6f) ||
+        (std::fabs(m_rtTemporalMotionConfMinDiffuse - m_prevRtTemporalMotionConfMinDiffuse) > 1e-6f) ||
+        (std::fabs(m_rtTemporalMotionConfMinSpec - m_prevRtTemporalMotionConfMinSpec) > 1e-6f) ||
+        (std::fabs(m_rtTemporalMotionConfPowerDiffuse - m_prevRtTemporalMotionConfPowerDiffuse) > 1e-6f) ||
+        (std::fabs(m_rtTemporalMotionConfPowerSpec - m_prevRtTemporalMotionConfPowerSpec) > 1e-6f) ||
         (m_rtTemporalEnableVarianceBoost != m_prevRtTemporalEnableVarianceBoost);
 
     const bool resetRawAccumulation =
@@ -617,7 +621,10 @@ void Renderer::RenderFrame(
     m_prevRtTemporalVarianceBias = m_rtTemporalVarianceBias;
     m_prevRtTemporalVarianceAlphaBoost = m_rtTemporalVarianceAlphaBoost;
     m_prevRtTemporalEnableVarianceBoost = m_rtTemporalEnableVarianceBoost;
-    m_prevRtTemporalMotionConfMin = m_rtTemporalMotionConfMin;
+    m_prevRtTemporalMotionConfMinDiffuse = m_rtTemporalMotionConfMinDiffuse;
+    m_prevRtTemporalMotionConfMinSpec = m_rtTemporalMotionConfMinSpec;
+    m_prevRtTemporalMotionConfPowerDiffuse = m_rtTemporalMotionConfPowerDiffuse;
+    m_prevRtTemporalMotionConfPowerSpec = m_rtTemporalMotionConfPowerSpec;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -860,7 +867,9 @@ void Renderer::RenderFrame(
                         width,
                         height,
                         m_rtTemporalAlpha,
-                        m_rtTemporalRoughnessSigma);
+                        m_rtTemporalRoughnessSigma,
+                        m_rtTemporalMotionConfMinDiffuse,
+                        m_rtTemporalMotionConfPowerDiffuse);
 
                 m_rtTemporalPass.Dispatch(
                     cl,
@@ -906,7 +915,9 @@ void Renderer::RenderFrame(
                         width,
                         height,
                         m_rtTemporalAlpha,
-                        m_rtTemporalRoughnessSigma);
+                        m_rtTemporalRoughnessSigma,
+                        m_rtTemporalMotionConfMinSpec,
+                        m_rtTemporalMotionConfPowerSpec);
 
                 m_rtTemporalPass.Dispatch(
                     cl,
@@ -954,7 +965,9 @@ void Renderer::RenderFrame(
                         width,
                         height,
                         m_rtTemporalAlphaResp,
-                        m_rtTemporalRoughnessSigmaResp);
+                        m_rtTemporalRoughnessSigmaResp,
+                        m_rtTemporalMotionConfMinSpec,
+                        m_rtTemporalMotionConfPowerSpec);
 
                 m_rtTemporalPass.Dispatch(
                     cl,
@@ -3675,7 +3688,9 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     uint32_t width, 
     uint32_t height,
     float temporalAlpha,
-    float roughnessSigma)
+    float roughnessSigma,
+    float motionConfMin,
+    float motionConfPower)
 {
     auto alloc = m_upload.Allocate(
         frameIndex,
@@ -3709,17 +3724,19 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     cb->varianceScale = std::max(0.0f, m_rtTemporalVarianceScale);
     cb->varianceAlphaBoost = std::max(0.0f, m_rtTemporalVarianceAlphaBoost);
     cb->enableVarianceBoost = m_rtTemporalEnableVarianceBoost ? 1u : 0u;
-    cb->motionConfMin = std::max(0.0f, std::min(1.0f, m_rtTemporalMotionConfMin));
-    cb->pad1 = 0;
+    cb->motionConfMin = std::max(0.0f, std::min(1.0f, motionConfMin));
+    cb->motionConfPower = std::max(1e-3f, motionConfPower);
 
-    cb->currCameraPos = {
-    m_currRtCameraPos.x,
-    m_currRtCameraPos.y,
-    m_currRtCameraPos.z,
-    0.0f
+    cb->currCameraPos = 
+    {
+        m_currRtCameraPos.x,
+        m_currRtCameraPos.y,
+        m_currRtCameraPos.z,
+        0.0f
     };
 
-    cb->prevCameraPos = {
+    cb->prevCameraPos = 
+    {
         m_prevRtCameraPos.x,
         m_prevRtCameraPos.y,
         m_prevRtCameraPos.z,

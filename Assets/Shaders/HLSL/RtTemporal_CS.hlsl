@@ -61,7 +61,7 @@ cbuffer RtTemporalConstants : register(b0)
     uint ReprojectRadius;
     float ReprojectMinConf;
     float MotionConfMin;
-    uint _pad1;
+    float MotionConfPower;
     
     float VarianceScale;
     float VarianceBias;
@@ -192,7 +192,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float3 currNormal = UnpackNormal(g_CurrNormal[pixel]);
     float currDepth = g_CurrDepth[pixel];
     float currR = g_CurrNormal[pixel].a;
-    float motionConf = saturate(g_CurrMotionConf[pixel]);
+    float motionConfRaw = saturate(g_CurrMotionConf[pixel]);
+    float motionConfW = pow(motionConfRaw, max(MotionConfPower, 1e-3f));
+    float motionConfMin = saturate(MotionConfMin);
     
     bool validReuse = false;
     float2 prevUV = 0.0f.xx;
@@ -312,12 +314,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
         
             rawBestScore = saturate(max(bestCandidateScore, 0.0f));
             bestScore = rawBestScore;
-            effectiveScore = rawBestScore * motionConf;
-
-            float motionConfMin = saturate(MotionConfMin);
+            effectiveScore = rawBestScore * motionConfW;
 
             if (bestCandidateScore >= ReprojectMinConf &&
-                motionConf >= motionConfMin)
+                motionConfRaw >= motionConfMin)
             {
                 prevUV = bestPrevUV;
                 prevColor = bestPrevColor;
@@ -462,11 +462,15 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
     else if (DebugView == 56)
     {
-        display = motionConf.xxx;
+        display = motionConfRaw.xxx;
     }
     else if (DebugView == 57)
     {
         display = alphaAfterMotionConf.xxx;
+    }
+    else if (DebugView == 58)
+    {
+        display = motionConfW.xxx;
     }
     
     g_HistoryOut[pixel] = float4(history, newLen);
@@ -477,7 +481,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
         (DebugView >= 32 && DebugView <= 36) ||
         (DebugView >= 45 && DebugView <= 47) ||
         DebugView == 56 ||
-        DebugView == 57;
+        DebugView == 57 ||
+        DebugView == 58;
 
     if (isTemporalDebug)
     {

@@ -73,7 +73,7 @@ private:
         uint32_t reprojectRadius = 1;
         float reprojectMinConf = 0.25f;
         float motionConfMin = 0.20f;
-        uint32_t pad1 = 0;
+        float motionConfPower = 1.0f;
 
         float varianceScale = 16.0f;
         float varianceBias = 0.0f;
@@ -428,7 +428,9 @@ private:
         uint32_t width,
         uint32_t height,
         float temporalAlpha,
-        float roughnessSigma);
+        float roughnessSigma,
+        float motionConfMin,
+        float motionConfPower);
 
     D3D12_GPU_DESCRIPTOR_HANDLE RtSvgfPingUavGpuAt(uint32_t i) const;
 
@@ -630,6 +632,7 @@ private:
     //     47 = final alpha increases when variance boost is enabled
     //     56 = motion confidence consumed by temporal
     //     57 = alpha after motion-confidence scaling
+    //     58 = post-power motion confidence used for temporal weighting
     //   History select:
     //     42 = selectedLen looks plausible and stable
     //   A-Trous:
@@ -941,11 +944,19 @@ private:
 
     uint32_t m_rtTemporalReprojectRadius = 1;
     float    m_rtTemporalReprojectMinConf = 0.25f;
-    float m_rtTemporalMotionConfMin = 0.20f;
+    // Motion confidence policy per signal.
+    float m_rtTemporalMotionConfMinDiffuse = 0.15f;
+    float m_rtTemporalMotionConfMinSpec = 0.30f;
+
+    float m_rtTemporalMotionConfPowerDiffuse = 1.0f;
+    float m_rtTemporalMotionConfPowerSpec = 2.0f;
 
     uint32_t m_prevRtTemporalReprojectRadius = 1;
     float    m_prevRtTemporalReprojectMinConf = 0.25f;
-    float m_prevRtTemporalMotionConfMin = 0.20f;
+    float m_prevRtTemporalMotionConfMinDiffuse = 0.15f;
+    float m_prevRtTemporalMotionConfMinSpec = 0.30f;
+    float m_prevRtTemporalMotionConfPowerDiffuse = 1.0f;
+    float m_prevRtTemporalMotionConfPowerSpec = 2.0f;
     float m_rtHistorySelectLengthBias = 0.0f;
     float m_rtHistorySelectLengthScale = 0.01f;
 
