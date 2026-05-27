@@ -16,6 +16,7 @@ Texture2D<float4> g_StableHistory : register(t0);
 Texture2D<float4> g_RespHistory : register(t1);
 Texture2D<float4> g_GuideNormal : register(t2);
 Texture2D<float> g_GuideDepth : register(t3);
+Texture2D<float> g_MotionConf : register(t4);
 
 RWTexture2D<float4> g_SelectedSignal : register(u0); // linear, feeds SVGF/A-Trous
 RWTexture2D<float4> g_Output : register(u1); // display
@@ -27,8 +28,11 @@ cbuffer RtHistorySelectConstants : register(b0)
     float LengthBias;
     float LengthScale;
     float LengthInfluence;
+    float MotionTrustInfluence;
+    float MotionConfMin;
+    float MotionConfPower;
     uint DebugView;
-    uint2 _pad0;
+    uint3 _pad0;
 };
 
 [numthreads(8, 8, 1)]
@@ -54,16 +58,45 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float roughness = guide.a;
     float depth = g_GuideDepth[pixel];
     
+    float motionConfRaw = saturate(g_MotionConf[pixel]);
+    float motionConfW = pow(motionConfRaw, max(MotionConfPower, 1e-3f));
+    
+    // Roughness vote:
+    // Low roughness / glossy -> responsive.
+    // High roughness -> stable.
     float tRough = saturate(
     (RoughnessThreshold - roughness) / max(RoughnessRange, 1e-4f));
 
-    float lenDelta = (respLen - stableLen) + LengthBias;
-    float lenAdjust = clamp(lenDelta * LengthScale, -0.5f, 0.5f);
+    // Length vote:
+    // Positive value means responsive history is healthier/longer.
+    // Negative value means stable history is healthier/longer.
+    float lenDelta = (respLen - stableLen) * max(0.0f, LengthScale) + LengthBias;
+
+    // Keep the length vote bounded so an aggressive LengthScale does not make
+    // history length dominate roughness/motion selection instantly.
+    float lenAdjust = clamp(lenDelta, -0.5f, 0.5f);
     float tLen = saturate(0.5f + lenAdjust);
     
-    // 0 = roughness only, 1 = length vote only.
-    float t = lerp(tRough, tLen, saturate(LengthInfluence));
+    // When current motion confidence is weak, do not allow "long stable history"
+    // to dominate as strongly. This prevents stale stable spec from clinging
+    // through disocclusions or uncertain reprojection.
+    float lengthInfluence = saturate(LengthInfluence) * motionConfW;
+    float tBase = lerp(tRough, tLen, lengthInfluence);
+    
+    // Motion trust vote:
+    // Low confidence pushes toward responsive. This is deliberately one knob;
+    // threshold/power are reused from the spec temporal policy.
+    float motionTrustInfluence = saturate(MotionTrustInfluence);
+    float tMotion = lerp(tBase, 1.0f, motionTrustInfluence * (1.0f - motionConfW));
 
+    float t = tMotion;
+
+    // Hard gate: below spec motion-confidence threshold, use responsive.
+    if (motionConfRaw < saturate(MotionConfMin))
+    {
+        t = 1.0f;
+    }
+    
     // Sky / miss path stays on stable.
     if (depth >= 0.9999f)
         t = 0.0f;
@@ -94,15 +127,15 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
     else if (DebugView == 40)
     {
-        display = (stableLen / 255.0f).xxx;
+        display = saturate(stableLen / 255.0f).xxx;
     }
     else if (DebugView == 41)
     {
-        display = (respLen / 255.0f).xxx;
+        display = saturate(respLen / 255.0f).xxx;
     }
     else if (DebugView == 42)
     {
-        display = (selectedLen / 255.0f).xxx;
+        display = saturate(selectedLen / 255.0f).xxx;
     }
 
     g_Output[pixel] = float4(LinearToSRGB(display), 1.0f);

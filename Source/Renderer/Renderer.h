@@ -135,9 +135,11 @@ private:
         float lengthBias = 0.0f;
         float lengthScale = 0.01f;
         float lengthInfluence = 0.5f;
-
+        float motionTrustInfluence = 0.50f;
+        float motionConfMin = 0.30f;
+        float motionConfPower = 2.0f;
         uint32_t debugView = 0;
-        uint32_t  pad0[2] = {};
+        uint32_t  pad0[3] = {};
     };
     static_assert((sizeof(RtHistorySelectConstants) % 16) == 0, "RtHistorySelectConstants must be 16-byte aligned.");
 
@@ -645,7 +647,7 @@ private:
     bool  m_autoOrbit = true;
     bool m_pauseAnimation = false;
     bool m_useRaytracing = false;        // Toggle for raytracing vs rasterization (for testing/debugging)
-    bool m_rtAccumulate = false;          // validation / progressive mode
+    bool m_rtAccumulate = false;         // validation / progressive mode
     bool m_rtSvgf = true;
     bool  m_rtDenoise = true;
 
@@ -760,8 +762,10 @@ private:
         DescriptorAllocator::Allocation temporalSpecRespSrvTable{};    // 9 SRVs
         DescriptorAllocator::Allocation temporalSpecRespUavTable{};    // 3 UAVs
 
-        DescriptorAllocator::Allocation historySelectSrvTable{};  // 4 SRVs
-        DescriptorAllocator::Allocation historySelectUavTable{};  // 2 UAVs
+        DescriptorAllocator::Allocation historySelectSrvTable{};  // kRtHistorySelectSrvCount SRVs
+        DescriptorAllocator::Allocation historySelectUavTable{};  // kRtHistorySelectUavCount UAVs
+        uint32_t historySelectSrvCount = 0;
+        uint32_t historySelectUavCount = 0;
         DescriptorAllocator::Allocation denoiseDiffuseSrvTable{}; // 3 SRVs
         DescriptorAllocator::Allocation denoiseSpecSrvTable{};    // 3 SRVs
         DescriptorAllocator::Allocation combineSrvTable{};             // 2 SRVs
@@ -958,13 +962,22 @@ private:
     float m_prevRtTemporalMotionConfPowerDiffuse = 1.0f;
     float m_prevRtTemporalMotionConfPowerSpec = 2.0f;
     float m_rtHistorySelectLengthBias = 0.0f;
+
+    // Keep this small. History lengths are 0 - 255;
+    // high values make the length vote saturate quickly.
     float m_rtHistorySelectLengthScale = 0.01f;
+
+    // Motion confidence influence for spec history selection.
+    // 0 = selector ignores motion confidence.
+    // 1 = low confidence strongly pushes toward responsive history.
+    float m_rtHistorySelectMotionTrustInfluence = 0.50f;
 
     float m_prevRtHistorySelectLengthBias = 0.0f;
     float m_prevRtHistorySelectLengthScale = 0.01f;
 
     float m_rtHistorySelectLengthInfluence = 0.5f;
     float m_prevRtHistorySelectLengthInfluence = 0.5f;
+    float m_prevRtHistorySelectMotionTrustInfluence = 0.50f;
 
     float    m_rtTemporalVarianceScale = 16.0f;
     float    m_rtTemporalVarianceBias = 0.0f;
@@ -994,6 +1007,8 @@ private:
     uint32_t m_prevRtAtrousIterationsSpec = 1;
 
     static constexpr uint32_t kRtUavTableCount = 6;
+    static constexpr uint32_t kRtHistorySelectSrvCount = 5;
+    static constexpr uint32_t kRtHistorySelectUavCount = 2;
 
     RtMotionDilatePass m_rtMotionDilatePass;
     static constexpr uint32_t kMaxRtMotionDilateRadius = 4;

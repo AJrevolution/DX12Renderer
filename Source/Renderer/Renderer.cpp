@@ -522,6 +522,7 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtHistorySelectLengthInfluence - m_prevRtHistorySelectLengthInfluence) > 1e-6f) ||
         (std::fabs(m_rtHistorySelectThreshold - m_prevRtHistorySelectThreshold) > 1e-6f) ||
         (std::fabs(m_rtHistorySelectRange - m_prevRtHistorySelectRange) > 1e-6f) ||
+        (std::fabs(m_rtHistorySelectMotionTrustInfluence - m_prevRtHistorySelectMotionTrustInfluence) > 1e-6f) ||
         (std::fabs(m_rtTemporalVarianceScale - m_prevRtTemporalVarianceScale) > 1e-6f) ||
         (std::fabs(m_rtTemporalVarianceBias - m_prevRtTemporalVarianceBias) > 1e-6f) ||
         (std::fabs(m_rtTemporalVarianceAlphaBoost - m_prevRtTemporalVarianceAlphaBoost) > 1e-6f) ||
@@ -613,6 +614,7 @@ void Renderer::RenderFrame(
     m_prevRtHistorySelectLengthBias = m_rtHistorySelectLengthBias;
     m_prevRtHistorySelectLengthScale = m_rtHistorySelectLengthScale;
     m_prevRtHistorySelectLengthInfluence = m_rtHistorySelectLengthInfluence;
+    m_prevRtHistorySelectMotionTrustInfluence = m_rtHistorySelectMotionTrustInfluence;
     m_prevRtAtrousLengthAttenuation = m_rtAtrousLengthAttenuation;
     m_prevRtAtrousLengthPower = m_rtAtrousLengthPower;
     m_prevRtAtrousLengthSkipThreshold = m_rtAtrousLengthSkipThreshold;
@@ -1017,7 +1019,7 @@ void Renderer::RenderFrame(
         if (RtPostModeRunsHistorySelect(rtPostMode) &&
             advancedSplitHistory &&
             (m_debugView == 0 || wantsHistorySelectDebug) &&
-            m_rtAovReady)
+            m_rtAovReady && m_rtAovMotionConfReady)
         {
             CmdBeginEvent(cmdList, "RT Spec History Select");
 
@@ -1025,6 +1027,7 @@ void Renderer::RenderFrame(
             cl.Transition(rtSignals.specResponsive.signal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtSvgfPing[0].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.FlushBarriers();
@@ -3896,16 +3899,26 @@ bool Renderer::UpdateRtHistorySelectTables(
         !m_rtAovDepth ||
         !m_rtSvgfPing[0] ||
         !m_rtOutput ||
+        !m_rtAovMotionConf ||
+        !m_rtAovMotionConfReady ||
         !m_rtAovReady)
     {
         return false;
     }
 
-    if (!frame.historySelectSrvTable.IsValid())
-        frame.historySelectSrvTable = m_srvHeap.Allocate(4);
+    if (!frame.historySelectSrvTable.IsValid() ||
+        frame.historySelectSrvCount != kRtHistorySelectSrvCount)
+    {
+        frame.historySelectSrvTable = m_srvHeap.Allocate(kRtHistorySelectSrvCount);
+        frame.historySelectSrvCount = kRtHistorySelectSrvCount;
+    }
 
-    if (!frame.historySelectUavTable.IsValid())
-        frame.historySelectUavTable = m_srvHeap.Allocate(2);
+    if (!frame.historySelectUavTable.IsValid() ||
+        frame.historySelectUavCount != kRtHistorySelectUavCount)
+    {
+        frame.historySelectUavTable = m_srvHeap.Allocate(kRtHistorySelectUavCount);
+        frame.historySelectUavCount = kRtHistorySelectUavCount;
+    }
 
     auto SrvAt = [&](uint32_t i)
     {
@@ -3945,6 +3958,21 @@ bool Renderer::UpdateRtHistorySelectTables(
         device->CreateShaderResourceView(m_rtAovDepth.Get(), &srv, SrvAt(3));
     }
 
+    // t4 = motion confidence
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovMotionConf.Get(),
+            &srv,
+            SrvAt(4));
+    }
+
     {
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
         uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -3965,15 +3993,36 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtHistorySelectConstants(uint32_t fram
         sizeof(RtHistorySelectConstants),
         D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
 
+    
     auto* cb = reinterpret_cast<RtHistorySelectConstants*>(alloc.cpu);
-    *cb = {};
+    *cb = {};   
 
     cb->roughnessThreshold = m_rtHistorySelectThreshold;
-    cb->roughnessRange = m_rtHistorySelectRange;
+    cb->roughnessRange = std::max(1e-4f, m_rtHistorySelectRange);
+
     cb->lengthBias = m_rtHistorySelectLengthBias;
-    cb->lengthScale = m_rtHistorySelectLengthScale;
-    cb->lengthInfluence = m_rtHistorySelectLengthInfluence;
+    cb->lengthScale = std::max(0.0f, m_rtHistorySelectLengthScale);
+    cb->lengthInfluence =
+        std::max(0.0f, std::min(1.0f, m_rtHistorySelectLengthInfluence));
+
+    cb->motionTrustInfluence =
+        std::max(0.0f, std::min(1.0f, m_rtHistorySelectMotionTrustInfluence));
+
+    // Reuse the spec temporal confidence policy so selection and spec temporal
+    // agree on what "trusted motion" means. This intentionally means
+    // m_rtTemporalMotionConfPowerSpec shapes both spec temporal reuse and
+    // spec history selection; do not add a second selector power knob unless
+    // tuning proves they must diverge.
+    cb->motionConfMin =
+        std::max(0.0f, std::min(1.0f, m_rtTemporalMotionConfMinSpec));
+
+    cb->motionConfPower =
+        std::max(1e-3f, m_rtTemporalMotionConfPowerSpec);
+
     cb->debugView = m_debugView;
+    cb->pad0[0] = 0u;
+    cb->pad0[1] = 0u;
+    cb->pad0[2] = 0u;
 
     return alloc.gpu;
 }
