@@ -34,8 +34,8 @@ void RtMotionDilatePass::BuildRootSignature(ID3D12Device* device)
     // t0 raw prevUV, t1 normal/roughness, t2 depth
 
     CD3DX12_DESCRIPTOR_RANGE uavRange;
-    uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 0);
-    // u0 dilated prevUV, u1 debug/display output
+    uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0);
+    // u0 dilated prevUV, u1 motion confidence, u2 debug/display output
 
     CD3DX12_ROOT_PARAMETER params[3]{};
     params[0].InitAsConstantBufferView(0);

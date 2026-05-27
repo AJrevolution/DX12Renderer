@@ -31,6 +31,7 @@ Texture2D<float4> g_PrevNormal : register(t4);
 Texture2D<float> g_PrevDepth : register(t5);
 Texture2D<float2> g_PrevMoments : register(t6);
 Texture2D<float2> g_CurrPrevUV : register(t7);
+Texture2D<float> g_CurrMotionConf : register(t8);
 
 RWTexture2D<float4> g_HistoryOut : register(u0); // linear
 RWTexture2D<float4> g_Output : register(u1); // display
@@ -59,7 +60,8 @@ cbuffer RtTemporalConstants : register(b0)
     
     uint ReprojectRadius;
     float ReprojectMinConf;
-    uint2 _pad1;
+    float MotionConfMin;
+    uint _pad1;
     
     float VarianceScale;
     float VarianceBias;
@@ -190,6 +192,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float3 currNormal = UnpackNormal(g_CurrNormal[pixel]);
     float currDepth = g_CurrDepth[pixel];
     float currR = g_CurrNormal[pixel].a;
+    float motionConf = saturate(g_CurrMotionConf[pixel]);
     
     bool validReuse = false;
     float2 prevUV = 0.0f.xx;
@@ -202,7 +205,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
     bool specOk = true;
     float specDot = 1.0f;
     
-    float bestScore = 0.0f;
+    float bestScore = 0.0f; // Pure reprojection match quality, used by existing debug views.
+    float rawBestScore = 0.0f;
+    float effectiveScore = 0.0f; // Reprojection score scaled by motion confidence.
     int2 chosenOffset = int2(0, 0);
     
     float varNorm = 0.0f;
@@ -305,9 +310,14 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 }
             }
         
-            bestScore = saturate(max(bestCandidateScore, 0.0f));
+            rawBestScore = saturate(max(bestCandidateScore, 0.0f));
+            bestScore = rawBestScore;
+            effectiveScore = rawBestScore * motionConf;
 
-            if (bestCandidateScore >= ReprojectMinConf)
+            float motionConfMin = saturate(MotionConfMin);
+
+            if (bestCandidateScore >= ReprojectMinConf &&
+                motionConf >= motionConfMin)
             {
                 prevUV = bestPrevUV;
                 prevColor = bestPrevColor;
@@ -318,7 +328,6 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 specDot = bestSpecDot;
                 specOk = bestSpecOk;
                 chosenOffset = bestOffset;
-
                 validReuse = true;
             }
         }
@@ -338,11 +347,12 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     if (validReuse)
     {
-        float inc = saturate(bestScore) * lerp(1.0f, 0.25f, varNorm);
+        float inc = effectiveScore * lerp(1.0f, 0.25f, varNorm);
         newLen = min(prevLen + inc, 255.0f);
     }
 
     float alphaUsed = 0.0f;
+    float alphaAfterMotionConf = 0.0f;
     float3 history = currColor;
     
     float currLuma = Luminance(currColor);
@@ -353,8 +363,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
     {
         float k = saturate(newLen / 8.0f);
         alphaUsed = lerp(0.25f, TemporalAlpha, k);
-        alphaUsed *= saturate(bestScore);
-        alphaConfidence = alphaUsed; //alphaConfidence separate so DebugView 36 remains the old “confidence-scaled alpha before variance boost,”
+        alphaUsed *= effectiveScore;
+
+        alphaAfterMotionConf = alphaUsed;
+        alphaConfidence = alphaUsed;
         
         if (EnableVarianceBoost != 0)
         {
@@ -448,6 +460,14 @@ void main(uint3 dtid : SV_DispatchThreadID)
     {
         display = alphaUsed.xxx;
     }
+    else if (DebugView == 56)
+    {
+        display = motionConf.xxx;
+    }
+    else if (DebugView == 57)
+    {
+        display = alphaAfterMotionConf.xxx;
+    }
     
     g_HistoryOut[pixel] = float4(history, newLen);
     g_MomentsOut[pixel] = moments;
@@ -455,7 +475,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
     bool isTemporalDebug =
         (DebugView >= 18 && DebugView <= 26) ||
         (DebugView >= 32 && DebugView <= 36) ||
-        (DebugView >= 45 && DebugView <= 47);
+        (DebugView >= 45 && DebugView <= 47) ||
+        DebugView == 56 ||
+        DebugView == 57;
 
     if (isTemporalDebug)
     {

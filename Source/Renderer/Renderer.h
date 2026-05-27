@@ -72,7 +72,8 @@ private:
 
         uint32_t reprojectRadius = 1;
         float reprojectMinConf = 0.25f;
-        uint32_t pad1[2] = {};
+        float motionConfMin = 0.20f;
+        uint32_t pad1 = 0;
 
         float varianceScale = 16.0f;
         float varianceBias = 0.0f;
@@ -313,7 +314,7 @@ private:
 
     static bool IsMotionDilateDebug(uint32_t dv)
     {
-        return dv == 54;
+        return dv == 54 || dv == 55;
     }
 
     std::vector<DrawItem> m_draws;
@@ -615,6 +616,7 @@ private:
     // This is produced by RtMotionDilatePass and writes directly to m_rtOutput.
     // The RT post stack must stay disabled, but RunRtMotionDilate still runs explicitly.
     //   54 = dilated previous UV validity mask, white = invalid
+    //   55 = motion confidence, white = high confidence
     // 
     // Future rule:
     //   Do not use broad contiguous checks such as 32..47.
@@ -626,6 +628,8 @@ private:
     //     45 = varNorm bright in noisy regions
     //     46 = reprojection score behaves smoothly
     //     47 = final alpha increases when variance boost is enabled
+    //     56 = motion confidence consumed by temporal
+    //     57 = alpha after motion-confidence scaling
     //   History select:
     //     42 = selectedLen looks plausible and stable
     //   A-Trous:
@@ -637,7 +641,7 @@ private:
     uint32_t m_debugView = 0;
     bool  m_autoOrbit = true;
     bool m_pauseAnimation = false;
-    bool m_useRaytracing = true;        // Toggle for raytracing vs rasterization (for testing/debugging)
+    bool m_useRaytracing = false;        // Toggle for raytracing vs rasterization (for testing/debugging)
     bool m_rtAccumulate = false;          // validation / progressive mode
     bool m_rtSvgf = true;
     bool  m_rtDenoise = true;
@@ -744,13 +748,13 @@ private:
         // per-frame RT table: geometry + instance data + material textures
         DescriptorAllocator::Allocation geometryTable{};
 
-        DescriptorAllocator::Allocation temporalDiffuseSrvTable{};     // 8 SRVs
+        DescriptorAllocator::Allocation temporalDiffuseSrvTable{};     // 9 SRVs
         DescriptorAllocator::Allocation temporalDiffuseUavTable{};     // 3 UAVs
 
-        DescriptorAllocator::Allocation temporalSpecStableSrvTable{};  // 8 SRVs
+        DescriptorAllocator::Allocation temporalSpecStableSrvTable{};  // 9 SRVs
         DescriptorAllocator::Allocation temporalSpecStableUavTable{};  // 3 UAVs
 
-        DescriptorAllocator::Allocation temporalSpecRespSrvTable{};    // 8 SRVs
+        DescriptorAllocator::Allocation temporalSpecRespSrvTable{};    // 9 SRVs
         DescriptorAllocator::Allocation temporalSpecRespUavTable{};    // 3 UAVs
 
         DescriptorAllocator::Allocation historySelectSrvTable{};  // 4 SRVs
@@ -764,7 +768,7 @@ private:
         std::array<DescriptorAllocator::Allocation, kMaxRtAtrousIterations> svgfDiffuseSrvTables{};
 
         DescriptorAllocator::Allocation motionDilateSrvTable{}; // 3 SRVs
-        DescriptorAllocator::Allocation motionDilateUavTable{}; // 2 UAVs
+        DescriptorAllocator::Allocation motionDilateUavTable{}; // 3 UAVs
 
         uint32_t capacity = 0;
     };
@@ -846,6 +850,8 @@ private:
 
     ComPtr<ID3D12Resource> m_rtAovMotionDilated;
     bool m_rtAovMotionDilatedReady = false;
+    ComPtr<ID3D12Resource> m_rtAovMotionConf;
+    bool m_rtAovMotionConfReady = false;
     
 
     bool m_rtAovReady = false;
@@ -935,9 +941,11 @@ private:
 
     uint32_t m_rtTemporalReprojectRadius = 1;
     float    m_rtTemporalReprojectMinConf = 0.25f;
+    float m_rtTemporalMotionConfMin = 0.20f;
 
     uint32_t m_prevRtTemporalReprojectRadius = 1;
     float    m_prevRtTemporalReprojectMinConf = 0.25f;
+    float m_prevRtTemporalMotionConfMin = 0.20f;
     float m_rtHistorySelectLengthBias = 0.0f;
     float m_rtHistorySelectLengthScale = 0.01f;
 

@@ -5,7 +5,8 @@ Texture2D<float4> g_AovNormal : register(t1);
 Texture2D<float> g_AovDepth : register(t2);
 
 RWTexture2D<float2> g_DilatedPrevUV : register(u0);
-RWTexture2D<float4> g_Output : register(u1);
+RWTexture2D<float> g_MotionConf : register(u1);
+RWTexture2D<float4> g_Output : register(u2);
 
 cbuffer MotionDilateConstants : register(b0)
 {
@@ -30,11 +31,16 @@ float3 DecodeGuideNormal(float4 packedNormalRoughness)
     return SafeNormalize(packedNormalRoughness.xyz * 2.0f - 1.0f);
 }
 
-void WriteDebugMask(uint2 pixel, bool invalidAfterDilation)
+void WriteDebug(uint2 pixel, bool invalidAfterDilation, float confidence)
 {
     if (DebugView == 54u)
     {
         float v = invalidAfterDilation ? 1.0f : 0.0f;
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+    }
+    else if (DebugView == 55u)
+    {
+        float v = saturate(confidence);
         g_Output[pixel] = float4(v.xxx, 1.0f);
     }
 }
@@ -55,7 +61,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
     if (PrevUVValid(rawPrevUV))
     {
         g_DilatedPrevUV[pixel] = rawPrevUV;
-        WriteDebugMask(pixel, false);
+        g_MotionConf[pixel] = 1.0f;
+        WriteDebug(pixel, false, 1.0f);
         return;
     }
 
@@ -64,7 +71,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
     if (centerDepth >= 0.9999f)
     {
         g_DilatedPrevUV[pixel] = float2(-1.0f, -1.0f);
-        WriteDebugMask(pixel, true);
+        g_MotionConf[pixel] = 0.0f;
+        WriteDebug(pixel, true, 0.0f);
         return;
     }
 
@@ -116,13 +124,18 @@ void main(uint3 dtid : SV_DispatchThreadID)
             }
         }
     }
-
+    
+    float confidence = saturate(bestScore);
     bool validAfterDilation = bestScore >= MinScore;
 
     float2 outPrevUV = validAfterDilation
         ? bestPrevUV
         : float2(-1.0f, -1.0f);
 
+    if (!validAfterDilation)
+        confidence = 0.0f;
+    
     g_DilatedPrevUV[pixel] = outPrevUV;
-    WriteDebugMask(pixel, !validAfterDilation);
+    g_MotionConf[pixel] = confidence;
+    WriteDebug(pixel, !validAfterDilation, confidence);
 }

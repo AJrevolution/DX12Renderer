@@ -26,9 +26,12 @@ namespace
 
     static bool IsTemporalDebug(uint32_t dv)
     {
-        return (dv >= 18 && dv <= 26) ||
+        return
+            (dv >= 18 && dv <= 26) ||
             (dv >= 32 && dv <= 36) ||
-            (dv >= 45 && dv <= 47);
+            (dv >= 45 && dv <= 47) ||
+            dv == 56 ||
+            dv == 57;
     }
 
     static bool IsSvgfDebug(uint32_t dv)
@@ -521,6 +524,7 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtTemporalVarianceScale - m_prevRtTemporalVarianceScale) > 1e-6f) ||
         (std::fabs(m_rtTemporalVarianceBias - m_prevRtTemporalVarianceBias) > 1e-6f) ||
         (std::fabs(m_rtTemporalVarianceAlphaBoost - m_prevRtTemporalVarianceAlphaBoost) > 1e-6f) ||
+        (std::fabs(m_rtTemporalMotionConfMin - m_prevRtTemporalMotionConfMin) > 1e-6f) ||
         (m_rtTemporalEnableVarianceBoost != m_prevRtTemporalEnableVarianceBoost);
 
     const bool resetRawAccumulation =
@@ -613,6 +617,7 @@ void Renderer::RenderFrame(
     m_prevRtTemporalVarianceBias = m_rtTemporalVarianceBias;
     m_prevRtTemporalVarianceAlphaBoost = m_rtTemporalVarianceAlphaBoost;
     m_prevRtTemporalEnableVarianceBoost = m_rtTemporalEnableVarianceBoost;
+    m_prevRtTemporalMotionConfMin = m_rtTemporalMotionConfMin;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -773,7 +778,8 @@ void Renderer::RenderFrame(
             ) &&
             m_rtAovReady &&
             m_rtAovMotionReady &&
-            m_rtAovMotionDilatedReady;
+            m_rtAovMotionDilatedReady &&
+            m_rtAovMotionConfReady;
 
         const bool ranMotionDilate =
             (temporalWouldRun || wantsMotionDilateDebug) &&
@@ -812,6 +818,7 @@ void Renderer::RenderFrame(
             cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
             cl.Transition(m_rtHistoryAccum[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtHistoryMoments[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1411,6 +1418,7 @@ void Renderer::RenderFrame(
         cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovMotion.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (m_rtPostReady)
         {
             cl.Transition(m_rtPostDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1593,6 +1601,7 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_rtOutputReady = false;
     m_rtAovMotionReady = false;
     m_rtAovMotionDilatedReady = false;
+    m_rtAovMotionConfReady = false;
     m_prevRtMotionWorldsValid = false;
     m_prevRtMotionWorlds.clear();
 
@@ -2391,6 +2400,8 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         !m_rtAovMotionReady ||
         !m_rtAovMotionDilated ||
         !m_rtAovMotionDilatedReady ||
+        !m_rtAovMotionConf ||
+        !m_rtAovMotionConfReady ||
         !m_rtAccumDiffuseReady ||
         !m_rtAccumSpecReady ||
         !m_rtAovReady ||
@@ -2885,6 +2896,8 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
     m_rtAovMotion.Reset();
     m_rtAovMotionDilatedReady = false;
     m_rtAovMotionDilated.Reset();
+    m_rtAovMotionConfReady = false;
+    m_rtAovMotionConf.Reset();
 
     if (!m_rtOutputUav.IsValid())
         m_rtOutputUav = m_srvHeap.Allocate(kRtUavTableCount);
@@ -3018,6 +3031,38 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
             m_rtAovMotionDilated.Get(),
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
+
+    {
+        auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R16_FLOAT,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&m_rtAovMotionConf)),
+            "Create RT AOV motion confidence");
+
+        SetD3D12ObjectName(
+            m_rtAovMotionConf.Get(),
+            L"RT AOV Motion Confidence");
+
+        CommandList::SetGlobalState(
+            m_rtAovMotionConf.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    m_rtAovMotionConfReady = true;
 
     m_rtAovMotionDilatedReady = true;
 
@@ -3488,6 +3533,8 @@ bool Renderer::UpdateRtTemporalTables(
         !m_rtHistoryDepth[1] ||
         !m_rtAovMotionDilated ||
         !m_rtAovMotionDilatedReady ||
+        !m_rtAovMotionConf ||
+        !m_rtAovMotionConfReady ||
         !outAccumResource ||
         !outMomentsResource ||
         !m_rtAccumDiffuseReady ||
@@ -3499,7 +3546,7 @@ bool Renderer::UpdateRtTemporalTables(
     }
 
     if (!srvTable.IsValid())
-        srvTable = m_srvHeap.Allocate(8);
+        srvTable = m_srvHeap.Allocate(9);
 
     if (!uavTable.IsValid())
         uavTable = m_srvHeap.Allocate(3);
@@ -3605,6 +3652,21 @@ bool Renderer::UpdateRtTemporalTables(
             UavAt(2));
     }
 
+    // t8 = motion confidence.
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovMotionConf.Get(),
+            &srv,
+            SrvAt(8));
+    }
+
     return true;
 }
 
@@ -3647,6 +3709,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     cb->varianceScale = std::max(0.0f, m_rtTemporalVarianceScale);
     cb->varianceAlphaBoost = std::max(0.0f, m_rtTemporalVarianceAlphaBoost);
     cb->enableVarianceBoost = m_rtTemporalEnableVarianceBoost ? 1u : 0u;
+    cb->motionConfMin = std::max(0.0f, std::min(1.0f, m_rtTemporalMotionConfMin));
+    cb->pad1 = 0;
 
     cb->currCameraPos = {
     m_currRtCameraPos.x,
@@ -4012,6 +4076,8 @@ bool Renderer::UpdateRtMotionDilateTables(
         !m_rtOutput ||
         !m_rtAovMotionReady ||
         !m_rtAovMotionDilatedReady ||
+        !m_rtAovMotionConf ||
+        !m_rtAovMotionConfReady ||
         !m_rtAovReady ||
         !m_rtOutputReady)
     {
@@ -4024,7 +4090,7 @@ bool Renderer::UpdateRtMotionDilateTables(
         frame.motionDilateSrvTable = m_srvHeap.Allocate(3);
 
     if (!frame.motionDilateUavTable.IsValid())
-        frame.motionDilateUavTable = m_srvHeap.Allocate(2);
+        frame.motionDilateUavTable = m_srvHeap.Allocate(3);
 
     const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
 
@@ -4099,8 +4165,19 @@ bool Renderer::UpdateRtMotionDilateTables(
             &uav,
             UavAt(0));
     }
+    // u1 = motion confidence
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 
-    // u1 = debug/display output
+        device->CreateUnorderedAccessView(
+            m_rtAovMotionConf.Get(),
+            nullptr,
+            &uav,
+            UavAt(1));
+    }
+    // u2 = debug/display output
     {
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
         uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -4110,7 +4187,7 @@ bool Renderer::UpdateRtMotionDilateTables(
             m_rtOutput.Get(),
             nullptr,
             &uav,
-            UavAt(1));
+            UavAt(2));
     }
 
     return true;
@@ -4131,6 +4208,8 @@ bool Renderer::RunRtMotionDilate(
         !m_rtOutput ||
         !m_rtAovMotionReady ||
         !m_rtAovMotionDilatedReady ||
+        !m_rtAovMotionConf ||
+        !m_rtAovMotionConfReady ||
         !m_rtAovReady ||
         !m_rtOutputReady)
     {
@@ -4148,6 +4227,7 @@ bool Renderer::RunRtMotionDilate(
     cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.FlushBarriers();
 
@@ -4173,15 +4253,18 @@ bool Renderer::RunRtMotionDilate(
         width,
         height);
 
-    D3D12_RESOURCE_BARRIER barriers[2]{};
+    D3D12_RESOURCE_BARRIER barriers[3]{};
 
     barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     barriers[0].UAV.pResource = m_rtAovMotionDilated.Get();
 
     barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    barriers[1].UAV.pResource = m_rtOutput.Get();
+    barriers[1].UAV.pResource = m_rtAovMotionConf.Get();
 
-    cmdList->ResourceBarrier(2, barriers);
+    barriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[2].UAV.pResource = m_rtOutput.Get();
+
+    cmdList->ResourceBarrier(3, barriers);
 
     CmdEndEvent(cmdList);
     return true;
