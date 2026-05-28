@@ -2,24 +2,30 @@
 
 // RT DebugView ownership for this pass:
 // History select owns:
-//   29 = final selector mask
-//   30 = stable history signal
-//   31 = responsive history signal
-//   37 = roughness selector vote
-//   38 = length selector vote
-//   39 = final selector value
+//   29 = final responsive selection factor
+//   30 = stable spec input
+//   31 = responsive spec input
+//   37 = roughness responsive vote
+//   38 = history-length responsive vote
+//   39 = final responsive selection factor
 //   40 = stable history length
 //   41 = responsive history length
 //   42 = selected history length
+//   59 = selected spec variance
+//
+// Do not add broad contiguous debug ranges.
 
 Texture2D<float4> g_StableHistory : register(t0);
 Texture2D<float4> g_RespHistory : register(t1);
-Texture2D<float4> g_GuideNormal : register(t2);
-Texture2D<float> g_GuideDepth : register(t3);
-Texture2D<float> g_MotionConf : register(t4);
+Texture2D<float2> g_StableMoments : register(t2);
+Texture2D<float2> g_RespMoments : register(t3);
+Texture2D<float4> g_GuideNormal : register(t4);
+Texture2D<float> g_GuideDepth : register(t5);
+Texture2D<float> g_MotionConf : register(t6);
 
-RWTexture2D<float4> g_SelectedSignal : register(u0); // linear, feeds SVGF/A-Trous
+RWTexture2D<float4> g_SelectedSignal : register(u0); // linear, feeds spec SVGF/A-Trous
 RWTexture2D<float4> g_Output : register(u1); // display
+RWTexture2D<float2> g_SelectedMoments : register(u2); // selected moments for spec A-Trous
 
 cbuffer RtHistorySelectConstants : register(b0)
 {
@@ -53,6 +59,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     float stableLen = stable4.a;
     float respLen = resp4.a;
+    
+    float2 stableMoments = g_StableMoments[pixel];
+    float2 respMoments = g_RespMoments[pixel];
 
     float4 guide = g_GuideNormal[pixel];
     float roughness = guide.a;
@@ -103,9 +112,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     float3 selected = lerp(stable, resp, t);
     float selectedLen = lerp(stableLen, respLen, t);
+    float2 selectedMoments = lerp(stableMoments, respMoments, t);
     
     g_SelectedSignal[pixel] = float4(selected, selectedLen);
-
+    g_SelectedMoments[pixel] = selectedMoments;
+    
     float3 display = selected;
     if (DebugView == 29)
         display = t.xxx;
@@ -137,6 +148,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
     {
         display = saturate(selectedLen / 255.0f).xxx;
     }
-
+    else if (DebugView == 59)
+    {
+        float selectedVariance = max(selectedMoments.y - selectedMoments.x * selectedMoments.x, 0.0f);
+        display = saturate(selectedVariance * 16.0f).xxx;
+    }
+    
     g_Output[pixel] = float4(LinearToSRGB(display), 1.0f);
 }

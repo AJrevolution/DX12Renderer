@@ -4,8 +4,8 @@
 
 namespace
 {
-    constexpr UINT kHistorySelectSrvCount = 5u;
-    constexpr UINT kHistorySelectUavCount = 2u;
+    constexpr UINT kHistorySelectSrvCount = 7u;
+    constexpr UINT kHistorySelectUavCount = 3u;
 
     static std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path)
     {
@@ -28,12 +28,17 @@ void RtHistorySelectPass::BuildRootSignature(ID3D12Device* device)
     srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kHistorySelectSrvCount, 0, 0);
     // t0 stable spec history
     // t1 responsive spec history
-    // t2 guide normal/roughness
-    // t3 guide depth
-    // t4 motion confidence
+    // t2 stable spec moments
+    // t3 responsive spec moments
+    // t4 guide normal/roughness
+    // t5 guide depth
+    // t6 motion confidence
 
     CD3DX12_DESCRIPTOR_RANGE uavRange;
     uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, kHistorySelectUavCount, 0, 0); // selected signal, display output
+    // u0 selected spec signal
+    // u1 debug/display output
+    // u2 selected spec moments
 
     CD3DX12_ROOT_PARAMETER params[3]{};
     params[0].InitAsConstantBufferView(0);

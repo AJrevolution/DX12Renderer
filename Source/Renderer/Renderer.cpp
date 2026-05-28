@@ -44,8 +44,10 @@ namespace
 
     static bool IsHistorySelectDebug(uint32_t dv)
     {
-        return (dv >= 29 && dv <= 31) ||
-            (dv >= 37 && dv <= 42);
+        return
+            (dv >= 29 && dv <= 31) ||
+            (dv >= 37 && dv <= 42) ||
+            dv == 59;
     }
 }
 
@@ -1019,16 +1021,20 @@ void Renderer::RenderFrame(
         if (RtPostModeRunsHistorySelect(rtPostMode) &&
             advancedSplitHistory &&
             (m_debugView == 0 || wantsHistorySelectDebug) &&
-            m_rtAovReady && m_rtAovMotionConfReady)
+            m_rtAovReady && m_rtAovMotionConfReady &&
+            m_rtSpecSelectedMomentsReady)
         {
             CmdBeginEvent(cmdList, "RT Spec History Select");
 
             cl.Transition(rtSignals.specStable.signal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(rtSignals.specResponsive.signal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(rtSignals.specStable.moments, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(rtSignals.specResponsive.moments, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_rtSvgfPing[0].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtSpecSelectedMoments.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.FlushBarriers();
 
@@ -1036,7 +1042,9 @@ void Renderer::RenderFrame(
                 frameIndex,
                 device,
                 rtSignals.specStable.signal,
-                rtSignals.specResponsive.signal);
+                rtSignals.specResponsive.signal,
+                rtSignals.specStable.moments,
+                rtSignals.specResponsive.moments);
 
             if (ok)
             {
@@ -1051,7 +1059,7 @@ void Renderer::RenderFrame(
                     width,
                     height);
 
-                D3D12_RESOURCE_BARRIER barriers[2]{};
+                D3D12_RESOURCE_BARRIER barriers[3]{};
 
                 barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
                 barriers[0].UAV.pResource = m_rtSvgfPing[0].Get();
@@ -1059,10 +1067,13 @@ void Renderer::RenderFrame(
                 barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
                 barriers[1].UAV.pResource = m_rtOutput.Get();
 
-                cmdList->ResourceBarrier(2, barriers);
+                barriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                barriers[2].UAV.pResource = m_rtSpecSelectedMoments.Get();
+
+                cmdList->ResourceBarrier(3, barriers);
 
                 rtSignals.specSelected.signal = m_rtSvgfPing[0].Get();
-                rtSignals.specSelected.moments = rtSignals.specStable.moments;
+                rtSignals.specSelected.moments = m_rtSpecSelectedMoments.Get(); 
                 rtSignals.ranHistorySelect = true;
             }
 
@@ -1439,6 +1450,11 @@ void Renderer::RenderFrame(
         {
             cl.Transition(m_rtPostDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.Transition(m_rtPostSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+            if (m_rtSpecSelectedMomentsReady)
+            {
+                cl.Transition(m_rtSpecSelectedMoments.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
         }
         cl.FlushBarriers();
 
@@ -1620,6 +1636,7 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_rtAovMotionConfReady = false;
     m_prevRtMotionWorldsValid = false;
     m_prevRtMotionWorlds.clear();
+    m_rtSpecSelectedMomentsReady = false;
 
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
@@ -2422,6 +2439,8 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         !m_rtAccumSpecReady ||
         !m_rtAovReady ||
         !m_rtPostReady ||
+        !m_rtSpecSelectedMoments ||
+        !m_rtSpecSelectedMomentsReady ||
         (m_rtOutputWidth != width) ||
         (m_rtOutputHeight != height);
 
@@ -3405,6 +3424,8 @@ void Renderer::CreateRtPostResources(ID3D12Device* device, uint32_t width, uint3
 
     m_rtPostDiffuse.Reset();
     m_rtPostSpec.Reset();
+    m_rtSpecSelectedMomentsReady = false;
+    m_rtSpecSelectedMoments.Reset();
 
     if (!m_rtPostUavTable.IsValid())
         m_rtPostUavTable = m_srvHeap.Allocate(2);
@@ -3441,8 +3462,10 @@ void Renderer::CreateRtPostResources(ID3D12Device* device, uint32_t width, uint3
             IID_PPV_ARGS(&m_rtPostSpec)),
         "Create RT post spec");
 
+
     SetD3D12ObjectName(m_rtPostDiffuse.Get(), L"RT Post Diffuse");
     SetD3D12ObjectName(m_rtPostSpec.Get(), L"RT Post Spec");
+
 
     CommandList::SetGlobalState(
         m_rtPostDiffuse.Get(),
@@ -3451,6 +3474,36 @@ void Renderer::CreateRtPostResources(ID3D12Device* device, uint32_t width, uint3
     CommandList::SetGlobalState(
         m_rtPostSpec.Get(),
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    {
+        auto momentsDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R16G16_FLOAT,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &momentsDesc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&m_rtSpecSelectedMoments)),
+            "Create RT selected spec moments");
+
+        SetD3D12ObjectName(
+            m_rtSpecSelectedMoments.Get(),
+            L"RT Selected Spec Moments");
+
+        CommandList::SetGlobalState(
+            m_rtSpecSelectedMoments.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
     uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -3469,6 +3522,7 @@ void Renderer::CreateRtPostResources(ID3D12Device* device, uint32_t width, uint3
         RtPostUavCpuAt(1));
 
     m_rtPostReady = true;
+    m_rtSpecSelectedMomentsReady = true;
 
 }
 D3D12_CPU_DESCRIPTOR_HANDLE Renderer::RtPostUavCpuAt(uint32_t index) const
@@ -3888,17 +3942,24 @@ bool Renderer::UpdateRtHistorySelectTables(
     uint32_t frameIndex,
     ID3D12Device* device,
     ID3D12Resource* stableSignal,
-    ID3D12Resource* responsiveSignal)
+    ID3D12Resource* responsiveSignal,
+    ID3D12Resource* stableMoments,
+    ID3D12Resource* responsiveMoments)
 {
     auto& frame = m_rtFrames[frameIndex];
 
     if (!device ||
         !stableSignal ||
         !responsiveSignal ||
+        !stableMoments ||
+        !responsiveMoments ||
         !m_rtAovNormal ||
         !m_rtAovDepth ||
         !m_rtSvgfPing[0] ||
+        !m_rtSpecSelectedMoments ||
+        !m_rtSpecSelectedMomentsReady ||
         !m_rtOutput ||
+        !m_rtOutputReady ||
         !m_rtAovMotionConf ||
         !m_rtAovMotionConfReady ||
         !m_rtAovReady)
@@ -3934,6 +3995,7 @@ bool Renderer::UpdateRtHistorySelectTables(
         return h;
     };
 
+    // t0 = stable spec history
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
         srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -3942,11 +4004,73 @@ bool Renderer::UpdateRtHistorySelectTables(
         srv.Texture2D.MostDetailedMip = 0;
         srv.Texture2D.MipLevels = 1;
 
-        device->CreateShaderResourceView(stableSignal, &srv, SrvAt(0));
-        device->CreateShaderResourceView(responsiveSignal, &srv, SrvAt(1));
-        device->CreateShaderResourceView(m_rtAovNormal.Get(), &srv, SrvAt(2));
+        device->CreateShaderResourceView(
+            stableSignal,
+            &srv,
+            SrvAt(0));
     }
 
+    // t1 = responsive spec history
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            responsiveSignal,
+            &srv,
+            SrvAt(1));
+    }
+
+    // t2 = stable spec moments
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            stableMoments,
+            &srv,
+            SrvAt(2));
+    }
+
+    // t3 = responsive spec moments
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            responsiveMoments,
+            &srv,
+            SrvAt(3));
+    }
+
+    // t4 = guide normal/roughness
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovNormal.Get(),
+            &srv,
+            SrvAt(4));
+    }
+
+    // t5 = guide depth
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
         srv.Format = DXGI_FORMAT_R32_FLOAT;
@@ -3955,10 +4079,13 @@ bool Renderer::UpdateRtHistorySelectTables(
         srv.Texture2D.MostDetailedMip = 0;
         srv.Texture2D.MipLevels = 1;
 
-        device->CreateShaderResourceView(m_rtAovDepth.Get(), &srv, SrvAt(3));
+        device->CreateShaderResourceView(
+            m_rtAovDepth.Get(),
+            &srv,
+            SrvAt(5));
     }
 
-    // t4 = motion confidence
+    // t6 = motion confidence
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
         srv.Format = DXGI_FORMAT_R16_FLOAT;
@@ -3970,17 +4097,46 @@ bool Renderer::UpdateRtHistorySelectTables(
         device->CreateShaderResourceView(
             m_rtAovMotionConf.Get(),
             &srv,
-            SrvAt(4));
+            SrvAt(6));
     }
 
+    // u0 = selected spec signal
     {
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
         uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        device->CreateUnorderedAccessView(m_rtSvgfPing[0].Get(), nullptr, &uav, UavAt(0));
 
+        device->CreateUnorderedAccessView(
+            m_rtSvgfPing[0].Get(),
+            nullptr,
+            &uav,
+            UavAt(0));
+    }
+
+    // u1 = debug/display output
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
         uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        device->CreateUnorderedAccessView(m_rtOutput.Get(), nullptr, &uav, UavAt(1));
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            m_rtOutput.Get(),
+            nullptr,
+            &uav,
+            UavAt(1));
+    }
+
+    // u2 = selected spec moments
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16G16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            m_rtSpecSelectedMoments.Get(),
+            nullptr,
+            &uav,
+            UavAt(2));
     }
 
     return true;

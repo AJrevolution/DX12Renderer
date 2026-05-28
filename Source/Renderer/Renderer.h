@@ -441,7 +441,9 @@ private:
         uint32_t frameIndex,
         ID3D12Device* device,
         ID3D12Resource* stableSignal,
-        ID3D12Resource* responsiveSignal);
+        ID3D12Resource* responsiveSignal,
+        ID3D12Resource* stableMoments,
+        ID3D12Resource* responsiveMoments);
 
     void CreateRtPostResources(ID3D12Device* device, uint32_t width, uint32_t height);
 
@@ -596,6 +598,7 @@ private:
     //   40 = stable history length
     //   41 = responsive history length
     //   42 = selected history length
+    //   59 = selected spec variance
     //
     // SVGF / A-Trous pass owns:
     //   28 = roughness/specular protection proxy
@@ -994,6 +997,11 @@ private:
     bool m_rtPostReady = false;
 
     DescriptorAllocator::Allocation m_rtPostUavTable{};
+    
+    // Moments corresponding to the selected spec signal after RtHistorySelectPass.
+    // Format: R16G16_FLOAT, xy = mean luminance / mean-square luminance.
+    ComPtr<ID3D12Resource> m_rtSpecSelectedMoments;
+    bool m_rtSpecSelectedMomentsReady = false;
 
     std::array<ComPtr<ID3D12Resource>, 2> m_rtHistorySpec{};
     std::array<ComPtr<ID3D12Resource>, 2> m_rtHistorySpecResp{};
@@ -1007,8 +1015,8 @@ private:
     uint32_t m_prevRtAtrousIterationsSpec = 1;
 
     static constexpr uint32_t kRtUavTableCount = 6;
-    static constexpr uint32_t kRtHistorySelectSrvCount = 5;
-    static constexpr uint32_t kRtHistorySelectUavCount = 2;
+    static constexpr uint32_t kRtHistorySelectSrvCount = 7;
+    static constexpr uint32_t kRtHistorySelectUavCount = 3;
 
     RtMotionDilatePass m_rtMotionDilatePass;
     static constexpr uint32_t kMaxRtMotionDilateRadius = 4;
