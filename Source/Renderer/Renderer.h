@@ -396,7 +396,8 @@ private:
         uint32_t frameIndex,
         ID3D12Device* device,
         ID3D12Resource* signalResource,
-        DescriptorAllocator::Allocation& table);
+        DescriptorAllocator::Allocation& table,
+        uint32_t& tableSrvCount);
     
     void CreateRtHistoryResources(ID3D12Device* device, uint32_t width, uint32_t height);
 
@@ -534,10 +535,13 @@ private:
         const char* eventName,
         ID3D12Resource* inputSignal,
         DescriptorAllocator::Allocation& srvTable,
+        uint32_t& srvTableCount,
         ID3D12Resource* outputResource,
         D3D12_GPU_DESCRIPTOR_HANDLE outputUav,
         uint32_t width,
-        uint32_t height);
+        uint32_t height,
+        float motionConfMin,
+        float motionConfPower);
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRayGenConstants(uint32_t frameIndex);
     void CommitRtMotionWorlds();
@@ -778,9 +782,11 @@ private:
         DescriptorAllocator::Allocation historySelectUavTable{};  // kRtHistorySelectUavCount UAVs
         uint32_t historySelectSrvCount = 0;
         uint32_t historySelectUavCount = 0;
-        DescriptorAllocator::Allocation denoiseDiffuseSrvTable{}; // 3 SRVs
-        DescriptorAllocator::Allocation denoiseSpecSrvTable{};    // 3 SRVs
+        DescriptorAllocator::Allocation denoiseDiffuseSrvTable{}; // kRtDenoiseSrvCount SRVs
+        DescriptorAllocator::Allocation denoiseSpecSrvTable{};    // kRtDenoiseSrvCount SRVs
         DescriptorAllocator::Allocation combineSrvTable{};             // 2 SRVs
+        uint32_t denoiseDiffuseSrvCount = 0;
+        uint32_t denoiseSpecSrvCount = 0;
 
         // Per-frame, per-iteration SVGF input tables.
         std::array<DescriptorAllocator::Allocation, kMaxRtAtrousIterations> svgfSpecSrvTables{};
@@ -1030,6 +1036,7 @@ private:
     static constexpr uint32_t kRtHistorySelectSrvCount = 7;
     static constexpr uint32_t kRtHistorySelectUavCount = 3;
     static constexpr uint32_t kRtSvgfSrvCount = 5;
+    static constexpr uint32_t kRtDenoiseSrvCount = 4;
 
     RtMotionDilatePass m_rtMotionDilatePass;
     static constexpr uint32_t kMaxRtMotionDilateRadius = 4;

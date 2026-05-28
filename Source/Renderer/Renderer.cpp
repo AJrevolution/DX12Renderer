@@ -1103,18 +1103,17 @@ void Renderer::RenderFrame(
         const bool wantsSpatialDebug =
             m_rtSvgf && wantsSvgfDebug;
 
-        // A-Trous consumes m_rtAovMotionConf as t4 
-        // Denoise fallback does not consume motion confidence, so keep fallback independent.
-        const bool spatialStageUsesAtrous =
+        // A-Trous and denoise fallback both consume m_rtAovMotionConf
+        const bool spatialStageNeedsMotionConf =
             RtPostModeRunsAnyAtrous(rtPostMode) &&
-            m_rtSvgf;
+            (m_rtSvgf || m_rtDenoise);
 
         const bool spatialStageAllowed =
             RtPostModeRunsAnyAtrous(rtPostMode) &&
             (m_debugView == 0 || wantsSpatialDebug) &&
             (m_rtAccumulateThisFrame || wantsSpatialDebug) &&
             m_rtAovReady &&
-            (!spatialStageUsesAtrous || m_rtAovMotionConfReady) &&
+            (!spatialStageNeedsMotionConf || m_rtAovMotionConfReady) &&
             m_rtPostReady &&
             (m_rtSvgf || m_rtDenoise);
 
@@ -1220,10 +1219,6 @@ void Renderer::RenderFrame(
                         // ---------------------------------------------------------------------
                         // Spec denoise fallback
                         // ---------------------------------------------------------------------
-                        ID3D12Resource* specInput =
-                            rtSignals.specSelected.signal
-                            ? rtSignals.specSelected.signal
-                            : m_rtAccumSpec.Get();
 
                         const bool ok =
                             RunRtDenoiseSignal(
@@ -1231,12 +1226,15 @@ void Renderer::RenderFrame(
                                 frameIndex,
                                 device,
                                 "RT Denoise Spec",
-                                specInput,
+                                advancedSplitHistory ? rtSignals.specSelected.signal : m_rtAccumSpec.Get(),
                                 m_rtFrames[frameIndex].denoiseSpecSrvTable,
+                                m_rtFrames[frameIndex].denoiseSpecSrvCount,
                                 m_rtPostSpec.Get(),
                                 RtPostUavGpuAt(1),
                                 width,
-                                height);
+                                height,
+                                m_rtTemporalMotionConfMinSpec,
+                                m_rtTemporalMotionConfPowerSpec);
                         
                         if (ok)
                         {
@@ -1347,10 +1345,6 @@ void Renderer::RenderFrame(
                         // ---------------------------------------------------------------------
                         // Diffuse denoise fallback
                         // ---------------------------------------------------------------------
-                        ID3D12Resource* diffuseInput =
-                            rtSignals.diffuse.signal
-                            ? rtSignals.diffuse.signal
-                            : m_rtAccumDiffuse.Get();
 
                         const bool ok =
                             RunRtDenoiseSignal(
@@ -1358,12 +1352,15 @@ void Renderer::RenderFrame(
                                 frameIndex,
                                 device,
                                 "RT Denoise Diffuse",
-                                diffuseInput,
+                                advancedSplitHistory ? rtSignals.diffuse.signal : m_rtAccumDiffuse.Get(),
                                 m_rtFrames[frameIndex].denoiseDiffuseSrvTable,
+                                m_rtFrames[frameIndex].denoiseDiffuseSrvCount,
                                 m_rtPostDiffuse.Get(),
                                 RtPostUavGpuAt(0),
                                 width,
-                                height);
+                                height,
+                                m_rtTemporalMotionConfMinDiffuse,
+                                m_rtTemporalMotionConfPowerDiffuse);
 
                         if (ok)
                         {
@@ -3134,19 +3131,25 @@ bool Renderer::UpdateRtDenoiseSrvTable(
     uint32_t frameIndex,
     ID3D12Device* device,
     ID3D12Resource* signalResource,
-    DescriptorAllocator::Allocation& table)
+    DescriptorAllocator::Allocation& table,
+    uint32_t& tableSrvCount)
 {
     if (!device ||
         !signalResource ||
         !m_rtAovNormal ||
         !m_rtAovDepth ||
-        !m_rtAovReady)
+        !m_rtAovMotionConf ||
+        !m_rtAovReady ||
+        !m_rtAovMotionConfReady)
     {
         return false;
     }
 
-    if (!table.IsValid())
-        table = m_srvHeap.Allocate(3);
+    if (!table.IsValid() || tableSrvCount != kRtDenoiseSrvCount)
+    {
+        table = m_srvHeap.Allocate(kRtDenoiseSrvCount);
+        tableSrvCount = kRtDenoiseSrvCount;
+    }
 
 
     const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
@@ -3189,6 +3192,21 @@ bool Renderer::UpdateRtDenoiseSrvTable(
         srv.Texture2D.MostDetailedMip = 0;
         srv.Texture2D.MipLevels = 1;
         device->CreateShaderResourceView(m_rtAovDepth.Get(), &srv, SrvAt(2));
+    }
+
+    // t3 = motion confidence.
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovMotionConf.Get(),
+            &srv,
+            SrvAt(3));
     }
 
     return true;
@@ -4239,10 +4257,13 @@ bool Renderer::RunRtDenoiseSignal(
     const char* eventName,
     ID3D12Resource* inputSignal,
     DescriptorAllocator::Allocation& srvTable,
+    uint32_t& srvTableCount,
     ID3D12Resource* outputResource,
     D3D12_GPU_DESCRIPTOR_HANDLE outputUav,
     uint32_t width,
-    uint32_t height)
+    uint32_t height,
+    float motionConfMin,
+    float motionConfPower)
 {
     if (!device ||
         !inputSignal ||
@@ -4250,6 +4271,8 @@ bool Renderer::RunRtDenoiseSignal(
         !m_rtAovNormal ||
         !m_rtAovDepth ||
         !m_rtAovReady ||
+        !m_rtAovMotionConf ||
+        !m_rtAovMotionConfReady ||
         !m_rtPostReady)
     {
         return false;
@@ -4262,6 +4285,7 @@ bool Renderer::RunRtDenoiseSignal(
     cl.Transition(inputSignal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(outputResource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.FlushBarriers();
 
@@ -4270,7 +4294,8 @@ bool Renderer::RunRtDenoiseSignal(
             frameIndex,
             device,
             inputSignal,
-            srvTable);
+            srvTable,
+            srvTableCount);
 
     if (!okTable)
     {
@@ -4286,7 +4311,9 @@ bool Renderer::RunRtDenoiseSignal(
         height,
         m_rtDenoiseRadius,
         m_rtDenoiseSigmaDepth,
-        m_rtDenoiseSigmaNormal);
+        m_rtDenoiseSigmaNormal,
+        std::max(0.0f, std::min(1.0f, motionConfMin)),
+        std::max(1e-3f, motionConfPower));
 
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;

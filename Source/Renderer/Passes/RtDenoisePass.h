@@ -19,7 +19,9 @@ public:
         uint32_t height,
         int radius,
         float sigmaDepth,
-        float sigmaNormal);
+        float sigmaNormal,
+        float motionConfMin,
+        float motionConfPower);
 
 private:
     struct Constants
@@ -29,8 +31,10 @@ private:
         float sigmaDepth = 0.02f;
         float sigmaNormal = 0.25f;
         float normalPower = 64.0f;
-        float pad[2] = {};
+        float motionConfMin = 0.0f;
+        float motionConfPower = 1.0f;
     };
+    static_assert((sizeof(Constants) % 16) == 0, "RtDenoisePass::Constants must be 16-byte aligned.");
 
     void BuildRootSignature(ID3D12Device* device);
     void BuildPipelineState(ID3D12Device* device, const std::filesystem::path& shaderPath);

@@ -23,7 +23,11 @@ void RtDenoisePass::Initialize(ID3D12Device* device, const std::filesystem::path
 void RtDenoisePass::BuildRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE srvRange;
-    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0, 0); // t0 accum, t1 normal, t2 depth
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0, 0);
+    // t0 = signal
+    // t1 = normal/roughness
+    // t2 = depth
+    // t3 = motion confidence
 
     CD3DX12_DESCRIPTOR_RANGE uavRange;
     uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 output
@@ -75,7 +79,9 @@ void RtDenoisePass::Dispatch(
     uint32_t height,
     int radius,
     float sigmaDepth,
-    float sigmaNormal)
+    float sigmaNormal,
+    float motionConfMin,
+    float motionConfPower)
 {
     auto* cmd = cl.Get();
 
@@ -88,6 +94,8 @@ void RtDenoisePass::Dispatch(
     c.sigmaDepth = sigmaDepth;
     c.sigmaNormal = sigmaNormal;
     c.normalPower = 64.0f;
+    c.motionConfMin = motionConfMin;
+    c.motionConfPower = motionConfPower;
 
     cmd->SetPipelineState(m_pso.Get());
     cmd->SetComputeRootSignature(m_rootSig.Get());
