@@ -10,6 +10,7 @@ Texture2D<float4> g_Signal : register(t0);
 Texture2D<float4> g_Normal : register(t1);
 Texture2D<float> g_Depth : register(t2);
 Texture2D<float2> g_Moments : register(t3);
+Texture2D<float> g_MotionConf : register(t4);
 
 RWTexture2D<float4> g_Output : register(u0);
 
@@ -33,7 +34,8 @@ cbuffer RtAtrousConstants : register(b0)
     
     float LengthSkipThreshold;
     uint EnableLengthSkip;
-    uint2 _pad1;
+    float MotionConfPower;
+    float MotionConfMin;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -63,13 +65,31 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float len0 = centerSig.a;
     float lenN0 = saturate(len0 / 255.0f);
 
-    float lenCurve = pow(lenN0, max(1e-4f, LengthPower));
+    float motionConfRaw = saturate(g_MotionConf[pixel]);
+
+    // MotionConfPower <= 0 is the no-op path used by diffuse A-Trous.
+    // Spec A-Trous passes the spec temporal confidence policy here.
+    float motionConfW = 1.0f;
+    if (MotionConfPower > 0.0f)
+    {
+        motionConfW = pow(motionConfRaw, max(MotionConfPower, 1e-3f));
+
+        // Below the spec temporal confidence threshold, treat the history as
+        // untrusted for center-protection purposes.
+        if (motionConfRaw < saturate(MotionConfMin))
+        {
+            motionConfW = 0.0f;
+        }
+    }
+
+    float lenEffective = lenN0 * motionConfW;
+    float lenCurve = pow(lenEffective, max(1e-4f, LengthPower));
     float wLenCenter = lerp(1.0f, LengthAttenuation, lenCurve);
-    
+
     bool skipWide =
     (EnableLengthSkip != 0) &&
     (IterationIndex > 0) &&
-    (lenN0 >= LengthSkipThreshold);
+    (lenEffective >= LengthSkipThreshold);
     
     float4 n0Packed = g_Normal[pixel];
     float3 n0 = UnpackNormal(n0Packed);
@@ -105,7 +125,13 @@ void main(uint3 dtid : SV_DispatchThreadID)
         g_Output[pixel] = float4(skipWide ? 1.0f.xxx : 0.0f.xxx, 1.0f);
         return;
     }
-
+    
+    if (DebugView == 60)
+    {
+        g_Output[pixel] = float4(motionConfW.xxx, 1.0f);
+        return;
+    }
+    
     if (skipWide)
     {
         if (FinalOutputSrgb != 0)

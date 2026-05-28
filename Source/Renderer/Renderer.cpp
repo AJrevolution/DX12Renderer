@@ -39,7 +39,8 @@ namespace
     {
         return (dv == 28) ||
             (dv == 43) ||
-            (dv == 44);
+            (dv == 44) ||
+            dv == 60;
     }
 
     static bool IsHistorySelectDebug(uint32_t dv)
@@ -381,6 +382,8 @@ void Renderer::RenderFrame(
     const bool wantsAtrousOutputDebug =
         m_debugView == 43 ||
         m_debugView == 44;
+    const bool wantsSpecAtrousOutputDebug =
+        m_debugView == 60;
     const bool wantsHistorySelectDebug = IsHistorySelectDebug(m_debugView);
     const bool wantsSplitDebug = IsSplitDebug(m_debugView);
     const bool wantsMotionDebug = IsMotionDebug(m_debugView);
@@ -415,7 +418,11 @@ void Renderer::RenderFrame(
     // A-Trous output diagnostics are post-stack-owned, not producer-owned.
     // Keep the post stack enabled, but stop at the diffuse A-Trous stage so
     // DebugView 43/44 are written by RtAtrousPass and are not recomposed by RtCombine.
-    if (wantsAtrousOutputDebug && rtPostMode != RtPostMode::Disabled)
+    if (wantsSpecAtrousOutputDebug && rtPostMode != RtPostMode::Disabled)
+    {
+        rtPostMode = RtPostMode::SpecAtrousOnly;
+    }
+    else if (wantsAtrousOutputDebug && rtPostMode != RtPostMode::Disabled)
     {
         rtPostMode = RtPostMode::DiffuseAtrousOnly;
     }
@@ -1096,11 +1103,18 @@ void Renderer::RenderFrame(
         const bool wantsSpatialDebug =
             m_rtSvgf && wantsSvgfDebug;
 
+        // A-Trous consumes m_rtAovMotionConf as t4 
+        // Denoise fallback does not consume motion confidence, so keep fallback independent.
+        const bool spatialStageUsesAtrous =
+            RtPostModeRunsAnyAtrous(rtPostMode) &&
+            m_rtSvgf;
+
         const bool spatialStageAllowed =
             RtPostModeRunsAnyAtrous(rtPostMode) &&
             (m_debugView == 0 || wantsSpatialDebug) &&
             (m_rtAccumulateThisFrame || wantsSpatialDebug) &&
             m_rtAovReady &&
+            (!spatialStageUsesAtrous || m_rtAovMotionConfReady) &&
             m_rtPostReady &&
             (m_rtSvgf || m_rtDenoise);
 
@@ -1113,7 +1127,7 @@ void Renderer::RenderFrame(
                     // ---------------------------------------------------------------------
                     if (m_rtSvgf)
                     {
-                        CmdBeginEvent(cmdList, "RT A-Trous Spec");
+                        CmdBeginEvent(cmdList, "RT A-Trous Spec");                        
 
                         const uint32_t iterCount =
                             std::min(m_rtAtrousIterationsSpec, kMaxRtAtrousIterations);
@@ -1135,13 +1149,14 @@ void Renderer::RenderFrame(
                                 : (iter & 1u);
 
                             ID3D12Resource* outRes = finalIter
-                                ? m_rtPostSpec.Get()
+                                ? (wantsSpecAtrousOutputDebug ? m_rtOutput.Get() : m_rtPostSpec.Get())
                                 : m_rtSvgfPing[pingIndex].Get();
 
                             cl.Transition(svgfSignal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                             cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                             cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                             cl.Transition(svgfMoments, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                            cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                             cl.Transition(outRes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                             cl.FlushBarriers();
 
@@ -1150,8 +1165,10 @@ void Renderer::RenderFrame(
                                 iter,
                                 device,
                                 m_rtFrames[frameIndex].svgfSpecSrvTables[iter],
+                                m_rtFrames[frameIndex].svgfSpecSrvCounts[iter],
                                 svgfSignal,
-                                svgfMoments);
+                                svgfMoments,
+                                m_rtAovMotionConf.Get());
 
                             if (ok)
                             {
@@ -1162,10 +1179,12 @@ void Renderer::RenderFrame(
                                         height,
                                         iter,
                                         advancedSplitHistory,
-                                        false);
+                                        false,
+                                        m_rtTemporalMotionConfPowerSpec,
+                                        m_rtTemporalMotionConfMinSpec);
                                 
                                 D3D12_GPU_DESCRIPTOR_HANDLE outUav = finalIter
-                                    ? RtPostUavGpuAt(1)
+                                    ? (wantsSpecAtrousOutputDebug ? m_rtOutputUav.gpu : RtPostUavGpuAt(1))
                                     : RtSvgfPingUavGpuAt(pingIndex);
 
                                 m_rtAtrousPass.Dispatch(
@@ -1185,7 +1204,7 @@ void Renderer::RenderFrame(
                                 {
                                     svgfSignal = outRes;
                                 }
-                                else
+                                else if (!wantsSpecAtrousOutputDebug)
                                 {
                                     rtSignals.SetFinalSpec(
                                         m_rtPostSpec.Get(),
@@ -1264,6 +1283,7 @@ void Renderer::RenderFrame(
                             cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                             cl.Transition(svgfMoments, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                             cl.Transition(outRes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                            cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                             cl.FlushBarriers();
 
                             const bool ok = UpdateRtSvgfSrvTable(
@@ -1271,8 +1291,10 @@ void Renderer::RenderFrame(
                                 iter,
                                 device,
                                 m_rtFrames[frameIndex].svgfDiffuseSrvTables[iter],
+                                m_rtFrames[frameIndex].svgfDiffuseSrvCounts[iter],
                                 svgfSignal,
-                                svgfMoments);
+                                svgfMoments,
+                                m_rtAovMotionConf.Get());
 
                             if (ok)
                             {
@@ -1283,7 +1305,9 @@ void Renderer::RenderFrame(
                                         height,
                                         iter,
                                         advancedSplitHistory,
-                                        false);
+                                        false,
+                                        0.0f,   // motionConfPower <= 0 disables confidence modulation
+                                        0.0f);
 
                                 D3D12_GPU_DESCRIPTOR_HANDLE outUav = finalIter
                                     ? (diffuseAtrousDebugToOutput ? m_rtOutputUav.gpu : RtPostUavGpuAt(0))
@@ -1364,6 +1388,7 @@ void Renderer::RenderFrame(
             (wantsSvgfDebug && !wantsAtrousOutputDebug);
 
         if (rtPostMode == RtPostMode::SpecAtrousOnly &&
+            !wantsSpecAtrousOutputDebug &&
             rtSignals.diffuse.signal &&
             rtSignals.FinalSpecSignal())
         {
@@ -3809,23 +3834,28 @@ bool Renderer::UpdateRtSvgfSrvTable(
     uint32_t iter,
     ID3D12Device* device,
     DescriptorAllocator::Allocation& table,
+    uint32_t& tableSrvCount,
     ID3D12Resource* signalResource,
-    ID3D12Resource* momentsResource)
+    ID3D12Resource* momentsResource,
+    ID3D12Resource* motionConfResource)
 {
-    auto& frame = m_rtFrames[frameIndex];
-
     if (!device ||
         !signalResource ||
         !m_rtAovNormal || !m_rtAovDepth ||
         !momentsResource ||
         !m_rtAovReady ||
+        !motionConfResource ||
+        !m_rtAovMotionConfReady ||
         iter >= kMaxRtAtrousIterations)
     {
         return false;
     }
 
-    if (!table.IsValid())
-        table = m_srvHeap.Allocate(4);
+    if (!table.IsValid() || tableSrvCount != kRtSvgfSrvCount)
+    {
+        table = m_srvHeap.Allocate(kRtSvgfSrvCount);
+        tableSrvCount = kRtSvgfSrvCount;
+    }
 
     auto HandleAt = [&](uint32_t i)
     {
@@ -3868,6 +3898,21 @@ bool Renderer::UpdateRtSvgfSrvTable(
         device->CreateShaderResourceView(momentsResource, &srv, HandleAt(3));
     }
 
+    // t4 = motion confidence
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            motionConfResource,
+            &srv,
+            HandleAt(4)); 
+    }
+
     return true;
 }
 
@@ -3877,7 +3922,9 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtAtrousConstants(
     uint32_t height,
     uint32_t iterationIndex,
     bool useMoments,
-    bool finalOutputSrgb)
+    bool finalOutputSrgb,
+    float motionConfPower,
+    float motionConfMin)
 {
     auto alloc = m_upload.Allocate(
         frameIndex,
@@ -3898,8 +3945,10 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtAtrousConstants(
     cb->varianceScale = m_rtVarianceScale;
     cb->useMoments = useMoments ? 1u : 0u;
     cb->finalOutputSrgb = finalOutputSrgb ? 1u : 0u;
-    cb->lengthAttenuation = m_rtAtrousLengthAttenuation;
-    cb->lengthPower = m_rtAtrousLengthPower;
+    cb->lengthAttenuation = std::max(0.0f, std::min(1.0f, m_rtAtrousLengthAttenuation));
+    cb->lengthPower = std::max(1e-4f, m_rtAtrousLengthPower);
+    cb->motionConfPower = std::max(0.0f, motionConfPower);
+    cb->motionConfMin = std::max(0.0f, std::min(1.0f, motionConfMin));
     cb->debugView = m_debugView;
     cb->lengthSkipThreshold = std::clamp(m_rtAtrousLengthSkipThreshold, 0.0f, 1.0f);
     cb->enableLengthSkip = m_rtAtrousEnableLengthSkip ? 1u : 0u;

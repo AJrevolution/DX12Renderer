@@ -116,7 +116,11 @@ private:
 
         float lengthSkipThreshold = 0.80f;
         uint32_t enableLengthSkip = 1;
-        uint32_t pad1[2] = {};
+        
+        // Motion-confidence shaping for A-Trous history-length protection.
+        // motionConfPower <= 0 disables this path, preserving legacy behavior.
+        float motionConfPower = 0.0f;
+        float motionConfMin = 0.0f;
     };
     static_assert((sizeof(RtAtrousConstants) % 16) == 0, "RtAtrousConstants must be 16-byte aligned.");
 
@@ -401,8 +405,10 @@ private:
         uint32_t iter,
         ID3D12Device* device,
         DescriptorAllocator::Allocation& table,
+        uint32_t& tableSrvCount,
         ID3D12Resource* signalResource,
-        ID3D12Resource* momentsResource);
+        ID3D12Resource* momentsResource,
+        ID3D12Resource* motionConfResource);
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtAtrousConstants(
         uint32_t frameIndex,
@@ -410,7 +416,9 @@ private:
         uint32_t height,
         uint32_t iterationIndex,
         bool useMoments,
-        bool finalOutputSrgb);
+        bool finalOutputSrgb,
+        float motionConfPower,
+        float motionConfMin);
 
     void UpdateRtSvgfPingUavTable(ID3D12Device* device);
 
@@ -604,6 +612,7 @@ private:
     //   28 = roughness/specular protection proxy
     //   43 = center-history length attenuation factor
     //   44 = wide-iteration skip mask
+    //   60 = spec A-Trous shaped motion confidence
     //
     // Split / RayGen-owned views:
     // These write directly to m_rtOutput from RayGen.
@@ -776,6 +785,9 @@ private:
         // Per-frame, per-iteration SVGF input tables.
         std::array<DescriptorAllocator::Allocation, kMaxRtAtrousIterations> svgfSpecSrvTables{};
         std::array<DescriptorAllocator::Allocation, kMaxRtAtrousIterations> svgfDiffuseSrvTables{};
+
+        std::array<uint32_t, kMaxRtAtrousIterations> svgfSpecSrvCounts{};
+        std::array<uint32_t, kMaxRtAtrousIterations> svgfDiffuseSrvCounts{};
 
         DescriptorAllocator::Allocation motionDilateSrvTable{}; // 3 SRVs
         DescriptorAllocator::Allocation motionDilateUavTable{}; // 3 UAVs
@@ -1017,6 +1029,7 @@ private:
     static constexpr uint32_t kRtUavTableCount = 6;
     static constexpr uint32_t kRtHistorySelectSrvCount = 7;
     static constexpr uint32_t kRtHistorySelectUavCount = 3;
+    static constexpr uint32_t kRtSvgfSrvCount = 5;
 
     RtMotionDilatePass m_rtMotionDilatePass;
     static constexpr uint32_t kMaxRtMotionDilateRadius = 4;
