@@ -323,6 +323,11 @@ private:
         return dv == 54 || dv == 55;
     }
 
+    static bool IsHitDistDebug(uint32_t dv)
+    {
+        return dv == 61 || dv == 62;
+    }
+
     std::vector<DrawItem> m_draws;
 
     void BuildDrawList(float time);
@@ -638,6 +643,12 @@ private:
     //   54 = dilated previous UV validity mask, white = invalid
     //   55 = motion confidence, white = high confidence
     // 
+    // Primary hit-distance / RayGen-owned views:
+    // These write directly to m_rtOutput from RayGen.
+    // The RT post stack must stay disabled.
+    //   61 = primary hit distance visualization
+    //   62 = invalid primary hit distance mask
+    // 
     // Future rule:
     //   Do not use broad contiguous checks such as 32..47.
     //   Always route by the owning pass namespace.
@@ -795,8 +806,9 @@ private:
         std::array<uint32_t, kMaxRtAtrousIterations> svgfSpecSrvCounts{};
         std::array<uint32_t, kMaxRtAtrousIterations> svgfDiffuseSrvCounts{};
 
-        DescriptorAllocator::Allocation motionDilateSrvTable{}; // 3 SRVs
+        DescriptorAllocator::Allocation motionDilateSrvTable{}; // kRtMotionDilateSrvCount SRVs
         DescriptorAllocator::Allocation motionDilateUavTable{}; // 3 UAVs
+        uint32_t motionDilateSrvCount = 0;
 
         uint32_t capacity = 0;
     };
@@ -816,6 +828,7 @@ private:
     // u3 = m_rtAovNormal       R16G16B16A16_FLOAT rgb=geom normal, a=roughness
     // u4 = m_rtAovDepth        R32_FLOAT
     // u5 = m_rtAovMotion       R16G16_FLOAT prevUV, (-1,-1) invalid
+    // u6 = m_rtAovPrimaryHitDist  R16_FLOAT visible-surface RayT, -1 invalid
     DescriptorAllocator::Allocation m_rtOutputUav{};
     uint32_t m_rtOutputWidth = 0;
     uint32_t m_rtOutputHeight = 0;
@@ -880,7 +893,8 @@ private:
     bool m_rtAovMotionDilatedReady = false;
     ComPtr<ID3D12Resource> m_rtAovMotionConf;
     bool m_rtAovMotionConfReady = false;
-    
+    ComPtr<ID3D12Resource> m_rtAovPrimaryHitDist;
+    bool m_rtAovPrimaryHitDistReady = false;
 
     bool m_rtAovReady = false;
 
@@ -1032,11 +1046,12 @@ private:
     uint32_t m_rtAtrousIterationsSpec = 1;
     uint32_t m_prevRtAtrousIterationsSpec = 1;
 
-    static constexpr uint32_t kRtUavTableCount = 6;
+    static constexpr uint32_t kRtUavTableCount = 7;
     static constexpr uint32_t kRtHistorySelectSrvCount = 7;
     static constexpr uint32_t kRtHistorySelectUavCount = 3;
     static constexpr uint32_t kRtSvgfSrvCount = 5;
     static constexpr uint32_t kRtDenoiseSrvCount = 4;
+    static constexpr uint32_t kRtMotionDilateSrvCount = 4;
 
     RtMotionDilatePass m_rtMotionDilatePass;
     static constexpr uint32_t kMaxRtMotionDilateRadius = 4;

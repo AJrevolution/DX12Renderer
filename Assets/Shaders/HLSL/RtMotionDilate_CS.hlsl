@@ -3,6 +3,7 @@
 Texture2D<float2> g_RawPrevUV : register(t0);
 Texture2D<float4> g_AovNormal : register(t1);
 Texture2D<float> g_AovDepth : register(t2);
+Texture2D<float> g_PrimaryHitDist : register(t3);
 
 RWTexture2D<float2> g_DilatedPrevUV : register(u0);
 RWTexture2D<float> g_MotionConf : register(u1);
@@ -45,6 +46,29 @@ void WriteDebug(uint2 pixel, bool invalidAfterDilation, float confidence)
     }
 }
 
+bool HitDistValid(float d)
+{
+    return d >= 0.0f;
+}
+
+float HitDistanceWeight(float roughness, float hit0, float hit1)
+{
+    static const float kGlossyCutoff = 0.35f;
+
+    if (roughness >= kGlossyCutoff ||
+        !HitDistValid(hit0) ||
+        !HitDistValid(hit1))
+    {
+        return 1.0f;
+    }
+
+    static const float kHitDistSigmaScale = 0.5f;
+    static const float kHitDistMinSigma = 0.10f;
+
+    float sigmaHit = max(kHitDistMinSigma, kHitDistSigmaScale * max(1e-3f, hit0));
+    return exp(-abs(hit0 - hit1) / max(1e-4f, sigmaHit));
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -76,7 +100,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
         return;
     }
 
-    float3 centerNormal = DecodeGuideNormal(g_AovNormal[pixel]);
+    float4 centerNormalRough = g_AovNormal[pixel];
+    float3 centerNormal = DecodeGuideNormal(centerNormalRough);
+    float centerRoughness = centerNormalRough.a;
+    float centerHitDist = g_PrimaryHitDist[pixel];
 
     float bestScore = 0.0f;
     float2 bestPrevUV = float2(-1.0f, -1.0f);
@@ -104,6 +131,12 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 continue;
 
             float3 candidateNormal = DecodeGuideNormal(g_AovNormal[q]);
+            
+            float candidateHitDist = g_PrimaryHitDist[q];
+            float hitWeight = HitDistanceWeight(
+                centerRoughness,
+                centerHitDist,
+                candidateHitDist);
 
             float depthDelta = abs(centerDepth - candidateDepth);
             float depthWeight = exp(-depthDelta / max(1e-5f, DepthSigma));
@@ -115,7 +148,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
             float spatialSigma = max(1.0f, float(Radius));
             float spatialWeight = exp(-spatialDist2 / max(1e-5f, 2.0f * spatialSigma * spatialSigma));
 
-            float score = depthWeight * normalWeight * spatialWeight;
+            float score = depthWeight * normalWeight * spatialWeight * hitWeight;
 
             if (score > bestScore)
             {

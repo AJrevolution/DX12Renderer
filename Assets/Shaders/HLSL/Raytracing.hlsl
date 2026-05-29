@@ -72,6 +72,8 @@ static const uint RT_RAY_PRIMARY_DIFFUSE = 0u;
 static const uint RT_RAY_SHADOW = 1u;
 static const uint RT_RAY_INDIRECT = 2u;
 static const uint RT_RAY_PRIMARY_SPECULAR = 3u;
+static const float RT_HIT_DIST_INVALID = -1.0f;
+static const float RT_PRIMARY_HIT_DIST_VIS_MAX = 25.0f;
 
 struct RayPayload
 {
@@ -97,7 +99,8 @@ RWTexture2D<float4>                 g_AccumDiff : register(u1);
 RWTexture2D<float4>                 g_AccumSpec : register(u2);
 RWTexture2D<float4>                 g_AovNormal : register(u3);
 RWTexture2D<float>                  g_AovDepth : register(u4);
-RWTexture2D<float2>                 g_AovMotion : register(u5); // prevUV, (-1,-1) invalid
+RWTexture2D<float2>                 g_AovMotion : register(u5);         // prevUV, (-1,-1) invalid
+RWTexture2D<float>                  g_AovPrimaryHitDist : register(u6); // primary visible-surface RayT, -1 invalid
 StructuredBuffer<VertexRT>          g_QuadVerts : register(t1);
 ByteAddressBuffer                   g_QuadIndices : register(t2);
 StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);
@@ -495,6 +498,11 @@ bool PrevUVValid(float2 uv)
            uv.y >= 0.0f && uv.y <= 1.0f;
 }
 
+bool HitDistValid(float d)
+{
+    return d >= 0.0f;
+}
+
 // RT IBL parity target:
 // - same latlong UV mapping convention as raster
 // - same BRDF LUT usage
@@ -516,7 +524,17 @@ void RayGen()
         DebugView == 52 ||
         DebugView == 53;
     
-    bool bypassAccum = (RtAccumulate == 0) || isRtShadingDebug || isMotionDebug;
+    bool isHitDistDebug =
+        DebugView == 61 ||
+        DebugView == 62;
+    
+    bool bypassAccum = 
+        (RtAccumulate == 0) ||
+        isRtShadingDebug ||
+        isMotionDebug ||
+        isHitDistDebug;
+    
+    g_AovPrimaryHitDist[pixel] = RT_HIT_DIST_INVALID;
     
     uint rng = InitRng(pixel, RtSampleIndex, RtResetId);
 
@@ -622,6 +640,26 @@ void RayGen()
         return;
     }
 
+    if (DebugView == 61)
+    {
+        float hitDist = g_AovPrimaryHitDist[pixel];
+        bool validHit = HitDistValid(hitDist);
+
+        // Conservative bring-up visualization range. Promote to a knob later only if needed.
+        float v = validHit ? saturate(hitDist / RT_PRIMARY_HIT_DIST_VIS_MAX) : 0.0f;
+
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+        return;
+    }
+
+    if (DebugView == 62)
+    {
+        float hitDist = g_AovPrimaryHitDist[pixel];
+        float v = HitDistValid(hitDist) ? 0.0f : 1.0f;
+
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+        return;
+    }
     
     if (isRtShadingDebug)
     {
@@ -714,6 +752,16 @@ void Miss(inout RayPayload payload)
         return;
     }
     
+    if (payload.rayType == RT_RAY_PRIMARY_SPECULAR)
+    {
+        uint2 pixel = DispatchRaysIndex().xy;
+        g_AovPrimaryHitDist[pixel] = RT_HIT_DIST_INVALID;
+        
+        payload.color = 0.0f.xxx;
+        return;
+    }
+    
+    
     float3 sky = EvalSky(WorldRayDirection());
     
     if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE)
@@ -723,22 +771,24 @@ void Miss(inout RayPayload payload)
         g_AovNormal[pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
         g_AovDepth[pixel] = 1.0f;
         g_AovMotion[pixel] = float2(-1.0f, -1.0f);
+        g_AovPrimaryHitDist[pixel] = RT_HIT_DIST_INVALID;
         
         payload.color = sky;
         return;
     }
-    
-    if (payload.rayType == RT_RAY_PRIMARY_SPECULAR)
-    {
-        payload.color = 0.0f.xxx;
-        return;
-    }
+
     payload.color = sky;
 }
 
 [shader("closesthit")]
 void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
+    if (payload.rayType == RT_RAY_PRIMARY_SPECULAR)
+    {
+        uint2 pixel = DispatchRaysIndex().xy;
+        g_AovPrimaryHitDist[pixel] = RayTCurrent();
+    }
+    
     if (payload.rayType == RT_RAY_SHADOW)
     {
         payload.occluded = 1;
@@ -815,6 +865,10 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         g_AovNormal[pixel] = float4(geomNormal * 0.5f + 0.5f, roughness);
         g_AovDepth[pixel] = depth01;
         g_AovMotion[pixel] = prevUV;
+        
+        // Primary visible-surface hit distance guide.
+        // Used by motion dilation/confidence for glossy visible-specular stability.
+        g_AovPrimaryHitDist[pixel] = RayTCurrent();
     }
     
     if (payload.rayType == RT_RAY_INDIRECT)
