@@ -30,7 +30,7 @@ void RtHitDistReconstructPass::Initialize(
 void RtHitDistReconstructPass::BuildRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE srvRange;
-    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0, 0);
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 8, 0, 0);
     // t0 raw primary hit distance
     // t1 current normal/roughness
     // t2 current depth
@@ -38,6 +38,7 @@ void RtHitDistReconstructPass::BuildRootSignature(ID3D12Device* device)
     // t4 previous reconstructed hit distance
     // t5 previous depth
     // t6 previous normal/roughness
+    // t7 surface id
 
     CD3DX12_DESCRIPTOR_RANGE uavRange;
     uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0);

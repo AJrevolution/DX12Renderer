@@ -352,6 +352,11 @@ private:
         return dv == 63 || dv == 64;
     }
 
+    static bool IsSurfaceIdDebug(uint32_t dv)
+    {
+        return dv == 65 || dv == 66;
+    }
+
     std::vector<DrawItem> m_draws;
 
     void BuildDrawList(float time);
@@ -700,6 +705,12 @@ private:
     // The RT post stack must stay disabled, but the reconstruct pass still runs explicitly.
     //   63 = reconstructed primary hit distance visualization
     //   64 = reconstructed primary hit-distance confidence
+    //
+    // SurfaceId / RayGen-owned views:
+    // These write directly to m_rtOutput from RayGen.
+    // The RT post stack must stay disabled.
+    //   65 = surfaceId visualization
+    //   66 = invalid surfaceId mask
     // 
     // Future rule:
     //   Do not use broad contiguous checks such as 32..47.
@@ -886,6 +897,7 @@ private:
     // u4 = m_rtAovDepth        R32_FLOAT
     // u5 = m_rtAovMotion       R16G16_FLOAT prevUV, (-1,-1) invalid
     // u6 = m_rtAovPrimaryHitDist  R16_FLOAT visible-surface RayT, -1 invalid
+    // u7 = m_rtAovSurfaceId    R32_UINT object/material id, 0xFFFFFFFF invalid
     DescriptorAllocator::Allocation m_rtOutputUav{};
     uint32_t m_rtOutputWidth = 0;
     uint32_t m_rtOutputHeight = 0;
@@ -952,6 +964,9 @@ private:
     bool m_rtAovMotionConfReady = false;
     ComPtr<ID3D12Resource> m_rtAovPrimaryHitDist;
     bool m_rtAovPrimaryHitDistReady = false;
+
+    ComPtr<ID3D12Resource> m_rtAovSurfaceId;
+    bool m_rtAovSurfaceIdReady = false;
 
     bool m_rtAovReady = false;
 
@@ -1103,13 +1118,13 @@ private:
     uint32_t m_rtAtrousIterationsSpec = 1;
     uint32_t m_prevRtAtrousIterationsSpec = 1;
 
-    static constexpr uint32_t kRtUavTableCount = 7;
+    static constexpr uint32_t kRtUavTableCount = 8;
     static constexpr uint32_t kRtHistorySelectSrvCount = 7;
     static constexpr uint32_t kRtHistorySelectUavCount = 3;
     static constexpr uint32_t kRtSvgfSrvCount = 5;
     static constexpr uint32_t kRtDenoiseSrvCount = 4;
-    static constexpr uint32_t kRtMotionDilateSrvCount = 4;
-    static constexpr uint32_t kRtHitDistReconstructSrvCount = 7;
+    static constexpr uint32_t kRtMotionDilateSrvCount = 5;
+    static constexpr uint32_t kRtHitDistReconstructSrvCount = 8;
     static constexpr uint32_t kRtHitDistReconstructUavCount = 3;
 
     RtMotionDilatePass m_rtMotionDilatePass;

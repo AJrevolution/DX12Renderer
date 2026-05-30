@@ -30,8 +30,8 @@ void RtMotionDilatePass::Initialize(
 void RtMotionDilatePass::BuildRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE srvRange;
-    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0, 0);
-    // t0 raw prevUV, t1 normal/roughness, t2 depth, t3 primary hit distance
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 0);
+    // t0 raw prevUV, t1 normal/roughness, t2 depth, t3 primary hit distance, t4 surface id
 
     CD3DX12_DESCRIPTOR_RANGE uavRange;
     uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0);

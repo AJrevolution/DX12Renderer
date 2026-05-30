@@ -74,6 +74,7 @@ static const uint RT_RAY_INDIRECT = 2u;
 static const uint RT_RAY_PRIMARY_SPECULAR = 3u;
 static const float RT_HIT_DIST_INVALID = -1.0f;
 static const float RT_PRIMARY_HIT_DIST_VIS_MAX = 25.0f;
+static const uint RT_SURFACE_ID_INVALID = 0xFFFFFFFFu;
 
 struct RayPayload
 {
@@ -101,6 +102,7 @@ RWTexture2D<float4>                 g_AovNormal : register(u3);
 RWTexture2D<float>                  g_AovDepth : register(u4);
 RWTexture2D<float2>                 g_AovMotion : register(u5);         // prevUV, (-1,-1) invalid
 RWTexture2D<float>                  g_AovPrimaryHitDist : register(u6); // primary visible-surface RayT, -1 invalid
+RWTexture2D<uint>                   g_AovSurfaceId : register(u7); // object/material id, 0xFFFFFFFF invalid
 StructuredBuffer<VertexRT>          g_QuadVerts : register(t1);
 ByteAddressBuffer                   g_QuadIndices : register(t2);
 StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);
@@ -503,6 +505,45 @@ bool HitDistValid(float d)
     return d >= 0.0f;
 }
 
+bool SurfaceIdValid(uint id)
+{
+    return id != RT_SURFACE_ID_INVALID;
+}
+
+uint MakeSurfaceId(uint instanceId, uint materialId)
+{
+    // 9.11A/B use SurfaceId only for same-frame guide borrowing validation.
+    // InstanceID is therefore acceptable here. If SurfaceId is later used for
+    // cross-frame temporal rejection, replace this with a persistent per-draw
+    // ID carried in RTInstanceData.
+    uint instance = instanceId & 0xFFFFu;
+    uint mat = materialId & 0xFFFFu;
+    return instance | (mat << 16);
+}
+
+uint HashSurfaceId(uint id)
+{
+    uint h = id;
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    h *= 0x846ca68bu;
+    h ^= h >> 16;
+    return h;
+}
+
+float SurfaceIdToGray(uint id)
+{
+    if (!SurfaceIdValid(id))
+        return 0.0f;
+
+    uint h = HashSurfaceId(id);
+    float u = float(h & 0x00FFFFFFu) / 16777215.0f;
+
+    // Keep invalid as black, but make every valid surface visible.
+    return lerp(0.12f, 1.0f, u);
+}
+
 // RT IBL parity target:
 // - same latlong UV mapping convention as raster
 // - same BRDF LUT usage
@@ -528,13 +569,19 @@ void RayGen()
         DebugView == 61 ||
         DebugView == 62;
     
+    bool isSurfaceIdDebug =
+        DebugView == 65 ||
+        DebugView == 66;
+    
     bool bypassAccum = 
         (RtAccumulate == 0) ||
         isRtShadingDebug ||
         isMotionDebug ||
-        isHitDistDebug;
+        isHitDistDebug ||
+        isSurfaceIdDebug;
     
     g_AovPrimaryHitDist[pixel] = RT_HIT_DIST_INVALID;
+    g_AovSurfaceId[pixel] = RT_SURFACE_ID_INVALID;
     
     uint rng = InitRng(pixel, RtSampleIndex, RtResetId);
 
@@ -661,6 +708,24 @@ void RayGen()
         return;
     }
     
+    if (DebugView == 65)
+    {
+        uint surfaceId = g_AovSurfaceId[pixel];
+        float v = SurfaceIdToGray(surfaceId);
+
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+        return;
+    }
+
+    if (DebugView == 66)
+    {
+        uint surfaceId = g_AovSurfaceId[pixel];
+        float v = SurfaceIdValid(surfaceId) ? 0.0f : 1.0f;
+
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+        return;
+    }
+    
     if (isRtShadingDebug)
     {
         float3 sampleColor = diffPayload.color;
@@ -772,6 +837,7 @@ void Miss(inout RayPayload payload)
         g_AovDepth[pixel] = 1.0f;
         g_AovMotion[pixel] = float2(-1.0f, -1.0f);
         g_AovPrimaryHitDist[pixel] = RT_HIT_DIST_INVALID;
+        g_AovSurfaceId[pixel] = RT_SURFACE_ID_INVALID;
         
         payload.color = sky;
         return;
@@ -865,6 +931,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         g_AovNormal[pixel] = float4(geomNormal * 0.5f + 0.5f, roughness);
         g_AovDepth[pixel] = depth01;
         g_AovMotion[pixel] = prevUV;
+        g_AovSurfaceId[pixel] = MakeSurfaceId(InstanceID(), data.materialId);
         
         // Primary visible-surface hit distance guide.
         // Used by motion dilation/confidence for glossy visible-specular stability.

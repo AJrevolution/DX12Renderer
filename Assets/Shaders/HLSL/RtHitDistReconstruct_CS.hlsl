@@ -7,6 +7,7 @@ Texture2D<float2> g_RawPrevUV : register(t3);
 Texture2D<float> g_PrevHitDist : register(t4);
 Texture2D<float> g_PrevDepth : register(t5);
 Texture2D<float4> g_PrevNormalRough : register(t6);
+Texture2D<uint> g_SurfaceId : register(t7);
 
 RWTexture2D<float> g_ReconsHitDist : register(u0);
 RWTexture2D<float> g_ReconsConf : register(u1);
@@ -83,6 +84,13 @@ void WriteDebug(uint2 pixel, float hitDist, float conf)
     }
 }
 
+static const uint SURFACE_ID_INVALID = 0xFFFFFFFFu;
+
+bool SurfaceIdValid(uint id)
+{
+    return id != SURFACE_ID_INVALID;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -100,11 +108,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float3 currN = DecodeNormal(currNR);
     float currRough = currNR.a;
     float currDepth = g_CurrDepth[pixel];
+    uint centerSurfaceId = g_SurfaceId[pixel];
+    bool centerSurfaceValid = SurfaceIdValid(centerSurfaceId);
 
     float outHit = HIT_DIST_INVALID;
     float outConf = 0.0f;
 
-    const bool rawValid = HitDistValid(rawHit) && currDepth < 0.9999f;
+    const bool rawValid =
+        centerSurfaceValid &&
+        HitDistValid(rawHit) &&
+        currDepth < 0.9999f;
 
     if (rawValid)
     {
@@ -115,7 +128,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
     // Temporal stabilization from previous reconstructed guide.
     float2 prevUV = g_RawPrevUV[pixel];
 
-    if (HistoryValid != 0u &&
+    if (centerSurfaceValid &&
+        HistoryValid != 0u &&
         PrevUVValid(prevUV) &&
         currDepth < 0.9999f)
     {
@@ -161,7 +175,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
 
     // Current-frame hole fill from raw neighboring hit distances.
-    if ((!HitDistValid(outHit) || outConf < 0.35f) &&
+    if (centerSurfaceValid &&
+        (!HitDistValid(outHit) || outConf < 0.35f) &&
         currDepth < 0.9999f)
     {
         float bestScore = 0.0f;
@@ -179,6 +194,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 int2 q = int2(pixel) + int2(x, y);
                 q = clamp(q, int2(0, 0), int2(int(width) - 1, int(height) - 1));
 
+                uint qSurfaceId = g_SurfaceId[q];
+
+                if (qSurfaceId != centerSurfaceId)
+                    continue;
+                
                 float candidateHit = g_RawHitDist[q];
 
                 if (!HitDistValid(candidateHit))
@@ -231,7 +251,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
         }
     }
 
-    if (currDepth >= 0.9999f)
+    if (!centerSurfaceValid || currDepth >= 0.9999f)
     {
         outHit = HIT_DIST_INVALID;
         outConf = 0.0f;

@@ -389,6 +389,7 @@ void Renderer::RenderFrame(
     const bool wantsMotionDebug = IsMotionDebug(m_debugView);
     const bool wantsMotionDilateDebug = IsMotionDilateDebug(m_debugView);
     const bool wantsHitDistDebug = IsHitDistDebug(m_debugView);
+    const bool wantsSurfaceIdDebug = IsSurfaceIdDebug(m_debugView);
 
     const bool wantsRtPostDebug =
         wantsTemporalDebug ||
@@ -404,7 +405,8 @@ void Renderer::RenderFrame(
         wantsMotionDebug ||
         wantsMotionDilateDebug ||
         wantsHitDistDebug ||
-        wantsHitDistReconstructDebug;
+        wantsHitDistReconstructDebug ||
+        wantsSurfaceIdDebug;
 
     // Producer-owned diagnostics write directly to m_rtOutput.
     // Keep the post stack disabled so later temporal/SVGF/combine passes cannot overwrite them.
@@ -413,7 +415,8 @@ void Renderer::RenderFrame(
         wantsMotionDebug ||
         wantsMotionDilateDebug ||
         wantsHitDistDebug ||
-        wantsHitDistReconstructDebug;
+        wantsHitDistReconstructDebug ||
+        wantsSurfaceIdDebug;
 
     const bool enableRtPostStack =
         m_rtEnablePostStack &&
@@ -445,7 +448,8 @@ void Renderer::RenderFrame(
             (!m_autoOrbit && m_pauseAnimation) ||
             wantsSplitDebug ||
             wantsMotionDebug ||
-            wantsHitDistDebug
+            wantsHitDistDebug ||
+            wantsSurfaceIdDebug
         );
 
     bool drawListStructuralChanged =
@@ -820,6 +824,7 @@ void Renderer::RenderFrame(
             m_rtAovMotionReady &&
             m_rtAovMotionDilatedReady &&
             m_rtAovPrimaryHitDistReady &&
+            m_rtAovSurfaceIdReady &&
             m_rtAovMotionConfReady;
 
         const bool shouldRunHitDistReconstruct =
@@ -1515,6 +1520,7 @@ void Renderer::RenderFrame(
         cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovPrimaryHitDist.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl.Transition(m_rtAovSurfaceId.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (m_rtAovHitDistReconsReady)
         {
             cl.Transition(m_rtAovHitDistRecons.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1719,6 +1725,7 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_rtAovHitDistReconsReady = false;
     m_rtAovHitDistReconsConfReady = false;
     m_rtHitDistHistoryValid = false;
+    m_rtAovSurfaceIdReady = false;
 
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
@@ -2535,6 +2542,8 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         !m_rtHistoryHitDist[1] ||
         !m_rtHistoryHitDistConf[0] ||
         !m_rtHistoryHitDistConf[1] ||
+        !m_rtAovSurfaceId ||
+        !m_rtAovSurfaceIdReady ||
         (m_rtOutputHeight != height);
 
     if (sizeMismatch)
@@ -3032,6 +3041,8 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
     m_rtAovHitDistReconsConfReady = false;
     m_rtAovHitDistRecons.Reset();
     m_rtAovHitDistReconsConf.Reset();
+    m_rtAovSurfaceIdReady = false;
+    m_rtAovSurfaceId.Reset();
 
     if (!m_rtOutputUav.IsValid())
         m_rtOutputUav = m_srvHeap.Allocate(kRtUavTableCount);
@@ -3236,6 +3247,46 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
             RtUavCpuAt(6));
     }
 
+    {
+        auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R32_UINT,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&m_rtAovSurfaceId)),
+            "Create RT AOV surface id");
+
+        SetD3D12ObjectName(
+            m_rtAovSurfaceId.Get(),
+            L"RT AOV Surface ID");
+
+        CommandList::SetGlobalState(
+            m_rtAovSurfaceId.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R32_UINT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            m_rtAovSurfaceId.Get(),
+            nullptr,
+            &uav,
+            RtUavCpuAt(7));
+    }
+
     auto CreateR16UavTexture = [&](ComPtr<ID3D12Resource>& resource, const wchar_t* name)
     {
         auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
@@ -3273,6 +3324,7 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
         m_rtAovHitDistReconsConf,
         L"RT AOV Hit Distance Reconstructed Confidence");
 
+    m_rtAovSurfaceIdReady = true;
     m_rtAovHitDistReconsReady = true;
     m_rtAovHitDistReconsConfReady = true;
     m_rtAovPrimaryHitDistReady = true;
@@ -4595,6 +4647,8 @@ bool Renderer::UpdateRtMotionDilateTables(
         !m_rtAovPrimaryHitDist ||
         !m_rtAovPrimaryHitDistReady ||
         !hitDistResource ||
+        !m_rtAovSurfaceId ||
+        !m_rtAovSurfaceIdReady ||
         !m_rtOutputReady)
     {
         return false;
@@ -4688,6 +4742,21 @@ bool Renderer::UpdateRtMotionDilateTables(
             SrvAt(3));
     }
 
+    // t4 = surface id
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_UINT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovSurfaceId.Get(),
+            &srv,
+            SrvAt(4));
+    }
+
     // u0 = dilated prevUV
     {
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
@@ -4757,6 +4826,8 @@ bool Renderer::RunRtMotionDilate(
         !m_rtAovPrimaryHitDist ||
         !m_rtAovPrimaryHitDistReady ||
         !hitDistResource || 
+        !m_rtAovSurfaceId ||
+        !m_rtAovSurfaceIdReady ||
         !m_rtOutputReady)
     {
         return false;
@@ -4776,6 +4847,7 @@ bool Renderer::RunRtMotionDilate(
     cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.Transition(hitDistResource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovSurfaceId.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.FlushBarriers();
 
     const bool okTables =
@@ -4867,6 +4939,8 @@ bool Renderer::UpdateRtHitDistReconstructTables(
         !m_rtAovHitDistReconsReady ||
         !m_rtAovHitDistReconsConfReady ||
         !m_rtAovReady ||
+        !m_rtAovSurfaceId ||
+        !m_rtAovSurfaceIdReady ||
         !m_rtOutputReady)
     {
         return false;
@@ -5017,6 +5091,21 @@ bool Renderer::UpdateRtHitDistReconstructTables(
             SrvAt(6));
     }
 
+    // t7 = surface id
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_UINT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovSurfaceId.Get(),
+            &srv,
+            SrvAt(7));
+    }
+
     // u0 = reconstructed hit distance
     WriteR16Uav(m_rtAovHitDistRecons.Get(), 0);
 
@@ -5092,6 +5181,8 @@ bool Renderer::RunRtHitDistReconstruct(
         !m_rtAovReady ||
         !m_rtAovHitDistReconsReady ||
         !m_rtAovHitDistReconsConfReady ||
+        !m_rtAovSurfaceId ||
+        !m_rtAovSurfaceIdReady ||
         !m_rtOutputReady)
     {
         return false;
@@ -5114,6 +5205,7 @@ bool Renderer::RunRtHitDistReconstruct(
     cl.Transition(m_rtAovHitDistRecons.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.Transition(m_rtAovHitDistReconsConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(m_rtAovSurfaceId.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.FlushBarriers();
 
     const bool okTables =

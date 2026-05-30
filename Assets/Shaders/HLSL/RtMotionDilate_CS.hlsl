@@ -4,10 +4,13 @@ Texture2D<float2> g_RawPrevUV : register(t0);
 Texture2D<float4> g_AovNormal : register(t1);
 Texture2D<float> g_AovDepth : register(t2);
 Texture2D<float> g_PrimaryHitDist : register(t3);
+Texture2D<uint> g_SurfaceId : register(t4);
 
 RWTexture2D<float2> g_DilatedPrevUV : register(u0);
 RWTexture2D<float> g_MotionConf : register(u1);
 RWTexture2D<float4> g_Output : register(u2);
+
+static const uint SURFACE_ID_INVALID = 0xFFFFFFFFu;
 
 cbuffer MotionDilateConstants : register(b0)
 {
@@ -69,6 +72,11 @@ float HitDistanceWeight(float roughness, float hit0, float hit1)
     return exp(-abs(hit0 - hit1) / max(1e-4f, sigmaHit));
 }
 
+bool SurfaceIdValid(uint id)
+{
+    return id != SURFACE_ID_INVALID;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -79,6 +87,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     if (pixel.x >= width || pixel.y >= height)
         return;
+
+    uint centerSurfaceId = g_SurfaceId[pixel];
+
+    if (!SurfaceIdValid(centerSurfaceId))
+    {
+        g_DilatedPrevUV[pixel] = float2(-1.0f, -1.0f);
+        g_MotionConf[pixel] = 0.0f;
+        WriteDebug(pixel, true, 0.0f);
+        return;
+    }
 
     float2 rawPrevUV = g_RawPrevUV[pixel];
 
@@ -120,6 +138,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
             int2 q = int2(pixel) + int2(x, y);
             q = clamp(q, int2(0, 0), int2(int(width) - 1, int(height) - 1));
 
+            uint candidateSurfaceId = g_SurfaceId[q];
+
+            if (candidateSurfaceId != centerSurfaceId)
+                continue;
+            
             float2 candidatePrevUV = g_RawPrevUV[q];
 
             if (!PrevUVValid(candidatePrevUV))
