@@ -144,6 +144,9 @@
     <ClInclude Include="Source\Renderer\Passes\RtMotionDilatePass.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\RtHitDistReconstructPass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -251,6 +254,9 @@
     <ClCompile Include="Source\Renderer\Passes\RtMotionDilatePass.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\RtHitDistReconstructPass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -278,5 +284,6 @@
     <CustomBuild Include="Assets\Shaders\HLSL\RtHistorySelect_CS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\RtCombine_CS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\RtMotionDilate_CS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\RtHitDistReconstruct_CS.hlsl" />
   </ItemGroup>
 </Project>

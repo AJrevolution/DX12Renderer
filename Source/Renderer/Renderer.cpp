@@ -395,12 +395,16 @@ void Renderer::RenderFrame(
         wantsSvgfDebug ||
         wantsHistorySelectDebug;
 
+    const bool wantsHitDistReconstructDebug =
+        IsHitDistReconstructDebug(m_debugView);
+
     const bool wantsRtInspectionDebug =
         wantsRtPostDebug ||
         wantsSplitDebug ||
         wantsMotionDebug ||
         wantsMotionDilateDebug ||
-        wantsHitDistDebug;
+        wantsHitDistDebug ||
+        wantsHitDistReconstructDebug;
 
     // Producer-owned diagnostics write directly to m_rtOutput.
     // Keep the post stack disabled so later temporal/SVGF/combine passes cannot overwrite them.
@@ -408,7 +412,8 @@ void Renderer::RenderFrame(
         wantsSplitDebug ||
         wantsMotionDebug ||
         wantsMotionDilateDebug ||
-        wantsHitDistDebug;
+        wantsHitDistDebug ||
+        wantsHitDistReconstructDebug;
 
     const bool enableRtPostStack =
         m_rtEnablePostStack &&
@@ -520,6 +525,9 @@ void Renderer::RenderFrame(
         (rtHasBrdfLut != m_prevRtHasBrdfLut) ||
         (rtHasIbl != m_prevRtHasIbl);
 
+    const bool hitDistReconsSettingsChanged =
+        std::fabs(m_rtHitDistReconsAlpha - m_prevRtHitDistReconsAlpha) > 1e-6f;
+
     const bool temporalSettingsChanged =
         !m_rtHistoryValid ||
         (std::fabs(m_rtTemporalAlpha - m_prevRtTemporalAlpha) > 1e-6f) ||
@@ -543,6 +551,7 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtTemporalMotionConfMinSpec - m_prevRtTemporalMotionConfMinSpec) > 1e-6f) ||
         (std::fabs(m_rtTemporalMotionConfPowerDiffuse - m_prevRtTemporalMotionConfPowerDiffuse) > 1e-6f) ||
         (std::fabs(m_rtTemporalMotionConfPowerSpec - m_prevRtTemporalMotionConfPowerSpec) > 1e-6f) ||
+        hitDistReconsSettingsChanged ||
         (m_rtTemporalEnableVarianceBoost != m_prevRtTemporalEnableVarianceBoost);
 
     const bool resetRawAccumulation =
@@ -577,11 +586,19 @@ void Renderer::RenderFrame(
         m_rtTemporalHistoryValid = false;
     }
 
+    if (drawListStructuralChanged ||
+        bigCameraChanged ||
+        !m_prevRtMotionWorldsValid ||
+        hitDistReconsSettingsChanged)
+    {
+        m_rtHitDistHistoryValid = false;
+    }
+
     // This must always be assigned before DXR dispatch and before post-stack gating.
     // RayGen receives this through PerFrameConstants::rtAccumulate.
     m_rtAccumulateThisFrame = allowRtAccumulation;
 
-    if (wantsMotionDilateDebug)
+    if (wantsMotionDilateDebug || wantsHitDistReconstructDebug)
     {
         // Debug 54 is produced by RtMotionDilatePass.
         // DXR still runs to author raw motion/depth/normal guides, but it must not
@@ -640,6 +657,7 @@ void Renderer::RenderFrame(
     m_prevRtTemporalMotionConfMinSpec = m_rtTemporalMotionConfMinSpec;
     m_prevRtTemporalMotionConfPowerDiffuse = m_rtTemporalMotionConfPowerDiffuse;
     m_prevRtTemporalMotionConfPowerSpec = m_rtTemporalMotionConfPowerSpec;
+    m_prevRtHitDistReconsAlpha = m_rtHitDistReconsAlpha;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -804,6 +822,20 @@ void Renderer::RenderFrame(
             m_rtAovPrimaryHitDistReady &&
             m_rtAovMotionConfReady;
 
+        const bool shouldRunHitDistReconstruct =
+            temporalWouldRun ||
+            wantsMotionDilateDebug ||
+            wantsHitDistReconstructDebug;
+
+        const bool ranHitDistReconstruct =
+            shouldRunHitDistReconstruct &&
+            RunRtHitDistReconstruct(
+                cl,
+                frameIndex,
+                device,
+                width,
+                height);
+
         const bool ranMotionDilate =
             (temporalWouldRun || wantsMotionDilateDebug) &&
             RunRtMotionDilate(
@@ -811,7 +843,8 @@ void Renderer::RenderFrame(
                 frameIndex,
                 device,
                 width,
-                height);
+                height,
+                ranHitDistReconstruct);
 
 
         //Temporal
@@ -830,7 +863,6 @@ void Renderer::RenderFrame(
         rtSignals.specSelected.moments = rtSignals.specStable.moments;
 
         const uint32_t writeIndex = 1u - m_rtHistoryReadIndex;
-
 
         if (temporalWouldRun && ranMotionDilate)
         {
@@ -1451,6 +1483,15 @@ void Renderer::RenderFrame(
             cl.Get()->CopyResource(m_rtHistoryNormal[writeIndex].Get(), m_rtAovNormal.Get());
             cl.Get()->CopyResource(m_rtHistoryDepth[writeIndex].Get(), m_rtAovDepth.Get());
 
+            if (ranHitDistReconstruct && ranMotionDilate && temporalWouldRun) 
+            {
+                CommitRtHitDistHistory(cl, writeIndex);
+            }
+            else if (!temporalWouldRun)
+            {
+                m_rtHitDistHistoryValid = false;
+            }
+
             cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cl.Transition(m_rtHistoryNormal[writeIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1474,6 +1515,15 @@ void Renderer::RenderFrame(
         cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovPrimaryHitDist.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (m_rtAovHitDistReconsReady)
+        {
+            cl.Transition(m_rtAovHitDistRecons.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
+
+        if (m_rtAovHitDistReconsConfReady)
+        {
+            cl.Transition(m_rtAovHitDistReconsConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
         if (m_rtPostReady)
         {
             cl.Transition(m_rtPostDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1666,6 +1716,9 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_prevRtMotionWorlds.clear();
     m_rtSpecSelectedMomentsReady = false;
     m_rtAovPrimaryHitDistReady = false;
+    m_rtAovHitDistReconsReady = false;
+    m_rtAovHitDistReconsConfReady = false;
+    m_rtHitDistHistoryValid = false;
 
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
@@ -1867,6 +1920,7 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         m_rtAtrousPass.Initialize(device, Paths::ShaderDir());
         m_rtHistorySelectPass.Initialize(device, Paths::ShaderDir());
         m_rtCombinePass.Initialize(device, Paths::ShaderDir());
+        m_rtHitDistReconstructPass.Initialize(device, Paths::ShaderDir());
     }
 
     // Load a real texture from disk 
@@ -2473,6 +2527,14 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         !m_rtAovPrimaryHitDist ||
         !m_rtAovPrimaryHitDistReady ||
         (m_rtOutputWidth != width) ||
+        !m_rtAovHitDistRecons ||
+        !m_rtAovHitDistReconsReady ||
+        !m_rtAovHitDistReconsConf ||
+        !m_rtAovHitDistReconsConfReady ||
+        !m_rtHistoryHitDist[0] ||
+        !m_rtHistoryHitDist[1] ||
+        !m_rtHistoryHitDistConf[0] ||
+        !m_rtHistoryHitDistConf[1] ||
         (m_rtOutputHeight != height);
 
     if (sizeMismatch)
@@ -2966,6 +3028,10 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
     m_rtAovMotionConf.Reset();
     m_rtAovPrimaryHitDistReady = false;
     m_rtAovPrimaryHitDist.Reset();
+    m_rtAovHitDistReconsReady = false;
+    m_rtAovHitDistReconsConfReady = false;
+    m_rtAovHitDistRecons.Reset();
+    m_rtAovHitDistReconsConf.Reset();
 
     if (!m_rtOutputUav.IsValid())
         m_rtOutputUav = m_srvHeap.Allocate(kRtUavTableCount);
@@ -3170,6 +3236,45 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
             RtUavCpuAt(6));
     }
 
+    auto CreateR16UavTexture = [&](ComPtr<ID3D12Resource>& resource, const wchar_t* name)
+    {
+        auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R16_FLOAT,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&resource)),
+            "Create RT R16 UAV texture");
+
+        SetD3D12ObjectName(resource.Get(), name);
+
+        CommandList::SetGlobalState(
+            resource.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    };
+
+    CreateR16UavTexture(
+        m_rtAovHitDistRecons,
+        L"RT AOV Hit Distance Reconstructed");
+
+    CreateR16UavTexture(
+        m_rtAovHitDistReconsConf,
+        L"RT AOV Hit Distance Reconstructed Confidence");
+
+    m_rtAovHitDistReconsReady = true;
+    m_rtAovHitDistReconsConfReady = true;
     m_rtAovPrimaryHitDistReady = true;
     m_rtAovMotionConfReady = true;
     m_rtAovMotionDilatedReady = true;
@@ -3506,7 +3611,59 @@ void Renderer::CreateRtHistoryResources(ID3D12Device* device, uint32_t width, ui
                 m_rtHistoryMomentsSpecResp[i].Get(),
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
+
+        {
+            m_rtHistoryHitDist[i].Reset();
+            m_rtHistoryHitDistConf[i].Reset();
+
+            auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+                DXGI_FORMAT_R16_FLOAT,
+                width,
+                height,
+                1,
+                1,
+                1,
+                0,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+            ThrowIfFailed(
+                device->CreateCommittedResource(
+                    &heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &desc,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    nullptr,
+                    IID_PPV_ARGS(&m_rtHistoryHitDist[i])),
+                "Create RT history hit distance");
+
+            SetD3D12ObjectName(
+                m_rtHistoryHitDist[i].Get(),
+                i == 0 ? L"RT History Hit Distance 0" : L"RT History Hit Distance 1");
+
+            CommandList::SetGlobalState(
+                m_rtHistoryHitDist[i].Get(),
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+            ThrowIfFailed(
+                device->CreateCommittedResource(
+                    &heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &desc,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    nullptr,
+                    IID_PPV_ARGS(&m_rtHistoryHitDistConf[i])),
+                "Create RT history hit distance confidence");
+
+            SetD3D12ObjectName(
+                m_rtHistoryHitDistConf[i].Get(),
+                i == 0 ? L"RT History Hit Distance Confidence 0" : L"RT History Hit Distance Confidence 1");
+
+            CommandList::SetGlobalState(
+                m_rtHistoryHitDistConf[i].Get(),
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
     }
+    m_rtHitDistHistoryValid = false;
     UpdateRtSvgfPingUavTable(device);
     CreateRtPostResources(device, width, height);
 }
@@ -4414,8 +4571,16 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex)
 
 bool Renderer::UpdateRtMotionDilateTables(
     uint32_t frameIndex,
-    ID3D12Device* device)
+    ID3D12Device* device,
+    bool useReconstructedHitDist)
 {
+    ID3D12Resource* hitDistResource =
+        (useReconstructedHitDist &&
+            m_rtAovHitDistRecons &&
+            m_rtAovHitDistReconsReady)
+        ? m_rtAovHitDistRecons.Get()
+        : m_rtAovPrimaryHitDist.Get();
+
     if (!device ||
         !m_rtAovMotion ||
         !m_rtAovMotionDilated ||
@@ -4429,6 +4594,7 @@ bool Renderer::UpdateRtMotionDilateTables(
         !m_rtAovReady ||
         !m_rtAovPrimaryHitDist ||
         !m_rtAovPrimaryHitDistReady ||
+        !hitDistResource ||
         !m_rtOutputReady)
     {
         return false;
@@ -4517,7 +4683,7 @@ bool Renderer::UpdateRtMotionDilateTables(
         srv.Texture2D.MipLevels = 1;
 
         device->CreateShaderResourceView(
-            m_rtAovPrimaryHitDist.Get(),
+            hitDistResource,
             &srv,
             SrvAt(3));
     }
@@ -4567,8 +4733,16 @@ bool Renderer::RunRtMotionDilate(
     uint32_t frameIndex,
     ID3D12Device* device,
     uint32_t width,
-    uint32_t height)
+    uint32_t height,
+    bool useReconstructedHitDist)
 {
+    ID3D12Resource* hitDistResource =
+        (useReconstructedHitDist &&
+            m_rtAovHitDistRecons &&
+            m_rtAovHitDistReconsReady)
+        ? m_rtAovHitDistRecons.Get()
+        : m_rtAovPrimaryHitDist.Get();
+
     if (!device ||
         !m_rtAovMotion ||
         !m_rtAovMotionDilated ||
@@ -4582,6 +4756,7 @@ bool Renderer::RunRtMotionDilate(
         !m_rtAovReady ||
         !m_rtAovPrimaryHitDist ||
         !m_rtAovPrimaryHitDistReady ||
+        !hitDistResource || 
         !m_rtOutputReady)
     {
         return false;
@@ -4600,13 +4775,14 @@ bool Renderer::RunRtMotionDilate(
     cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    cl.Transition(m_rtAovPrimaryHitDist.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(hitDistResource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.FlushBarriers();
 
     const bool okTables =
         UpdateRtMotionDilateTables(
             frameIndex,
-            device);
+            device,
+            useReconstructedHitDist);
 
     if (!okTables)
     {
@@ -4666,4 +4842,357 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtMotionDilateConstants(
     cb->pad0 = 0;
 
     return alloc.gpu;
+}
+
+bool Renderer::UpdateRtHitDistReconstructTables(
+    uint32_t frameIndex,
+    ID3D12Device* device)
+{
+    if (!device ||
+        !m_rtAovPrimaryHitDist ||
+        !m_rtAovNormal ||
+        !m_rtAovDepth ||
+        !m_rtAovMotion ||
+        !m_rtHistoryHitDist[0] ||
+        !m_rtHistoryHitDist[1] ||
+        !m_rtHistoryDepth[0] ||
+        !m_rtHistoryDepth[1] ||
+        !m_rtHistoryNormal[0] ||
+        !m_rtHistoryNormal[1] ||
+        !m_rtAovHitDistRecons ||
+        !m_rtAovHitDistReconsConf ||
+        !m_rtOutput ||
+        !m_rtAovPrimaryHitDistReady ||
+        !m_rtAovMotionReady ||
+        !m_rtAovHitDistReconsReady ||
+        !m_rtAovHitDistReconsConfReady ||
+        !m_rtAovReady ||
+        !m_rtOutputReady)
+    {
+        return false;
+    }
+
+    auto& frame = m_rtFrames[frameIndex];
+
+    if (!frame.hitDistReconstructSrvTable.IsValid() ||
+        frame.hitDistReconstructSrvCount != kRtHitDistReconstructSrvCount)
+    {
+        frame.hitDistReconstructSrvTable =
+            m_srvHeap.Allocate(kRtHitDistReconstructSrvCount);
+        frame.hitDistReconstructSrvCount = kRtHitDistReconstructSrvCount;
+    }
+
+    if (!frame.hitDistReconstructUavTable.IsValid() ||
+        frame.hitDistReconstructUavCount != kRtHitDistReconstructUavCount)
+    {
+        frame.hitDistReconstructUavTable =
+            m_srvHeap.Allocate(kRtHitDistReconstructUavCount);
+        frame.hitDistReconstructUavCount = kRtHitDistReconstructUavCount;
+    }
+
+    const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
+
+    auto SrvAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.hitDistReconstructSrvTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    auto UavAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.hitDistReconstructUavTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    auto WriteR16Srv = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
+
+    auto WriteR16Uav = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            resource,
+            nullptr,
+            &uav,
+            UavAt(slot));
+    };
+
+    // t0 = raw primary hit distance
+    WriteR16Srv(m_rtAovPrimaryHitDist.Get(), 0);
+
+    // t1 = current normal/roughness
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovNormal.Get(),
+            &srv,
+            SrvAt(1));
+    }
+
+    // t2 = current depth
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovDepth.Get(),
+            &srv,
+            SrvAt(2));
+    }
+
+    // t3 = raw prevUV
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovMotion.Get(),
+            &srv,
+            SrvAt(3));
+    }
+
+    const uint32_t readIndex = m_rtHistoryReadIndex;
+
+    // t4 = previous reconstructed hit distance
+    WriteR16Srv(m_rtHistoryHitDist[readIndex].Get(), 4);
+
+    // t5 = previous depth
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtHistoryDepth[readIndex].Get(),
+            &srv,
+            SrvAt(5));
+    }
+
+    // t6 = previous normal/roughness
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtHistoryNormal[readIndex].Get(),
+            &srv,
+            SrvAt(6));
+    }
+
+    // u0 = reconstructed hit distance
+    WriteR16Uav(m_rtAovHitDistRecons.Get(), 0);
+
+    // u1 = reconstructed confidence
+    WriteR16Uav(m_rtAovHitDistReconsConf.Get(), 1);
+
+    // u2 = debug/display output
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            m_rtOutput.Get(),
+            nullptr,
+            &uav,
+            UavAt(2));
+    }
+
+    return true;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtHitDistReconstructConstants(
+    uint32_t frameIndex,
+    uint32_t width,
+    uint32_t height)
+{
+    auto alloc = m_upload.Allocate(
+        frameIndex,
+        sizeof(RtHitDistReconstructConstants),
+        256);
+
+    auto* cb = reinterpret_cast<RtHitDistReconstructConstants*>(alloc.cpu);
+    *cb = {};
+
+    cb->invResolution = {
+        1.0f / static_cast<float>(width),
+        1.0f / static_cast<float>(height)
+    };
+
+    cb->alpha =
+        std::max(0.0f, std::min(1.0f, m_rtHitDistReconsAlpha));
+
+    cb->depthSigma = 0.02f;
+    cb->normalSigma = 0.25f;
+    cb->roughnessSigma = 0.20f;
+
+    cb->historyValid = m_rtHitDistHistoryValid ? 1u : 0u;
+    cb->debugView = m_debugView;
+    cb->radius = 2u;
+    cb->hitDistVisMax = 25.0f;
+
+    return alloc.gpu;
+}
+
+bool Renderer::RunRtHitDistReconstruct(
+    CommandList& cl,
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height)
+{
+    if (!device ||
+        !m_rtAovPrimaryHitDist ||
+        !m_rtAovNormal ||
+        !m_rtAovDepth ||
+        !m_rtAovMotion ||
+        !m_rtAovHitDistRecons ||
+        !m_rtAovHitDistReconsConf ||
+        !m_rtOutput ||
+        !m_rtAovPrimaryHitDistReady ||
+        !m_rtAovMotionReady ||
+        !m_rtAovReady ||
+        !m_rtAovHitDistReconsReady ||
+        !m_rtAovHitDistReconsConfReady ||
+        !m_rtOutputReady)
+    {
+        return false;
+    }
+
+    auto* cmdList = cl.Get();
+
+    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+
+    CmdBeginEvent(cmdList, "RT Hit Distance Reconstruct");
+
+    cl.Transition(m_rtAovPrimaryHitDist.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovMotion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtHistoryHitDist[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtHistoryDepth[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtHistoryNormal[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovHitDistRecons.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(m_rtAovHitDistReconsConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.FlushBarriers();
+
+    const bool okTables =
+        UpdateRtHitDistReconstructTables(
+            frameIndex,
+            device);
+
+    if (!okTables)
+    {
+        CmdEndEvent(cmdList);
+        return false;
+    }
+
+    const D3D12_GPU_VIRTUAL_ADDRESS cb =
+        UpdateRtHitDistReconstructConstants(
+            frameIndex,
+            width,
+            height);
+
+    m_rtHitDistReconstructPass.Dispatch(
+        cl,
+        cb,
+        m_rtFrames[frameIndex].hitDistReconstructSrvTable.gpu,
+        m_rtFrames[frameIndex].hitDistReconstructUavTable.gpu,
+        width,
+        height);
+
+    D3D12_RESOURCE_BARRIER barriers[3]{};
+
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[0].UAV.pResource = m_rtAovHitDistRecons.Get();
+
+    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[1].UAV.pResource = m_rtAovHitDistReconsConf.Get();
+
+    barriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[2].UAV.pResource = m_rtOutput.Get();
+
+    cmdList->ResourceBarrier(3, barriers);
+
+    CmdEndEvent(cmdList);
+    return true;
+}
+
+void Renderer::CommitRtHitDistHistory(
+    CommandList& cl,
+    uint32_t writeIndex)
+{
+    if (writeIndex >= 2 ||
+        !m_rtAovHitDistRecons ||
+        !m_rtAovHitDistReconsConf ||
+        !m_rtHistoryHitDist[writeIndex] ||
+        !m_rtHistoryHitDistConf[writeIndex] ||
+        !m_rtAovHitDistReconsReady ||
+        !m_rtAovHitDistReconsConfReady)
+    {
+        m_rtHitDistHistoryValid = false;
+        return;
+    }
+
+    auto* cmdList = cl.Get();
+
+    cl.Transition(m_rtAovHitDistRecons.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cl.Transition(m_rtAovHitDistReconsConf.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cl.Transition(m_rtHistoryHitDist[writeIndex].Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+    cl.Transition(m_rtHistoryHitDistConf[writeIndex].Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+    cl.FlushBarriers();
+
+    cmdList->CopyResource(
+        m_rtHistoryHitDist[writeIndex].Get(),
+        m_rtAovHitDistRecons.Get());
+
+    cmdList->CopyResource(
+        m_rtHistoryHitDistConf[writeIndex].Get(),
+        m_rtAovHitDistReconsConf.Get());
+
+    cl.Transition(m_rtHistoryHitDist[writeIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtHistoryHitDistConf[writeIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.FlushBarriers();
+
+    m_rtHitDistHistoryValid = true;
 }

@@ -154,6 +154,7 @@
     <ClInclude Include="Source\Renderer\Passes\RtCombinePass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtDenoisePass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtHistorySelectPass.h" />
+    <ClInclude Include="Source\Renderer\Passes\RtHitDistReconstructPass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtMotionDilatePass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtTemporalPass.h" />
     <ClInclude Include="Source\Renderer\Passes\ShadowPass.h" />
@@ -196,6 +197,7 @@
     <ClCompile Include="Source\Renderer\Passes\RtCombinePass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtDenoisePass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtHistorySelectPass.cpp" />
+    <ClCompile Include="Source\Renderer\Passes\RtHitDistReconstructPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtMotionDilatePass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtTemporalPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\ShadowPass.cpp" />
@@ -411,6 +413,19 @@ else (
  dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtMotionDilate_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtMotionDilate_CS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtMotionDilate_CS.cso</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="Assets\Shaders\HLSL\RtHitDistReconstruct_CS.hlsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+
+if "$(Configuration)"=="Debug" (
+ dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtHitDistReconstruct_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtHitDistReconstruct_CS.hlsl"
+) else (
+ dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtHitDistReconstruct_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtHitDistReconstruct_CS.hlsl"
+)</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtHitDistReconstruct_CS.cso</Outputs>
     </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

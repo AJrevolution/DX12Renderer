@@ -26,6 +26,7 @@
 #include "Source/Renderer/Passes/RtHistorySelectPass.h"
 #include "Source/Renderer/Passes/RtCombinePass.h"
 #include "Source/Renderer/Passes/RtMotionDilatePass.h"
+#include "Source/Renderer/Passes/RtHitDistReconstructPass.h"
 
 class Renderer
 {
@@ -308,6 +309,24 @@ private:
         }
     };
 
+    struct RtHitDistReconstructConstants
+    {
+        DirectX::XMFLOAT2 invResolution{};
+        float alpha = 0.20f;
+        float depthSigma = 0.02f;
+
+        float normalSigma = 0.25f;
+        float roughnessSigma = 0.20f;
+        uint32_t historyValid = 0;
+        uint32_t debugView = 0;
+
+        uint32_t radius = 2;
+        float hitDistVisMax = 25.0f;
+        uint32_t pad0[2] = {};
+    };
+
+    static_assert((sizeof(RtHitDistReconstructConstants) % 16) == 0, "RtHitDistReconstructConstants must be 16-byte aligned.");
+
     static bool IsSplitDebug(uint32_t dv)
     {
         return dv >= 48 && dv <= 50;
@@ -326,6 +345,11 @@ private:
     static bool IsHitDistDebug(uint32_t dv)
     {
         return dv == 61 || dv == 62;
+    }
+
+    static bool IsHitDistReconstructDebug(uint32_t dv)
+    {
+        return dv == 63 || dv == 64;
     }
 
     std::vector<DrawItem> m_draws;
@@ -553,19 +577,41 @@ private:
 
     bool UpdateRtMotionDilateTables(
         uint32_t frameIndex,
-        ID3D12Device* device);
+        ID3D12Device* device,
+        bool useReconstructedHitDist);
 
     bool RunRtMotionDilate(
         CommandList& cl,
         uint32_t frameIndex,
         ID3D12Device* device,
         uint32_t width,
-        uint32_t height);
+        uint32_t height,
+        bool useReconstructedHitDist);
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtMotionDilateConstants(
         uint32_t frameIndex,
         uint32_t width,
         uint32_t height);
+
+    bool UpdateRtHitDistReconstructTables(
+        uint32_t frameIndex,
+        ID3D12Device* device);
+
+    bool RunRtHitDistReconstruct(
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height);
+
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHitDistReconstructConstants(
+        uint32_t frameIndex,
+        uint32_t width,
+        uint32_t height);
+
+    void CommitRtHitDistHistory(
+        CommandList& cl,
+        uint32_t writeIndex);
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -648,6 +694,12 @@ private:
     // The RT post stack must stay disabled.
     //   61 = primary hit distance visualization
     //   62 = invalid primary hit distance mask
+    // 
+    // Hit-distance reconstruction / compute-owned producer views:
+    // These are produced by RtHitDistReconstructPass.
+    // The RT post stack must stay disabled, but the reconstruct pass still runs explicitly.
+    //   63 = reconstructed primary hit distance visualization
+    //   64 = reconstructed primary hit-distance confidence
     // 
     // Future rule:
     //   Do not use broad contiguous checks such as 32..47.
@@ -811,6 +863,11 @@ private:
         uint32_t motionDilateSrvCount = 0;
 
         uint32_t capacity = 0;
+
+        DescriptorAllocator::Allocation hitDistReconstructSrvTable{}; // kRtHitDistReconstructSrvCount SRVs
+        DescriptorAllocator::Allocation hitDistReconstructUavTable{}; // kRtHitDistReconstructUavCount UAVs
+        uint32_t hitDistReconstructSrvCount = 0;
+        uint32_t hitDistReconstructUavCount = 0;
     };
 
     
@@ -1052,6 +1109,8 @@ private:
     static constexpr uint32_t kRtSvgfSrvCount = 5;
     static constexpr uint32_t kRtDenoiseSrvCount = 4;
     static constexpr uint32_t kRtMotionDilateSrvCount = 4;
+    static constexpr uint32_t kRtHitDistReconstructSrvCount = 7;
+    static constexpr uint32_t kRtHitDistReconstructUavCount = 3;
 
     RtMotionDilatePass m_rtMotionDilatePass;
     static constexpr uint32_t kMaxRtMotionDilateRadius = 4;
@@ -1060,6 +1119,21 @@ private:
     float m_rtMotionDilateNormalSigma = 0.25f;
     float m_rtMotionDilateMinScore = 0.05f;
 
+    RtHitDistReconstructPass m_rtHitDistReconstructPass;
+
+    ComPtr<ID3D12Resource> m_rtAovHitDistRecons;
+    ComPtr<ID3D12Resource> m_rtAovHitDistReconsConf;
+    bool m_rtAovHitDistReconsReady = false;
+    bool m_rtAovHitDistReconsConfReady = false;
+
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryHitDist{};
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryHitDistConf{};
+    bool m_rtHitDistHistoryValid = false;
+
+    float m_rtHitDistReconsAlpha = 0.20f;
+    float m_prevRtHitDistReconsAlpha = 0.20f;
+
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };
+
  
