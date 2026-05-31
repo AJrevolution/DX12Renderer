@@ -75,6 +75,8 @@ static const uint RT_RAY_PRIMARY_SPECULAR = 3u;
 static const float RT_HIT_DIST_INVALID = -1.0f;
 static const float RT_PRIMARY_HIT_DIST_VIS_MAX = 25.0f;
 static const uint RT_SURFACE_ID_INVALID = 0xFFFFFFFFu;
+static const float RT_ALBEDO_STABLE_MIN = 0.03f;
+static const float RT_ALBEDO_STABLE_MAX = 0.97f;
 
 struct RayPayload
 {
@@ -102,7 +104,8 @@ RWTexture2D<float4>                 g_AovNormal : register(u3);
 RWTexture2D<float>                  g_AovDepth : register(u4);
 RWTexture2D<float2>                 g_AovMotion : register(u5);         // prevUV, (-1,-1) invalid
 RWTexture2D<float>                  g_AovPrimaryHitDist : register(u6); // primary visible-surface RayT, -1 invalid
-RWTexture2D<uint>                   g_AovSurfaceId : register(u7); // object/material id, 0xFFFFFFFF invalid
+RWTexture2D<uint>                   g_AovSurfaceId : register(u7);      // object/material id, 0xFFFFFFFF invalid
+RWTexture2D<float4>                 g_AovDiffuseAlbedo : register(u8);  // rgb=diffuse albedo, a=1
 StructuredBuffer<VertexRT>          g_QuadVerts : register(t1);
 ByteAddressBuffer                   g_QuadIndices : register(t2);
 StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);
@@ -544,6 +547,15 @@ float SurfaceIdToGray(uint id)
     return lerp(0.12f, 1.0f, u);
 }
 
+bool DiffuseAlbedoStable(float3 albedo)
+{
+    float minA = min(albedo.r, min(albedo.g, albedo.b));
+    float maxA = max(albedo.r, max(albedo.g, albedo.b));
+
+    return minA > RT_ALBEDO_STABLE_MIN &&
+           maxA < RT_ALBEDO_STABLE_MAX;
+}
+
 // RT IBL parity target:
 // - same latlong UV mapping convention as raster
 // - same BRDF LUT usage
@@ -573,15 +585,21 @@ void RayGen()
         DebugView == 65 ||
         DebugView == 66;
     
+    bool isDiffuseAlbedoDebug =
+        DebugView == 67 ||
+        DebugView == 68;
+    
     bool bypassAccum = 
         (RtAccumulate == 0) ||
         isRtShadingDebug ||
         isMotionDebug ||
         isHitDistDebug ||
-        isSurfaceIdDebug;
+        isSurfaceIdDebug ||
+        isDiffuseAlbedoDebug;
     
     g_AovPrimaryHitDist[pixel] = RT_HIT_DIST_INVALID;
     g_AovSurfaceId[pixel] = RT_SURFACE_ID_INVALID;
+    g_AovDiffuseAlbedo[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
     
     uint rng = InitRng(pixel, RtSampleIndex, RtResetId);
 
@@ -726,6 +744,22 @@ void RayGen()
         return;
     }
     
+    if (DebugView == 67)
+    {
+        float3 albedo = saturate(g_AovDiffuseAlbedo[pixel].rgb);
+        g_Output[pixel] = float4(LinearToSRGB(albedo), 1.0f);
+        return;
+    }
+
+    if (DebugView == 68)
+    {
+        float4 albedoSample = g_AovDiffuseAlbedo[pixel];
+        float v = albedoSample.a > 0.5f ? 0.0f : 1.0f;
+
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+        return;
+    }
+    
     if (isRtShadingDebug)
     {
         float3 sampleColor = diffPayload.color;
@@ -838,6 +872,7 @@ void Miss(inout RayPayload payload)
         g_AovMotion[pixel] = float2(-1.0f, -1.0f);
         g_AovPrimaryHitDist[pixel] = RT_HIT_DIST_INVALID;
         g_AovSurfaceId[pixel] = RT_SURFACE_ID_INVALID;
+        g_AovDiffuseAlbedo[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
         
         payload.color = sky;
         return;
@@ -936,6 +971,11 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         // Primary visible-surface hit distance guide.
         // Used by motion dilation/confidence for glossy visible-specular stability.
         g_AovPrimaryHitDist[pixel] = RayTCurrent();
+        
+        float3 diffuseAlbedo = saturate(base * (1.0f - saturate(metallic)));
+        float stableAlbedo = DiffuseAlbedoStable(diffuseAlbedo) ? 1.0f : 0.0f;
+
+        g_AovDiffuseAlbedo[pixel] = float4(diffuseAlbedo, stableAlbedo);
     }
     
     if (payload.rayType == RT_RAY_INDIRECT)

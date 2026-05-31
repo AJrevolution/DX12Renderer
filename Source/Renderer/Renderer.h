@@ -27,6 +27,7 @@
 #include "Source/Renderer/Passes/RtCombinePass.h"
 #include "Source/Renderer/Passes/RtMotionDilatePass.h"
 #include "Source/Renderer/Passes/RtHitDistReconstructPass.h"
+#include "Source/Renderer/Passes/RtDiffuseDemodulatePass.h"
 
 class Renderer
 {
@@ -324,8 +325,21 @@ private:
         float hitDistVisMax = 25.0f;
         uint32_t pad0[2] = {};
     };
-
     static_assert((sizeof(RtHitDistReconstructConstants) % 16) == 0, "RtHitDistReconstructConstants must be 16-byte aligned.");
+
+    struct RtDiffuseDemodulateConstants
+    {
+        uint32_t debugView = 0;
+        uint32_t pad0[3] = {};
+    };
+    static_assert((sizeof(RtDiffuseDemodulateConstants) % 16) == 0, "RtDiffuseDemodulateConstants must be 16-byte aligned.");
+
+    struct RtCombineConstants
+    {
+        uint32_t diffuseIsDemodulated = 0;
+        uint32_t pad0[3] = {};
+    };
+    static_assert((sizeof(RtCombineConstants) % 16) == 0, "RtCombineConstants must be 16-byte aligned.");
 
     static bool IsSplitDebug(uint32_t dv)
     {
@@ -355,6 +369,16 @@ private:
     static bool IsSurfaceIdDebug(uint32_t dv)
     {
         return dv == 65 || dv == 66;
+    }
+
+    static bool IsDiffuseAlbedoDebug(uint32_t dv)
+    {
+        return dv == 67 || dv == 68;
+    }
+
+    static bool IsDiffuseDemodulateDebug(uint32_t dv)
+    {
+        return dv == 69 || dv == 70;
     }
 
     std::vector<DrawItem> m_draws;
@@ -512,7 +536,8 @@ private:
         ID3D12Resource* specularResource,
         uint32_t width,
         uint32_t height,
-        const char* markerName);
+        const char* markerName,
+        bool diffuseIsDemodulated);
 
     bool RunRtRawCombineOnly(
         ID3D12Device* device,
@@ -618,6 +643,24 @@ private:
         CommandList& cl,
         uint32_t writeIndex);
 
+    bool UpdateRtDiffuseDemodulateTables(
+        uint32_t frameIndex,
+        ID3D12Device* device);
+
+    bool RunRtDiffuseDemodulate(
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height);
+
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtDiffuseDemodulateConstants(
+        uint32_t frameIndex);
+
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtCombineConstants(
+        uint32_t frameIndex,
+        bool diffuseIsDemodulated);
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -712,6 +755,18 @@ private:
     //   65 = surfaceId visualization
     //   66 = invalid surfaceId mask
     // 
+    // Diffuse albedo / RayGen-owned views:
+    // These write directly to m_rtOutput from RayGen.
+    // The RT post stack must stay disabled.
+    //   67 = diffuse albedo visualization
+    //   68 = invalid/near-zero diffuse albedo mask
+    //
+    // Diffuse demodulation / compute-owned producer views:
+    // These are produced by RtDiffuseDemodulatePass.
+    // The RT post stack must stay disabled, but the demodulate pass still runs explicitly.
+    //   69 = demodulated diffuse lighting visualization
+    //   70 = demodulation instability mask
+    // 
     // Future rule:
     //   Do not use broad contiguous checks such as 32..47.
     //   Always route by the owning pass namespace.
@@ -736,8 +791,8 @@ private:
     uint32_t m_debugView = 0;
     bool  m_autoOrbit = true;
     bool m_pauseAnimation = false;
-    bool m_useRaytracing = false;        // Toggle for raytracing vs rasterization (for testing/debugging)
-    bool m_rtAccumulate = false;         // validation / progressive mode
+    bool m_useRaytracing = true;        // Toggle for raytracing vs rasterization (for testing/debugging)
+    bool m_rtAccumulate = true;         // validation / progressive mode
     bool m_rtSvgf = true;
     bool  m_rtDenoise = true;
 
@@ -858,9 +913,10 @@ private:
         uint32_t historySelectUavCount = 0;
         DescriptorAllocator::Allocation denoiseDiffuseSrvTable{}; // kRtDenoiseSrvCount SRVs
         DescriptorAllocator::Allocation denoiseSpecSrvTable{};    // kRtDenoiseSrvCount SRVs
-        DescriptorAllocator::Allocation combineSrvTable{};             // 2 SRVs
+        DescriptorAllocator::Allocation combineSrvTable{};        // kRtCombineSrvCount SRVs
         uint32_t denoiseDiffuseSrvCount = 0;
         uint32_t denoiseSpecSrvCount = 0;
+        uint32_t combineSrvCount = 0;
 
         // Per-frame, per-iteration SVGF input tables.
         std::array<DescriptorAllocator::Allocation, kMaxRtAtrousIterations> svgfSpecSrvTables{};
@@ -879,6 +935,11 @@ private:
         DescriptorAllocator::Allocation hitDistReconstructUavTable{}; // kRtHitDistReconstructUavCount UAVs
         uint32_t hitDistReconstructSrvCount = 0;
         uint32_t hitDistReconstructUavCount = 0;
+
+        DescriptorAllocator::Allocation diffuseDemodSrvTable{}; // kRtDiffuseDemodSrvCount SRVs
+        DescriptorAllocator::Allocation diffuseDemodUavTable{}; // kRtDiffuseDemodUavCount UAVs
+        uint32_t diffuseDemodSrvCount = 0;
+        uint32_t diffuseDemodUavCount = 0;
     };
 
     
@@ -898,6 +959,7 @@ private:
     // u5 = m_rtAovMotion       R16G16_FLOAT prevUV, (-1,-1) invalid
     // u6 = m_rtAovPrimaryHitDist  R16_FLOAT visible-surface RayT, -1 invalid
     // u7 = m_rtAovSurfaceId    R32_UINT object/material id, 0xFFFFFFFF invalid
+    // u8 = m_rtAovDiffuseAlbedo R16G16B16A16_FLOAT rgb=diffuse albedo, a=stable demod flag
     DescriptorAllocator::Allocation m_rtOutputUav{};
     uint32_t m_rtOutputWidth = 0;
     uint32_t m_rtOutputHeight = 0;
@@ -1118,7 +1180,7 @@ private:
     uint32_t m_rtAtrousIterationsSpec = 1;
     uint32_t m_prevRtAtrousIterationsSpec = 1;
 
-    static constexpr uint32_t kRtUavTableCount = 8;
+    static constexpr uint32_t kRtUavTableCount = 9;
     static constexpr uint32_t kRtHistorySelectSrvCount = 7;
     static constexpr uint32_t kRtHistorySelectUavCount = 3;
     static constexpr uint32_t kRtSvgfSrvCount = 5;
@@ -1126,6 +1188,12 @@ private:
     static constexpr uint32_t kRtMotionDilateSrvCount = 5;
     static constexpr uint32_t kRtHitDistReconstructSrvCount = 8;
     static constexpr uint32_t kRtHitDistReconstructUavCount = 3;
+    static constexpr uint32_t kRtDiffuseDemodSrvCount = 3;
+    static constexpr uint32_t kRtDiffuseDemodUavCount = 2;
+    static constexpr uint32_t kRtCombineSrvCount = 3;
+
+    RtDiffuseDemodulatePass m_rtDiffuseDemodulatePass;
+
 
     RtMotionDilatePass m_rtMotionDilatePass;
     static constexpr uint32_t kMaxRtMotionDilateRadius = 4;
@@ -1147,6 +1215,12 @@ private:
 
     float m_rtHitDistReconsAlpha = 0.20f;
     float m_prevRtHitDistReconsAlpha = 0.20f;
+
+    ComPtr<ID3D12Resource> m_rtAovDiffuseAlbedo;
+    bool m_rtAovDiffuseAlbedoReady = false;
+
+    ComPtr<ID3D12Resource> m_rtDiffuseDemodulated;
+    bool m_rtDiffuseDemodulatedReady = false;
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

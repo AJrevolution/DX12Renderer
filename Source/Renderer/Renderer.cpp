@@ -180,10 +180,16 @@ bool Renderer::CombineRtSignalsToOutput(
     ID3D12Resource* specularResource,
     uint32_t width,
     uint32_t height,
-    const char* markerName)
+    const char* markerName,
+    bool diffuseIsDemodulated)
 {
-    if (!m_rtOutputReady || diffuseResource == nullptr || specularResource == nullptr)
+    if (!m_rtOutputReady ||
+        !m_rtAovDiffuseAlbedoReady ||
+        diffuseResource == nullptr ||
+        specularResource == nullptr)
+    {
         return false;
+    }
 
     auto* cmdList = cl.Get();
 
@@ -194,6 +200,7 @@ bool Renderer::CombineRtSignalsToOutput(
 
     cl.Transition(diffuseResource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(specularResource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovDiffuseAlbedo.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.FlushBarriers();
 
@@ -210,8 +217,14 @@ bool Renderer::CombineRtSignalsToOutput(
         return false;
     }
 
+    const D3D12_GPU_VIRTUAL_ADDRESS cb =
+        UpdateRtCombineConstants(
+            frameIndex,
+            diffuseIsDemodulated);
+
     m_rtCombinePass.Dispatch(
         cl,
+        cb,
         m_rtFrames[frameIndex].combineSrvTable.gpu,
         m_rtOutputUav.gpu,
         width,
@@ -244,7 +257,8 @@ bool Renderer::RunRtRawCombineOnly(
         m_rtAccumSpec.Get(),
         width,
         height,
-        "RT Raw Combine Only");
+        "RT Raw Combine Only",
+        false);
 }
 
 bool Renderer::RunRtTemporalOnlyCombine(
@@ -264,7 +278,8 @@ bool Renderer::RunRtTemporalOnlyCombine(
         specStableSignal,
         width,
         height,
-        "RT Temporal Only Combine");
+        "RT Temporal Only Combine",
+        true);
 }
 
 bool Renderer::RunRtHistorySelectOnlyCombine(
@@ -284,7 +299,8 @@ bool Renderer::RunRtHistorySelectOnlyCombine(
         specSelectedSignal,
         width,
         height,
-        "RT History Select Only Combine");
+        "RT History Select Only Combine",
+        true);
 }
 
 bool Renderer::RunRtSpecAtrousOnlyCombine(
@@ -303,7 +319,8 @@ bool Renderer::RunRtSpecAtrousOnlyCombine(
         m_rtPostSpec.Get(),
         width,
         height,
-        "RT Spec A-Trous Only Combine");
+        "RT Spec A-Trous Only Combine",
+        true);
 }
 
 bool Renderer::RunRtDiffuseAtrousOnlyCombine(
@@ -322,7 +339,8 @@ bool Renderer::RunRtDiffuseAtrousOnlyCombine(
         specStableSignal,
         width,
         height,
-        "RT Diffuse A-Trous Only Combine");
+        "RT Diffuse A-Trous Only Combine",
+        true);
 }
 
 bool Renderer::RunRtFinalCombine(
@@ -340,7 +358,8 @@ bool Renderer::RunRtFinalCombine(
         m_rtPostSpec.Get(),
         width,
         height,
-        "RT Combine");
+        "RT Combine",
+        true);
 }
 
 void Renderer::RenderFrame(
@@ -390,6 +409,8 @@ void Renderer::RenderFrame(
     const bool wantsMotionDilateDebug = IsMotionDilateDebug(m_debugView);
     const bool wantsHitDistDebug = IsHitDistDebug(m_debugView);
     const bool wantsSurfaceIdDebug = IsSurfaceIdDebug(m_debugView);
+    const bool wantsDiffuseAlbedoDebug = IsDiffuseAlbedoDebug(m_debugView);
+    const bool wantsDiffuseDemodDebug = IsDiffuseDemodulateDebug(m_debugView);
 
     const bool wantsRtPostDebug =
         wantsTemporalDebug ||
@@ -406,7 +427,9 @@ void Renderer::RenderFrame(
         wantsMotionDilateDebug ||
         wantsHitDistDebug ||
         wantsHitDistReconstructDebug ||
-        wantsSurfaceIdDebug;
+        wantsSurfaceIdDebug ||
+        wantsDiffuseAlbedoDebug ||
+        wantsDiffuseDemodDebug;
 
     // Producer-owned diagnostics write directly to m_rtOutput.
     // Keep the post stack disabled so later temporal/SVGF/combine passes cannot overwrite them.
@@ -416,7 +439,9 @@ void Renderer::RenderFrame(
         wantsMotionDilateDebug ||
         wantsHitDistDebug ||
         wantsHitDistReconstructDebug ||
-        wantsSurfaceIdDebug;
+        wantsSurfaceIdDebug ||
+        wantsDiffuseAlbedoDebug ||
+        wantsDiffuseDemodDebug;
 
     const bool enableRtPostStack =
         m_rtEnablePostStack &&
@@ -442,6 +467,8 @@ void Renderer::RenderFrame(
     const bool allowRtAccumulation =
         m_rtAccumulate &&
         !wantsMotionDilateDebug &&
+        !wantsHitDistReconstructDebug &&
+        !wantsDiffuseDemodDebug &&
         ((m_debugView == 0) || wantsRtInspectionDebug) &&
         (
             m_rtTemporal ||
@@ -449,7 +476,8 @@ void Renderer::RenderFrame(
             wantsSplitDebug ||
             wantsMotionDebug ||
             wantsHitDistDebug ||
-            wantsSurfaceIdDebug
+            wantsSurfaceIdDebug ||
+            wantsDiffuseAlbedoDebug
         );
 
     bool drawListStructuralChanged =
@@ -602,7 +630,9 @@ void Renderer::RenderFrame(
     // RayGen receives this through PerFrameConstants::rtAccumulate.
     m_rtAccumulateThisFrame = allowRtAccumulation;
 
-    if (wantsMotionDilateDebug || wantsHitDistReconstructDebug)
+    if (wantsMotionDilateDebug ||
+        wantsHitDistReconstructDebug ||
+        wantsDiffuseDemodDebug)
     {
         // Debug 54 is produced by RtMotionDilatePass.
         // DXR still runs to author raw motion/depth/normal guides, but it must not
@@ -825,7 +855,26 @@ void Renderer::RenderFrame(
             m_rtAovMotionDilatedReady &&
             m_rtAovPrimaryHitDistReady &&
             m_rtAovSurfaceIdReady &&
+            m_rtAovDiffuseAlbedoReady &&
+            m_rtDiffuseDemodulatedReady &&
             m_rtAovMotionConfReady;
+
+        const bool postNeedsDemodulatedDiffuse =
+            rtPostMode != RtPostMode::Disabled &&
+            rtPostMode != RtPostMode::RawCombineOnly;
+
+        const bool shouldRunDiffuseDemodulate =
+            postNeedsDemodulatedDiffuse ||
+            wantsDiffuseDemodDebug;
+
+        const bool ranDiffuseDemodulate =
+            shouldRunDiffuseDemodulate &&
+            RunRtDiffuseDemodulate(
+                cl,
+                frameIndex,
+                device,
+                width,
+                height);
 
         const bool shouldRunHitDistReconstruct =
             temporalWouldRun ||
@@ -869,7 +918,9 @@ void Renderer::RenderFrame(
 
         const uint32_t writeIndex = 1u - m_rtHistoryReadIndex;
 
-        if (temporalWouldRun && ranMotionDilate)
+        if (temporalWouldRun && 
+            ranMotionDilate &&
+            ranDiffuseDemodulate)
         {
             CmdBeginEvent(cmdList, "RT Temporal");
 
@@ -904,7 +955,7 @@ void Renderer::RenderFrame(
             const bool okDiffuse = UpdateRtTemporalTables(
                 frameIndex,
                 device,
-                m_rtAccumDiffuse.Get(),
+                m_rtDiffuseDemodulated.Get(), 
                 m_rtHistoryAccum[m_rtHistoryReadIndex].Get(),
                 m_rtHistoryMoments[m_rtHistoryReadIndex].Get(),
                 m_rtHistoryAccum[writeIndex].Get(),
@@ -1155,6 +1206,8 @@ void Renderer::RenderFrame(
             (m_debugView == 0 || wantsSpatialDebug) &&
             (m_rtAccumulateThisFrame || wantsSpatialDebug) &&
             m_rtAovReady &&
+            m_rtAovDiffuseAlbedoReady &&
+            m_rtDiffuseDemodulatedReady &&
             (!spatialStageNeedsMotionConf || m_rtAovMotionConfReady) &&
             m_rtPostReady &&
             (m_rtSvgf || m_rtDenoise);
@@ -1303,7 +1356,7 @@ void Renderer::RenderFrame(
                         
                         ID3D12Resource* svgfSignal = advancedSplitHistory
                             ? rtSignals.diffuse.signal
-                            : m_rtAccumDiffuse.Get();
+                            : m_rtDiffuseDemodulated.Get();
 
                         ID3D12Resource* svgfMoments = advancedSplitHistory
                             ? rtSignals.diffuse.moments
@@ -1394,7 +1447,7 @@ void Renderer::RenderFrame(
                                 frameIndex,
                                 device,
                                 "RT Denoise Diffuse",
-                                advancedSplitHistory ? rtSignals.diffuse.signal : m_rtAccumDiffuse.Get(),
+                                advancedSplitHistory ? rtSignals.diffuse.signal : m_rtDiffuseDemodulated.Get(),
                                 m_rtFrames[frameIndex].denoiseDiffuseSrvTable,
                                 m_rtFrames[frameIndex].denoiseDiffuseSrvCount,
                                 m_rtPostDiffuse.Get(),
@@ -1439,7 +1492,8 @@ void Renderer::RenderFrame(
                 rtSignals.FinalSpecSignal(),
                 width,
                 height,
-                "RT Spec Spatial Only Combine");
+                "RT Spec Spatial Only Combine",
+                true);
         }
         else if (rtPostMode == RtPostMode::DiffuseAtrousOnly &&
             !wantsAtrousOutputDebug &&
@@ -1454,7 +1508,8 @@ void Renderer::RenderFrame(
                 rtSignals.specSelected.signal,
                 width,
                 height,
-                "RT Diffuse Spatial Only Combine");
+                "RT Diffuse Spatial Only Combine",
+                true);
         }
         else if (rtPostMode == RtPostMode::Full &&
             allowFullModeFinalCombine &&
@@ -1469,7 +1524,8 @@ void Renderer::RenderFrame(
                 rtSignals.FinalSpecSignal(),
                 width,
                 height,
-                "RT Combine");
+                "RT Combine",
+                true);
         }
         
         if (RtPostModeCommitsHistory(rtPostMode) &&
@@ -1521,6 +1577,13 @@ void Renderer::RenderFrame(
         cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovPrimaryHitDist.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovSurfaceId.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl.Transition(m_rtAovDiffuseAlbedo.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        
+        if (m_rtDiffuseDemodulatedReady)
+        {
+            cl.Transition(m_rtDiffuseDemodulated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
+
         if (m_rtAovHitDistReconsReady)
         {
             cl.Transition(m_rtAovHitDistRecons.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1726,6 +1789,8 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_rtAovHitDistReconsConfReady = false;
     m_rtHitDistHistoryValid = false;
     m_rtAovSurfaceIdReady = false;
+    m_rtAovDiffuseAlbedoReady = false;
+    m_rtDiffuseDemodulatedReady = false;
 
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
@@ -1928,6 +1993,7 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         m_rtHistorySelectPass.Initialize(device, Paths::ShaderDir());
         m_rtCombinePass.Initialize(device, Paths::ShaderDir());
         m_rtHitDistReconstructPass.Initialize(device, Paths::ShaderDir());
+        m_rtDiffuseDemodulatePass.Initialize(device, Paths::ShaderDir());
     }
 
     // Load a real texture from disk 
@@ -2544,6 +2610,10 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         !m_rtHistoryHitDistConf[1] ||
         !m_rtAovSurfaceId ||
         !m_rtAovSurfaceIdReady ||
+        !m_rtAovDiffuseAlbedo ||
+        !m_rtAovDiffuseAlbedoReady ||
+        !m_rtDiffuseDemodulated ||
+        !m_rtDiffuseDemodulatedReady ||
         (m_rtOutputHeight != height);
 
     if (sizeMismatch)
@@ -3043,6 +3113,11 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
     m_rtAovHitDistReconsConf.Reset();
     m_rtAovSurfaceIdReady = false;
     m_rtAovSurfaceId.Reset();
+    m_rtAovDiffuseAlbedoReady = false;
+    m_rtAovDiffuseAlbedo.Reset();
+
+    m_rtDiffuseDemodulatedReady = false;
+    m_rtDiffuseDemodulated.Reset();
 
     if (!m_rtOutputUav.IsValid())
         m_rtOutputUav = m_srvHeap.Allocate(kRtUavTableCount);
@@ -3287,6 +3362,76 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
             RtUavCpuAt(7));
     }
 
+    {
+        auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&m_rtAovDiffuseAlbedo)),
+            "Create RT AOV diffuse albedo");
+
+        SetD3D12ObjectName(
+            m_rtAovDiffuseAlbedo.Get(),
+            L"RT AOV Diffuse Albedo");
+
+        CommandList::SetGlobalState(
+            m_rtAovDiffuseAlbedo.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            m_rtAovDiffuseAlbedo.Get(),
+            nullptr,
+            &uav,
+            RtUavCpuAt(8));
+    }
+
+    {
+        auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&m_rtDiffuseDemodulated)),
+            "Create RT diffuse demodulated");
+
+        SetD3D12ObjectName(
+            m_rtDiffuseDemodulated.Get(),
+            L"RT Diffuse Demodulated Lighting");
+
+        CommandList::SetGlobalState(
+            m_rtDiffuseDemodulated.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
     auto CreateR16UavTexture = [&](ComPtr<ID3D12Resource>& resource, const wchar_t* name)
     {
         auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
@@ -3324,6 +3469,8 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
         m_rtAovHitDistReconsConf,
         L"RT AOV Hit Distance Reconstructed Confidence");
 
+    m_rtAovDiffuseAlbedoReady = true;
+    m_rtDiffuseDemodulatedReady = true;
     m_rtAovSurfaceIdReady = true;
     m_rtAovHitDistReconsReady = true;
     m_rtAovHitDistReconsConfReady = true;
@@ -3845,39 +3992,56 @@ bool Renderer::UpdateRtCombineSrvTable(uint32_t frameIndex, ID3D12Device* device
     ID3D12Resource* diffuseResource,
     ID3D12Resource* specularResource)
 {
-    if (!device || !diffuseResource || !specularResource)
+    if (!device ||
+        !diffuseResource ||
+        !specularResource ||
+        !m_rtAovDiffuseAlbedo ||
+        !m_rtAovDiffuseAlbedoReady)
+    {
         return false;
+    }
 
-    auto& table = m_rtFrames[frameIndex].combineSrvTable;
+    auto& frame = m_rtFrames[frameIndex];
 
-    if (!table.IsValid())
-        table = m_srvHeap.Allocate(2);
+    if (!frame.combineSrvTable.IsValid() ||
+        frame.combineSrvCount != kRtCombineSrvCount)
+    {
+        frame.combineSrvTable = m_srvHeap.Allocate(kRtCombineSrvCount);
+        frame.combineSrvCount = kRtCombineSrvCount;
+    }
 
     const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
 
-    auto CombineCpuHandle = [&](uint32_t slot)
+    auto SrvAt = [&](uint32_t slot)
     {
-        D3D12_CPU_DESCRIPTOR_HANDLE h = table.cpu;
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.combineSrvTable.cpu;
         h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
         return h;
     };
 
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv.Texture2D.MipLevels = 1;
-    srv.Texture2D.MostDetailedMip = 0;
+    auto WriteRgba16Srv = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
 
-    device->CreateShaderResourceView(
-        diffuseResource,
-        &srv,
-        CombineCpuHandle(0));
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
 
-    device->CreateShaderResourceView(
-        specularResource,
-        &srv,
-        CombineCpuHandle(1));
+    // t0 = diffuse lighting/radiance
+    WriteRgba16Srv(diffuseResource, 0);
+
+    // t1 = spec radiance
+    WriteRgba16Srv(specularResource, 1);
+
+    // t2 = diffuse albedo
+    WriteRgba16Srv(m_rtAovDiffuseAlbedo.Get(), 2);
 
     return true;
 }
@@ -5287,4 +5451,225 @@ void Renderer::CommitRtHitDistHistory(
     cl.FlushBarriers();
 
     m_rtHitDistHistoryValid = true;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtDiffuseDemodulateConstants(
+    uint32_t frameIndex)
+{
+    auto alloc = m_upload.Allocate(
+        frameIndex,
+        sizeof(RtDiffuseDemodulateConstants),
+        256);
+
+    auto* cb = reinterpret_cast<RtDiffuseDemodulateConstants*>(alloc.cpu);
+    *cb = {};
+    cb->debugView = m_debugView;
+
+    return alloc.gpu;
+}
+
+bool Renderer::UpdateRtDiffuseDemodulateTables(
+    uint32_t frameIndex,
+    ID3D12Device* device)
+{
+    if (!device ||
+        !m_rtAccumDiffuse ||
+        !m_rtAovDiffuseAlbedo ||
+        !m_rtAovDepth ||
+        !m_rtDiffuseDemodulated ||
+        !m_rtOutput ||
+        !m_rtAccumDiffuseReady ||
+        !m_rtAovDiffuseAlbedoReady ||
+        !m_rtAovReady ||
+        !m_rtDiffuseDemodulatedReady ||
+        !m_rtOutputReady)
+    {
+        return false;
+    }
+
+    auto& frame = m_rtFrames[frameIndex];
+
+    if (!frame.diffuseDemodSrvTable.IsValid() ||
+        frame.diffuseDemodSrvCount != kRtDiffuseDemodSrvCount)
+    {
+        frame.diffuseDemodSrvTable =
+            m_srvHeap.Allocate(kRtDiffuseDemodSrvCount);
+        frame.diffuseDemodSrvCount = kRtDiffuseDemodSrvCount;
+    }
+
+    if (!frame.diffuseDemodUavTable.IsValid() ||
+        frame.diffuseDemodUavCount != kRtDiffuseDemodUavCount)
+    {
+        frame.diffuseDemodUavTable =
+            m_srvHeap.Allocate(kRtDiffuseDemodUavCount);
+        frame.diffuseDemodUavCount = kRtDiffuseDemodUavCount;
+    }
+
+    const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
+
+    auto SrvAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.diffuseDemodSrvTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    auto UavAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.diffuseDemodUavTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    auto WriteRgba16Srv = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
+
+    // t0 = diffuse radiance
+    WriteRgba16Srv(m_rtAccumDiffuse.Get(), 0);
+
+    // t1 = diffuse albedo
+    WriteRgba16Srv(m_rtAovDiffuseAlbedo.Get(), 1);
+
+    // t2 = depth
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            m_rtAovDepth.Get(),
+            &srv,
+            SrvAt(2));
+    }
+
+    // u0 = demodulated diffuse lighting
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            m_rtDiffuseDemodulated.Get(),
+            nullptr,
+            &uav,
+            UavAt(0));
+    }
+
+    // u1 = debug/display output
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            m_rtOutput.Get(),
+            nullptr,
+            &uav,
+            UavAt(1));
+    }
+
+    return true;
+}
+
+bool Renderer::RunRtDiffuseDemodulate(
+    CommandList& cl,
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height)
+{
+    if (!device ||
+        !m_rtAccumDiffuse ||
+        !m_rtAovDiffuseAlbedo ||
+        !m_rtAovDepth ||
+        !m_rtDiffuseDemodulated ||
+        !m_rtOutput ||
+        !m_rtAccumDiffuseReady ||
+        !m_rtAovDiffuseAlbedoReady ||
+        !m_rtAovReady ||
+        !m_rtDiffuseDemodulatedReady ||
+        !m_rtOutputReady)
+    {
+        return false;
+    }
+
+    auto* cmdList = cl.Get();
+
+    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+
+    CmdBeginEvent(cmdList, "RT Diffuse Demodulate");
+
+    cl.Transition(m_rtAccumDiffuse.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovDiffuseAlbedo.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtDiffuseDemodulated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.FlushBarriers();
+
+    const bool okTables =
+        UpdateRtDiffuseDemodulateTables(
+            frameIndex,
+            device);
+
+    if (!okTables)
+    {
+        CmdEndEvent(cmdList);
+        return false;
+    }
+
+    const D3D12_GPU_VIRTUAL_ADDRESS cb =
+        UpdateRtDiffuseDemodulateConstants(frameIndex);
+
+    m_rtDiffuseDemodulatePass.Dispatch(
+        cl,
+        cb,
+        m_rtFrames[frameIndex].diffuseDemodSrvTable.gpu,
+        m_rtFrames[frameIndex].diffuseDemodUavTable.gpu,
+        width,
+        height);
+
+    D3D12_RESOURCE_BARRIER barriers[2]{};
+
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[0].UAV.pResource = m_rtDiffuseDemodulated.Get();
+
+    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[1].UAV.pResource = m_rtOutput.Get();
+
+    cmdList->ResourceBarrier(2, barriers);
+
+    CmdEndEvent(cmdList);
+    return true;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtCombineConstants(
+    uint32_t frameIndex,
+    bool diffuseIsDemodulated)
+{
+    auto alloc = m_upload.Allocate(
+        frameIndex,
+        sizeof(RtCombineConstants),
+        256);
+
+    auto* cb = reinterpret_cast<RtCombineConstants*>(alloc.cpu);
+    *cb = {};
+    cb->diffuseIsDemodulated = diffuseIsDemodulated ? 1u : 0u;
+
+    return alloc.gpu;
 }

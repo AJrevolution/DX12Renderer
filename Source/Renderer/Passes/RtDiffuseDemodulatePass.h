@@ -1,10 +1,10 @@
 #pragma once
-
 #include <filesystem>
 #include "Common.h"
 #include "Source/RHI/CommandList/CommandList.h"
+#include "ThirdParty/DirectX-Headers/include/directx/d3dx12.h"
 
-class RtCombinePass
+class RtDiffuseDemodulatePass
 {
 public:
     void Initialize(ID3D12Device* device, const std::filesystem::path& shaderDir);

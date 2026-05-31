@@ -1,6 +1,9 @@
-#include "RtCombinePass.h"
-#include "ThirdParty/DirectX-Headers/include/directx/d3dx12.h"
+#include "RtDiffuseDemodulatePass.h"
+
 #include <fstream>
+#include <iterator>
+#include <stdexcept>
+#include <vector>
 
 namespace
 {
@@ -8,24 +11,34 @@ namespace
     {
         std::ifstream in(path, std::ios::binary);
         if (!in)
-            throw std::runtime_error("Failed to open RT combine shader.");
-        return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
+            throw std::runtime_error("Failed to open RT diffuse demodulate shader.");
+
+        return std::vector<uint8_t>(
+            std::istreambuf_iterator<char>(in),
+            std::istreambuf_iterator<char>());
     }
 }
 
-void RtCombinePass::Initialize(ID3D12Device* device, const std::filesystem::path& shaderDir)
+void RtDiffuseDemodulatePass::Initialize(
+    ID3D12Device* device,
+    const std::filesystem::path& shaderDir)
 {
     BuildRootSignature(device);
-    BuildPipelineState(device, shaderDir / L"RtCombine_CS.cso");
+    BuildPipelineState(device, shaderDir / L"RtDiffuseDemodulate_CS.cso");
 }
 
-void RtCombinePass::BuildRootSignature(ID3D12Device* device)
+void RtDiffuseDemodulatePass::BuildRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE srvRange;
-    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0, 0); // t0 diffuse, t1 spec, t2 diffuse albedo
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0, 0);
+    // t0 = diffuse radiance
+    // t1 = diffuse albedo
+    // t2 = depth
 
     CD3DX12_DESCRIPTOR_RANGE uavRange;
-    uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 output
+    uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 0);
+    // u0 = demodulated diffuse lighting
+    // u1 = debug/output
 
     CD3DX12_ROOT_PARAMETER params[3]{};
     params[0].InitAsConstantBufferView(0);
@@ -35,10 +48,16 @@ void RtCombinePass::BuildRootSignature(ID3D12Device* device)
     CD3DX12_ROOT_SIGNATURE_DESC desc{};
     desc.Init(_countof(params), params, 0, nullptr);
 
-    ComPtr<ID3DBlob> blob, err;
+    ComPtr<ID3DBlob> blob;
+    ComPtr<ID3DBlob> err;
+
     ThrowIfFailed(
-        D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err),
-        "Serialize RT combine root sig");
+        D3D12SerializeRootSignature(
+            &desc,
+            D3D_ROOT_SIGNATURE_VERSION_1,
+            &blob,
+            &err),
+        "Serialize RT diffuse demodulate root sig");
 
     ThrowIfFailed(
         device->CreateRootSignature(
@@ -46,12 +65,14 @@ void RtCombinePass::BuildRootSignature(ID3D12Device* device)
             blob->GetBufferPointer(),
             blob->GetBufferSize(),
             IID_PPV_ARGS(&m_rootSig)),
-        "Create RT combine root sig");
+        "Create RT diffuse demodulate root sig");
 
-    SetD3D12ObjectName(m_rootSig.Get(), L"RootSig: RT Combine");
+    SetD3D12ObjectName(m_rootSig.Get(), L"RootSig: RT Diffuse Demodulate");
 }
 
-void RtCombinePass::BuildPipelineState(ID3D12Device* device, const std::filesystem::path& shaderPath)
+void RtDiffuseDemodulatePass::BuildPipelineState(
+    ID3D12Device* device,
+    const std::filesystem::path& shaderPath)
 {
     const auto bytes = ReadFileBytes(shaderPath);
 
@@ -62,12 +83,12 @@ void RtCombinePass::BuildPipelineState(ID3D12Device* device, const std::filesyst
 
     ThrowIfFailed(
         device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&m_pso)),
-        "Create RT combine PSO");
+        "Create RT diffuse demodulate PSO");
 
-    SetD3D12ObjectName(m_pso.Get(), L"PSO: RT Combine");
+    SetD3D12ObjectName(m_pso.Get(), L"PSO: RT Diffuse Demodulate");
 }
 
-void RtCombinePass::Dispatch(
+void RtDiffuseDemodulatePass::Dispatch(
     CommandList& cl,
     D3D12_GPU_VIRTUAL_ADDRESS constantsCb,
     D3D12_GPU_DESCRIPTOR_HANDLE inputSrvTable,
@@ -79,6 +100,7 @@ void RtCombinePass::Dispatch(
 
     cmd->SetPipelineState(m_pso.Get());
     cmd->SetComputeRootSignature(m_rootSig.Get());
+
     cmd->SetComputeRootConstantBufferView(0, constantsCb);
     cmd->SetComputeRootDescriptorTable(1, inputSrvTable);
     cmd->SetComputeRootDescriptorTable(2, outputUavTable);
