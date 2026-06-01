@@ -105,7 +105,7 @@ RWTexture2D<float>                  g_AovDepth : register(u4);
 RWTexture2D<float2>                 g_AovMotion : register(u5);         // prevUV, (-1,-1) invalid
 RWTexture2D<float>                  g_AovPrimaryHitDist : register(u6); // primary visible-surface RayT, -1 invalid
 RWTexture2D<uint>                   g_AovSurfaceId : register(u7);      // object/material id, 0xFFFFFFFF invalid
-RWTexture2D<float4>                 g_AovDiffuseAlbedo : register(u8);  // rgb=diffuse albedo, a=1
+RWTexture2D<float4>                 g_AovDiffuseAlbedo : register(u8); // rgb=diffuse albedo, a=stable demod flag
 StructuredBuffer<VertexRT>          g_QuadVerts : register(t1);
 ByteAddressBuffer                   g_QuadIndices : register(t2);
 StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);

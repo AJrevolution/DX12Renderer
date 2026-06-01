@@ -210,105 +210,20 @@ private:
         DiffuseAtrousOnly
     };
 
-    struct RtSignalState
+    struct IRtGuideReconstruction
     {
-        ID3D12Resource* signal = nullptr;
-        ID3D12Resource* moments = nullptr;
+        virtual ~IRtGuideReconstruction() = default;
     };
 
-    enum class RtSpatialFilter : uint32_t
+    struct IRtTemporalFilter
     {
-        None = 0,
-        Atrous,
-        Denoise
+        virtual ~IRtTemporalFilter() = default;
     };
 
-    struct RtPostSignals
+    struct IRtSpatialFilter
     {
-        RtSignalState diffuse;
-        RtSignalState specStable;
-        RtSignalState specResponsive;
-        RtSignalState specSelected;
-
-        // Final recomposition candidates.
-        // If unset, final combine falls back to diffuse/specSelected.
-        RtSignalState finalDiffuse;
-        RtSignalState finalSpec;
-
-        bool ranDiffuseTemporal = false;
-        bool ranSpecStableTemporal = false;
-        bool ranSpecResponsiveTemporal = false;
-        bool ranHistorySelect = false;
-
-        RtSpatialFilter diffuseSpatial = RtSpatialFilter::None;
-        RtSpatialFilter specSpatial = RtSpatialFilter::None;
-
-        bool TemporalReady() const
-        {
-            return ranDiffuseTemporal && ranSpecStableTemporal;
-        }
-
-        bool AdvancedSplitHistoryReady() const
-        {
-            return ranDiffuseTemporal &&
-                ranSpecStableTemporal &&
-                ranSpecResponsiveTemporal;
-        }
-
-        bool RanDiffuseSpatial() const
-        {
-            return diffuseSpatial != RtSpatialFilter::None;
-        }
-
-        bool RanSpecSpatial() const
-        {
-            return specSpatial != RtSpatialFilter::None;
-        }
-
-        bool RanDiffuseAtrous() const
-        {
-            return diffuseSpatial == RtSpatialFilter::Atrous;
-        }
-
-        bool RanSpecAtrous() const
-        {
-            return specSpatial == RtSpatialFilter::Atrous;
-        }
-
-        bool RanDiffuseDenoise() const
-        {
-            return diffuseSpatial == RtSpatialFilter::Denoise;
-        }
-
-        bool RanSpecDenoise() const
-        {
-            return specSpatial == RtSpatialFilter::Denoise;
-        }
-
-        void SetFinalDiffuse(ID3D12Resource* signal, RtSpatialFilter filter)
-        {
-            finalDiffuse.signal = signal;
-            finalDiffuse.moments = nullptr;
-            diffuseSpatial = filter;
-        }
-
-        void SetFinalSpec(ID3D12Resource* signal, RtSpatialFilter filter)
-        {
-            finalSpec.signal = signal;
-            finalSpec.moments = nullptr;
-            specSpatial = filter;
-        }
-
-        ID3D12Resource* FinalDiffuseSignal() const
-        {
-            return finalDiffuse.signal ? finalDiffuse.signal : diffuse.signal;
-        }
-
-        ID3D12Resource* FinalSpecSignal() const
-        {
-            return finalSpec.signal ? finalSpec.signal : specSelected.signal;
-        }
-    };
+        virtual ~IRtSpatialFilter() = default;
+    };  
 
     struct RtHitDistReconstructConstants
     {
@@ -341,6 +256,198 @@ private:
     };
     static_assert((sizeof(RtCombineConstants) % 16) == 0, "RtCombineConstants must be 16-byte aligned.");
 
+    // -------------------------------------------------------------------------
+    // RT denoiser data contracts
+    // -------------------------------------------------------------------------
+
+    struct RtDenoiserSignal
+    {
+        ID3D12Resource* signal = nullptr;   // R16G16B16A16_FLOAT, linear HDR.
+        ID3D12Resource* moments = nullptr;  // R16G16_FLOAT moments, optional.
+
+        explicit operator bool() const
+        {
+            return signal != nullptr;
+        }
+    };
+
+    struct RtDenoiserSignals
+    {      
+        RtDenoiserSignal diffuse{};
+        RtDenoiserSignal specStable{};
+        RtDenoiserSignal specResponsive{};
+        RtDenoiserSignal specSelected{};
+
+        RtDenoiserSignal diffuseFinal{};
+        RtDenoiserSignal specFinal{};
+
+        bool TemporalReady() const
+        {
+            return diffuse.signal &&
+                specStable.signal &&
+                diffuse.moments &&
+                specStable.moments;
+        }
+
+        bool AdvancedSplitHistoryReady() const
+        {
+            return diffuse.signal &&
+                specStable.signal &&
+                specResponsive.signal &&
+                diffuse.moments &&
+                specStable.moments &&
+                specResponsive.moments;
+        }
+
+        ID3D12Resource* FinalDiffuseSignal() const
+        {
+            return diffuseFinal.signal ? diffuseFinal.signal : diffuse.signal;
+        }
+
+        ID3D12Resource* FinalSpecSignal() const
+        {
+            return specFinal.signal ? specFinal.signal : specSelected.signal;
+        }
+    };
+
+    struct RtDenoiserGuides
+    {
+        ID3D12Resource* normalRough = nullptr;          // R16G16B16A16
+        ID3D12Resource* depth = nullptr;                // R32
+        ID3D12Resource* prevUVRaw = nullptr;            // R16G16, DXR u5
+        ID3D12Resource* prevUVDilated = nullptr;        // R16G16, compute
+        ID3D12Resource* motionConf = nullptr;           // R16, compute
+
+        ID3D12Resource* primaryHitDistRaw = nullptr;    // R16, DXR u6
+        ID3D12Resource* hitDistRecons = nullptr;        // R16, compute
+        ID3D12Resource* hitDistReconsConf = nullptr;    // R16, compute
+
+        ID3D12Resource* surfaceId = nullptr;            // R32_UINT
+        ID3D12Resource* diffuseAlbedo = nullptr;        // R16G16B16A16, a=stable demod flag
+
+        ID3D12Resource* diffuseDemodulated = nullptr;   // R16G16B16A16, diffuse lighting
+
+        bool ReadyForHitDistReconstruct() const
+        {
+            return primaryHitDistRaw &&
+                normalRough &&
+                depth &&
+                prevUVRaw &&
+                surfaceId &&
+                hitDistRecons &&
+                hitDistReconsConf;
+        }
+
+        bool ReadyForMotionDilate() const
+        {
+            return prevUVRaw &&
+                prevUVDilated &&
+                motionConf &&
+                normalRough &&
+                depth &&
+                primaryHitDistRaw &&
+                surfaceId;
+        }
+
+        bool ReadyForDiffuseDemodulate() const
+        {
+            return diffuseAlbedo &&
+                diffuseDemodulated &&
+                depth;
+        }
+
+        bool ReadyForTemporal() const
+        {
+            return normalRough &&
+                depth &&
+                prevUVDilated &&
+                motionConf &&
+                diffuseAlbedo &&
+                diffuseDemodulated;
+        }
+
+        bool ReadyForSpatial(bool needsMotionConfidence) const
+        {
+            return normalRough &&
+                depth &&
+                diffuseAlbedo &&
+                diffuseDemodulated &&
+                (!needsMotionConfidence || motionConf);
+        }
+
+        bool ReadyForCombine() const
+        {
+            return diffuseAlbedo != nullptr;
+        }
+    };
+
+    struct RtDenoiserHistories
+    {
+        RtDenoiserSignal diffuseRead{};
+        RtDenoiserSignal diffuseWrite{};
+
+        RtDenoiserSignal specStableRead{};
+        RtDenoiserSignal specStableWrite{};
+
+        RtDenoiserSignal specResponsiveRead{};
+        RtDenoiserSignal specResponsiveWrite{};
+
+        ID3D12Resource* normalRead = nullptr;
+        ID3D12Resource* normalWrite = nullptr;
+
+        ID3D12Resource* depthRead = nullptr;
+        ID3D12Resource* depthWrite = nullptr;
+
+        ID3D12Resource* hitDistRead = nullptr;
+        ID3D12Resource* hitDistWrite = nullptr;
+
+        ID3D12Resource* hitDistConfRead = nullptr;
+        ID3D12Resource* hitDistConfWrite = nullptr;
+    };
+
+    enum class RtDebugOwner : uint8_t
+    {
+        None,
+        RayGen,
+        GuideReconstruct,
+        Temporal,
+        HistorySelect,
+        Spatial,
+        Combine
+    };
+
+    struct RtDebugRouting
+    {
+        uint32_t debugView = 0;
+
+        bool wantsTemporalDebug = false;
+        bool wantsSvgfDebug = false;
+        bool wantsAtrousOutputDebug = false;
+        bool wantsSpecAtrousOutputDebug = false;
+        bool wantsHistorySelectDebug = false;
+
+        bool wantsSplitDebug = false;
+        bool wantsMotionDebug = false;
+        bool wantsMotionDilateDebug = false;
+        bool wantsHitDistDebug = false;
+        bool wantsHitDistReconstructDebug = false;
+        bool wantsSurfaceIdDebug = false;
+        bool wantsDiffuseAlbedoDebug = false;
+        bool wantsDiffuseDemodDebug = false;
+
+        bool wantsRtPostDebug = false;
+        bool wantsRtInspectionDebug = false;
+        bool wantsProducerDebug = false;
+        bool wantsSpatialDebug = false;
+
+        RtDebugOwner owner = RtDebugOwner::None;
+
+        bool DisablesPostStack() const
+        {
+            return wantsProducerDebug;
+        }
+    };
+    
     static bool IsSplitDebug(uint32_t dv)
     {
         return dv >= 48 && dv <= 50;
@@ -490,7 +597,9 @@ private:
         ID3D12Resource* outAccumResource,
         ID3D12Resource* outMomentsResource,
         DescriptorAllocator::Allocation& srvTable,
-        DescriptorAllocator::Allocation& uavTable);
+        uint32_t& srvTableCount,
+        DescriptorAllocator::Allocation& uavTable,
+        uint32_t& uavTableCount);
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtTemporalConstants(
         uint32_t frameIndex,
@@ -661,6 +770,26 @@ private:
         uint32_t frameIndex,
         bool diffuseIsDemodulated);
 
+    RtDebugRouting BuildRtDebugRouting(uint32_t debugView) const;
+    RtPostMode ResolveRtPostMode(const RtDebugRouting& debug) const;
+
+    RtDenoiserGuides BuildRtDenoiserGuides() const;
+    RtDenoiserHistories BuildRtDenoiserHistories(
+        uint32_t readIndex,
+        uint32_t writeIndex) const;
+
+    DescriptorAllocator::Allocation& EnsureRtDescriptorTable(
+        DescriptorAllocator::Allocation& table,
+        uint32_t& currentCount,
+        uint32_t expectedCount);
+
+    void RunRtDenoiser(
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height);
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -791,8 +920,8 @@ private:
     uint32_t m_debugView = 0;
     bool  m_autoOrbit = true;
     bool m_pauseAnimation = false;
-    bool m_useRaytracing = true;        // Toggle for raytracing vs rasterization (for testing/debugging)
-    bool m_rtAccumulate = true;         // validation / progressive mode
+    bool m_useRaytracing = false;        // Toggle for raytracing vs rasterization (for testing/debugging)
+    bool m_rtAccumulate = false;         // validation / progressive mode
     bool m_rtSvgf = true;
     bool  m_rtDenoise = true;
 
@@ -898,14 +1027,20 @@ private:
         // per-frame RT table: geometry + instance data + material textures
         DescriptorAllocator::Allocation geometryTable{};
 
-        DescriptorAllocator::Allocation temporalDiffuseSrvTable{};     // 9 SRVs
-        DescriptorAllocator::Allocation temporalDiffuseUavTable{};     // 3 UAVs
+        DescriptorAllocator::Allocation temporalDiffuseSrvTable{};     // kRtTemporalSrvCount SRVs
+        DescriptorAllocator::Allocation temporalDiffuseUavTable{};     // kRtTemporalUavCount UAVs
+        uint32_t temporalDiffuseSrvCount = 0;
+        uint32_t temporalDiffuseUavCount = 0;
 
-        DescriptorAllocator::Allocation temporalSpecStableSrvTable{};  // 9 SRVs
-        DescriptorAllocator::Allocation temporalSpecStableUavTable{};  // 3 UAVs
+        DescriptorAllocator::Allocation temporalSpecStableSrvTable{};  // kRtTemporalSrvCount SRVs
+        DescriptorAllocator::Allocation temporalSpecStableUavTable{};  // kRtTemporalUavCount UAVs
+        uint32_t temporalSpecStableSrvCount = 0;
+        uint32_t temporalSpecStableUavCount = 0;
 
-        DescriptorAllocator::Allocation temporalSpecRespSrvTable{};    // 9 SRVs
-        DescriptorAllocator::Allocation temporalSpecRespUavTable{};    // 3 UAVs
+        DescriptorAllocator::Allocation temporalSpecRespSrvTable{};    // kRtTemporalSrvCount SRVs
+        DescriptorAllocator::Allocation temporalSpecRespUavTable{};    // kRtTemporalUavCount UAVs
+        uint32_t temporalSpecRespSrvCount = 0;
+        uint32_t temporalSpecRespUavCount = 0;
 
         DescriptorAllocator::Allocation historySelectSrvTable{};  // kRtHistorySelectSrvCount SRVs
         DescriptorAllocator::Allocation historySelectUavTable{};  // kRtHistorySelectUavCount UAVs
@@ -926,8 +1061,9 @@ private:
         std::array<uint32_t, kMaxRtAtrousIterations> svgfDiffuseSrvCounts{};
 
         DescriptorAllocator::Allocation motionDilateSrvTable{}; // kRtMotionDilateSrvCount SRVs
-        DescriptorAllocator::Allocation motionDilateUavTable{}; // 3 UAVs
+        DescriptorAllocator::Allocation motionDilateUavTable{}; // kRtMotionDilateUavCount UAVs
         uint32_t motionDilateSrvCount = 0;
+        uint32_t motionDilateUavCount = 0;
 
         uint32_t capacity = 0;
 
@@ -941,7 +1077,6 @@ private:
         uint32_t diffuseDemodSrvCount = 0;
         uint32_t diffuseDemodUavCount = 0;
     };
-
     
     std::vector<FrameRaytracingResources> m_rtFrames;
     uint32_t m_frameCount = 0;
@@ -1186,11 +1321,14 @@ private:
     static constexpr uint32_t kRtSvgfSrvCount = 5;
     static constexpr uint32_t kRtDenoiseSrvCount = 4;
     static constexpr uint32_t kRtMotionDilateSrvCount = 5;
+    static constexpr uint32_t kRtMotionDilateUavCount = 3;
     static constexpr uint32_t kRtHitDistReconstructSrvCount = 8;
     static constexpr uint32_t kRtHitDistReconstructUavCount = 3;
     static constexpr uint32_t kRtDiffuseDemodSrvCount = 3;
     static constexpr uint32_t kRtDiffuseDemodUavCount = 2;
     static constexpr uint32_t kRtCombineSrvCount = 3;
+    static constexpr uint32_t kRtTemporalSrvCount = 9;
+    static constexpr uint32_t kRtTemporalUavCount = 3;
 
     RtDiffuseDemodulatePass m_rtDiffuseDemodulatePass;
 
