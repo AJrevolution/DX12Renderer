@@ -5,16 +5,22 @@
 //   28 = roughness/specular protection proxy
 //   43 = center-history length attenuation factor
 //   44 = wide-iteration skip mask
+//   60 = spec A-Trous shaped motion confidence
+//   73 = spec A-Trous hit-distance shaped weight
 
 Texture2D<float4> g_Signal : register(t0);
 Texture2D<float4> g_Normal : register(t1);
 Texture2D<float> g_Depth : register(t2);
 Texture2D<float2> g_Moments : register(t3);
 Texture2D<float> g_MotionConf : register(t4);
+Texture2D<float> g_HitDist : register(t5);
+Texture2D<float> g_HitDistConf : register(t6);
 
 RWTexture2D<float4> g_Output : register(u0);
 
 SamplerState g_LinearClamp : register(s0);
+
+static const float HIT_DIST_INVALID = -1.0f;
 
 cbuffer RtAtrousConstants : register(b0)
 {
@@ -36,6 +42,12 @@ cbuffer RtAtrousConstants : register(b0)
     uint EnableLengthSkip;
     float MotionConfPower;
     float MotionConfMin;
+    
+    float HitDistSigmaScale;
+    float HitDistRoughCutoff;
+
+    float HitDistConfMin;
+    float _padHitDist0;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -46,6 +58,37 @@ float3 UnpackNormal(float4 packed)
 float Luminance(float3 c)
 {
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+}
+
+bool HitDistValid(float d)
+{
+    return d >= 0.0f;
+}
+
+float EvalHitDistAtrousWeight(
+    float hit0,
+    float hit1,
+    float conf0,
+    float conf1,
+    float roughMin)
+{
+    // MotionConfPower > 0 is the existing spec-path indicator.
+    if (MotionConfPower <= 0.0f || HitDistSigmaScale <= 0.0f)
+        return 1.0f;
+
+    if (roughMin >= HitDistRoughCutoff)
+        return 1.0f;
+
+    if (!HitDistValid(hit0) || !HitDistValid(hit1))
+        return 1.0f;
+
+    if (conf0 < HitDistConfMin || conf1 < HitDistConfMin)
+        return 1.0f;
+
+    float sigmaHit =
+        HitDistSigmaScale * max(1e-3f, hit0);
+
+    return exp(-abs(hit0 - hit1) / max(1e-4f, sigmaHit));
 }
 
 [numthreads(8, 8, 1)]
@@ -96,6 +139,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float rough0 = n0Packed.a;
     float z0 = g_Depth[pixel];
     
+    float hit0 =
+    (HitDistSigmaScale > 0.0f)
+        ? g_HitDist[pixel]
+        : HIT_DIST_INVALID;
+
+    float hitConf0 =
+    (HitDistSigmaScale > 0.0f)
+        ? saturate(g_HitDistConf[pixel])
+        : 0.0f;
+    
     float l0 = 0.0f;
     float sigmaL = 1.0f;
 
@@ -132,7 +185,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
         return;
     }
     
-    if (skipWide)
+    if (skipWide && DebugView != 73)
     {
         if (FinalOutputSrgb != 0)
             g_Output[pixel] = float4(LinearToSRGB(c0), len0);
@@ -144,7 +197,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
     
     float3 sum = 0.0f.xxx;
     float wsum = 0.0f;
-
+    
+    float hitWeightDebugSum = 0.0f;
+    float hitWeightDebugWeight = 0.0f;
+    
     for (int y = -2; y <= 2; ++y)
     {
         for (int x = -2; x <= 2; ++x)
@@ -163,8 +219,22 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
             float ws = kernel[abs(x)] * kernel[abs(y)];
 
-            //float nd = saturate(dot(n0, n));
             float roughMin = min(rough0, rough);
+            float hit1 = HIT_DIST_INVALID;
+            float hitConf1 = 0.0f;
+
+            if (HitDistSigmaScale > 0.0f)
+            {
+                hit1 = g_HitDist[uint2(p)];
+                hitConf1 = saturate(g_HitDistConf[uint2(p)]);
+            }
+
+            float wHit = EvalHitDistAtrousWeight(
+                hit0,
+                hit1,
+                hitConf0,
+                hitConf1,
+                roughMin);
             float basePow = lerp(128.0f, 32.0f, roughMin);
             float normalScale = clamp(0.25f / max(1e-4f, SigmaNormal), 0.5f, 2.0f);
             float normalPow = basePow * normalScale;
@@ -184,12 +254,24 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
             float wLen = isCenterTap ? 1.0f : wLenCenter;
             
-            float w = ws * wn * wz * wl * wLen;
+            float w = ws * wn * wz * wl * wLen * wHit;
             sum += c * w;
             wsum += w;
+            hitWeightDebugSum += wHit * ws;
+            hitWeightDebugWeight += ws;
         }
     }
 
+    if (DebugView == 73)
+    {
+        float v = (hitWeightDebugWeight > 1e-6f)
+            ? saturate(hitWeightDebugSum / hitWeightDebugWeight)
+            : 1.0f;
+
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+        return;
+    }
+    
     float3 filtered = (wsum > 1e-6f) ? (sum / wsum) : c0;
 
     if (FinalOutputSrgb != 0)

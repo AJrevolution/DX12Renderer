@@ -32,7 +32,9 @@ namespace
             (dv >= 45 && dv <= 47) ||
             dv == 56 ||
             dv == 57 ||
-            dv == 58;
+            dv == 58 ||
+            dv == 71 ||
+            dv == 72;
     }
 
     static bool IsSvgfDebug(uint32_t dv)
@@ -40,7 +42,8 @@ namespace
         return (dv == 28) ||
             (dv == 43) ||
             (dv == 44) ||
-            dv == 60;
+            dv == 60 ||
+            dv == 73;
     }
 
     static bool IsHistorySelectDebug(uint32_t dv)
@@ -507,6 +510,9 @@ void Renderer::RenderFrame(
     const bool hitDistReconsSettingsChanged =
         std::fabs(m_rtHitDistReconsAlpha - m_prevRtHitDistReconsAlpha) > 1e-6f;
 
+    const bool hitDistPolicyChanged =
+        std::fabs(m_rtHitDistSigmaScale - m_prevRtHitDistSigmaScale) > 1e-6f;
+
     const bool temporalSettingsChanged =
         !m_rtHistoryValid ||
         (std::fabs(m_rtTemporalAlpha - m_prevRtTemporalAlpha) > 1e-6f) ||
@@ -531,7 +537,8 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtTemporalMotionConfPowerDiffuse - m_prevRtTemporalMotionConfPowerDiffuse) > 1e-6f) ||
         (std::fabs(m_rtTemporalMotionConfPowerSpec - m_prevRtTemporalMotionConfPowerSpec) > 1e-6f) ||
         hitDistReconsSettingsChanged ||
-        (m_rtTemporalEnableVarianceBoost != m_prevRtTemporalEnableVarianceBoost);
+        (m_rtTemporalEnableVarianceBoost != m_prevRtTemporalEnableVarianceBoost) ||
+            hitDistPolicyChanged;
 
     const bool resetRawAccumulation =
         cameraChanged ||
@@ -639,6 +646,7 @@ void Renderer::RenderFrame(
     m_prevRtTemporalMotionConfPowerDiffuse = m_rtTemporalMotionConfPowerDiffuse;
     m_prevRtTemporalMotionConfPowerSpec = m_rtTemporalMotionConfPowerSpec;
     m_prevRtHitDistReconsAlpha = m_rtHitDistReconsAlpha;
+    m_prevRtHitDistSigmaScale = m_rtHitDistSigmaScale;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -3271,6 +3279,9 @@ bool Renderer::UpdateRtTemporalTables(
     ID3D12Resource* prevMomentsResource,
     ID3D12Resource* outAccumResource,
     ID3D12Resource* outMomentsResource,
+    ID3D12Resource* currHitDistResource,
+    ID3D12Resource* prevHitDistResource,
+    ID3D12Resource* prevHitDistConfResource,
     DescriptorAllocator::Allocation& srvTable,
     uint32_t& srvTableCount,
     DescriptorAllocator::Allocation& uavTable,
@@ -3426,6 +3437,31 @@ bool Renderer::UpdateRtTemporalTables(
             SrvAt(8));
     }
 
+    // t9/t10/t11 = optional hit-distance guides.
+    auto WriteR16Srv = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
+
+    // t9 = current reconstructed hit distance
+    WriteR16Srv(currHitDistResource, 9);
+
+    // t10 = previous reconstructed hit distance
+    WriteR16Srv(prevHitDistResource, 10);
+
+    // t11 = previous reconstructed hit-distance confidence
+    WriteR16Srv(prevHitDistConfResource, 11);
+
     return true;
 }
 
@@ -3436,7 +3472,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     float temporalAlpha,
     float roughnessSigma,
     float motionConfMin,
-    float motionConfPower)
+    float motionConfPower,
+    float hitDistSigmaScale)
 {
     auto alloc = m_upload.Allocate(
         frameIndex,
@@ -3470,8 +3507,11 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     cb->varianceScale = std::max(0.0f, m_rtTemporalVarianceScale);
     cb->varianceAlphaBoost = std::max(0.0f, m_rtTemporalVarianceAlphaBoost);
     cb->enableVarianceBoost = m_rtTemporalEnableVarianceBoost ? 1u : 0u;
-    cb->motionConfMin = std::max(0.0f, std::min(1.0f, motionConfMin));
-    cb->motionConfPower = std::max(1e-3f, motionConfPower);
+    cb->motionConfMin = std::clamp(motionConfMin, 0.0f, 1.0f);
+    cb->motionConfPower = std::max(0.0f, motionConfPower);
+    cb->hitDistSigmaScale = std::max(0.0f, hitDistSigmaScale);
+    cb->hitDistRoughCutoff = kRtHitDistRoughCutoff;
+    cb->hitDistConfMin = kRtHitDistConfMin;
 
     cb->currCameraPos = 
     {
@@ -3501,7 +3541,9 @@ bool Renderer::UpdateRtSvgfSrvTable(
     uint32_t& tableSrvCount,
     ID3D12Resource* signalResource,
     ID3D12Resource* momentsResource,
-    ID3D12Resource* motionConfResource)
+    ID3D12Resource* motionConfResource,
+    ID3D12Resource* hitDistResource,
+    ID3D12Resource* hitDistConfResource)
 {
     if (!device ||
         !signalResource ||
@@ -3576,6 +3618,28 @@ bool Renderer::UpdateRtSvgfSrvTable(
             HandleAt(4)); 
     }
 
+    auto WriteR16Srv = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        // Null descriptor is valid when hit-distance weighting is disabled.
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            HandleAt(slot));
+    };
+
+    // t5 = reconstructed hit distance
+    WriteR16Srv(hitDistResource, 5);
+
+    // t6 = reconstructed hit-distance confidence
+    WriteR16Srv(hitDistConfResource, 6);
+
     return true;
 }
 
@@ -3587,7 +3651,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtAtrousConstants(
     bool useMoments,
     bool finalOutputSrgb,
     float motionConfPower,
-    float motionConfMin)
+    float motionConfMin,
+    float hitDistSigmaScale)
 {
     auto alloc = m_upload.Allocate(
         frameIndex,
@@ -3612,6 +3677,9 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtAtrousConstants(
     cb->lengthPower = std::max(1e-4f, m_rtAtrousLengthPower);
     cb->motionConfPower = std::max(0.0f, motionConfPower);
     cb->motionConfMin = std::max(0.0f, std::min(1.0f, motionConfMin));
+    cb->hitDistSigmaScale = std::max(0.0f, hitDistSigmaScale);
+    cb->hitDistRoughCutoff = kRtHitDistRoughCutoff;
+    cb->hitDistConfMin = kRtHitDistConfMin;
     cb->debugView = m_debugView;
     cb->lengthSkipThreshold = std::clamp(m_rtAtrousLengthSkipThreshold, 0.0f, 1.0f);
     cb->enableLengthSkip = m_rtAtrousEnableLengthSkip ? 1u : 0u;
@@ -4892,7 +4960,8 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
         debugView == 43 ||
         debugView == 44;
     r.wantsSpecAtrousOutputDebug =
-        debugView == 60;
+        debugView == 60 ||
+        debugView == 73;
 
     r.wantsHistorySelectDebug = IsHistorySelectDebug(debugView);
 
@@ -5025,6 +5094,20 @@ Renderer::RtDenoiserGuides Renderer::BuildRtDenoiserGuides() const
     if (m_rtDiffuseDemodulatedReady)
         g.diffuseDemodulated = m_rtDiffuseDemodulated.Get();
 
+    if (m_rtAovHitDistReconsReady)
+        g.hitDistRecons = m_rtAovHitDistRecons.Get();
+
+    if (m_rtAovHitDistReconsConfReady)
+        g.hitDistReconsConf = m_rtAovHitDistReconsConf.Get();
+
+    if (m_rtHitDistHistoryValid &&
+        m_rtHistoryHitDist[m_rtHistoryReadIndex] &&
+        m_rtHistoryHitDistConf[m_rtHistoryReadIndex])
+    {
+        g.hitDistHistoryRead = m_rtHistoryHitDist[m_rtHistoryReadIndex].Get();
+        g.hitDistConfHistoryRead = m_rtHistoryHitDistConf[m_rtHistoryReadIndex].Get();
+    }
+
     return g;
 }
 
@@ -5118,6 +5201,7 @@ void Renderer::RunRtDenoiser(
     const uint32_t writeIndex =
         1u - m_rtHistoryReadIndex;
 
+
     if (rtPostMode == RtPostMode::RawCombineOnly)
     {
         RunRtRawCombineOnly(
@@ -5150,8 +5234,14 @@ void Renderer::RunRtDenoiser(
         guides.ReadyForMotionDilate() &&
         guides.ReadyForHitDistReconstruct();
 
+    const bool postMayRunSpecSpatial =
+        RtPostModeRunsSpecAtrous(rtPostMode) &&
+        m_rtSvgf &&
+        m_rtHitDistSigmaScale > 0.0f;
+
     const bool shouldRunHitDistReconstruct =
         temporalWouldRun ||
+        postMayRunSpecSpatial ||
         rtDebug.wantsMotionDilateDebug ||
         rtDebug.wantsHitDistReconstructDebug;
 
@@ -5179,6 +5269,26 @@ void Renderer::RunRtDenoiser(
             width,
             height,
             ranHitDistReconstruct);
+
+    const bool specTemporalHitDistAvailable =
+        m_rtHitDistSigmaScale > 0.0f &&
+        ranHitDistReconstruct &&
+        m_rtHitDistHistoryValid &&
+        guides.hitDistRecons &&
+        guides.hitDistHistoryRead &&
+        guides.hitDistConfHistoryRead;
+
+    const float specTemporalHitDistSigmaScale =
+        specTemporalHitDistAvailable ? m_rtHitDistSigmaScale : 0.0f;
+
+    const bool specSpatialHitDistAvailable =
+        m_rtHitDistSigmaScale > 0.0f &&
+        ranHitDistReconstruct &&
+        guides.hitDistRecons &&
+        guides.hitDistReconsConf;
+
+    const float specSpatialHitDistSigmaScale =
+        specSpatialHitDistAvailable ? m_rtHitDistSigmaScale : 0.0f;
 
     if (ranMotionDilate)
     {
@@ -5271,6 +5381,12 @@ void Renderer::RunRtDenoiser(
         cl.Transition(m_rtHistoryMomentsSpecResp[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         cl.Transition(m_rtHistorySpecResp[writeIndex].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtHistoryMomentsSpecResp[writeIndex].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (specTemporalHitDistAvailable)
+        {
+            cl.Transition(guides.hitDistRecons, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(guides.hitDistHistoryRead, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(guides.hitDistConfHistoryRead, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
         cl.FlushBarriers();
 
         // Diffuse temporal
@@ -5282,6 +5398,9 @@ void Renderer::RunRtDenoiser(
             m_rtHistoryMoments[m_rtHistoryReadIndex].Get(),
             m_rtHistoryAccum[writeIndex].Get(),
             m_rtHistoryMoments[writeIndex].Get(),
+            nullptr,
+            nullptr,
+            nullptr,
             m_rtFrames[frameIndex].temporalDiffuseSrvTable,
             m_rtFrames[frameIndex].temporalDiffuseSrvCount,
             m_rtFrames[frameIndex].temporalDiffuseUavTable,
@@ -5297,7 +5416,8 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalAlpha,
                     m_rtTemporalRoughnessSigma,
                     m_rtTemporalMotionConfMinDiffuse,
-                    m_rtTemporalMotionConfPowerDiffuse);
+                    m_rtTemporalMotionConfPowerDiffuse,
+                    0.0f);
 
             m_rtTemporalPass.Dispatch(
                 cl,
@@ -5337,6 +5457,9 @@ void Renderer::RunRtDenoiser(
             m_rtHistoryMomentsSpec[m_rtHistoryReadIndex].Get(),
             m_rtHistorySpec[writeIndex].Get(),
             m_rtHistoryMomentsSpec[writeIndex].Get(),
+            specTemporalHitDistAvailable ? guides.hitDistRecons : nullptr,
+            specTemporalHitDistAvailable ? guides.hitDistHistoryRead : nullptr,
+            specTemporalHitDistAvailable ? guides.hitDistConfHistoryRead : nullptr,
             m_rtFrames[frameIndex].temporalSpecStableSrvTable,
             m_rtFrames[frameIndex].temporalSpecStableSrvCount,
             m_rtFrames[frameIndex].temporalSpecStableUavTable,
@@ -5352,7 +5475,8 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalAlpha,
                     m_rtTemporalRoughnessSigma,
                     m_rtTemporalMotionConfMinSpec,
-                    m_rtTemporalMotionConfPowerSpec);
+                    m_rtTemporalMotionConfPowerSpec,
+                    specTemporalHitDistSigmaScale);
 
             m_rtTemporalPass.Dispatch(
                 cl,
@@ -5393,6 +5517,9 @@ void Renderer::RunRtDenoiser(
             m_rtHistoryMomentsSpecResp[m_rtHistoryReadIndex].Get(),
             m_rtHistorySpecResp[writeIndex].Get(),
             m_rtHistoryMomentsSpecResp[writeIndex].Get(),
+            specTemporalHitDistAvailable ? guides.hitDistRecons : nullptr,
+            specTemporalHitDistAvailable ? guides.hitDistHistoryRead : nullptr,
+            specTemporalHitDistAvailable ? guides.hitDistConfHistoryRead : nullptr,
             m_rtFrames[frameIndex].temporalSpecRespSrvTable,
             m_rtFrames[frameIndex].temporalSpecRespSrvCount,
             m_rtFrames[frameIndex].temporalSpecRespUavTable,
@@ -5408,7 +5535,8 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalAlphaResp,
                     m_rtTemporalRoughnessSigmaResp,
                     m_rtTemporalMotionConfMinSpec,
-                    m_rtTemporalMotionConfPowerSpec);
+                    m_rtTemporalMotionConfPowerSpec,
+                    specTemporalHitDistSigmaScale);
 
             m_rtTemporalPass.Dispatch(
                 cl,
@@ -5482,6 +5610,11 @@ void Renderer::RunRtDenoiser(
         cl.Transition(m_rtSvgfPing[0].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtSpecSelectedMoments.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (specSpatialHitDistAvailable)
+        {
+            cl.Transition(guides.hitDistRecons, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(guides.hitDistReconsConf, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
         cl.FlushBarriers();
 
         const bool ok = UpdateRtHistorySelectTables(
@@ -5597,6 +5730,16 @@ void Renderer::RunRtDenoiser(
                     cl.Transition(guides.motionConf, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                     cl.Transition(svgfMoments, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                     cl.Transition(outRes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    if (specSpatialHitDistAvailable)
+                    {
+                        cl.Transition(
+                            guides.hitDistRecons,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+                        cl.Transition(
+                            guides.hitDistReconsConf,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    }
                     cl.FlushBarriers();
 
                     const bool ok = UpdateRtSvgfSrvTable(
@@ -5607,7 +5750,9 @@ void Renderer::RunRtDenoiser(
                         m_rtFrames[frameIndex].svgfSpecSrvCounts[iter],
                         svgfSignal,
                         svgfMoments,
-                        guides.motionConf);
+                        guides.motionConf,
+                        specSpatialHitDistAvailable ? guides.hitDistRecons : nullptr,
+                        specSpatialHitDistAvailable ? guides.hitDistReconsConf : nullptr);
 
                     if (ok)
                     {
@@ -5620,7 +5765,8 @@ void Renderer::RunRtDenoiser(
                                 advancedSplitHistory,
                                 false,
                                 m_rtTemporalMotionConfPowerSpec,
-                                m_rtTemporalMotionConfMinSpec);
+                                m_rtTemporalMotionConfMinSpec,
+                                specSpatialHitDistSigmaScale);
 
                         D3D12_GPU_DESCRIPTOR_HANDLE outUav = finalIter
                             ? (wantsSpecAtrousOutputDebug ? m_rtOutputUav.gpu : RtPostUavGpuAt(1))
@@ -5735,7 +5881,9 @@ void Renderer::RunRtDenoiser(
                         m_rtFrames[frameIndex].svgfDiffuseSrvCounts[iter],
                         svgfSignal,
                         svgfMoments,
-                        guides.motionConf);
+                        guides.motionConf,
+                        nullptr,
+                        nullptr);
 
                     if (ok)
                     {
@@ -5748,6 +5896,7 @@ void Renderer::RunRtDenoiser(
                                 advancedSplitHistory,
                                 false,
                                 0.0f,   // motionConfPower <= 0 disables confidence modulation
+                                0.0f,
                                 0.0f);
 
                         D3D12_GPU_DESCRIPTOR_HANDLE outUav = finalIter

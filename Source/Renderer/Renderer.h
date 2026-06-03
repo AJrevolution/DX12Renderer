@@ -77,6 +77,11 @@ private:
         float motionConfMin = 0.20f;
         float motionConfPower = 1.0f;
 
+        float hitDistSigmaScale = 0.0f;
+        float hitDistRoughCutoff = 0.35f;
+        float hitDistConfMin = 0.5f;
+        float pad1 = 0.0f;
+
         float varianceScale = 16.0f;
         float varianceBias = 0.0f;
         float varianceAlphaBoost = 0.5f;
@@ -123,6 +128,12 @@ private:
         // motionConfPower <= 0 disables this path, preserving legacy behavior.
         float motionConfPower = 0.0f;
         float motionConfMin = 0.0f;
+
+        float hitDistSigmaScale = 0.0f;
+        float hitDistRoughCutoff = 0.35f;
+
+        float hitDistConfMin = 0.5f;
+        float pad = 0.0f;
     };
     static_assert((sizeof(RtAtrousConstants) % 16) == 0, "RtAtrousConstants must be 16-byte aligned.");
 
@@ -322,6 +333,9 @@ private:
         ID3D12Resource* hitDistRecons = nullptr;        // R16, compute
         ID3D12Resource* hitDistReconsConf = nullptr;    // R16, compute
 
+        ID3D12Resource* hitDistHistoryRead = nullptr;        // R16, previous reconstructed hit distance
+        ID3D12Resource* hitDistConfHistoryRead = nullptr;    // R16, previous reconstructed confidence
+
         ID3D12Resource* surfaceId = nullptr;            // R32_UINT
         ID3D12Resource* diffuseAlbedo = nullptr;        // R16G16B16A16, a=stable demod flag
 
@@ -378,6 +392,19 @@ private:
         bool ReadyForCombine() const
         {
             return diffuseAlbedo != nullptr;
+        }
+
+        bool ReadyForSpecHitDistanceTemporal() const
+        {
+            return hitDistRecons &&
+                hitDistHistoryRead &&
+                hitDistConfHistoryRead;
+        }
+
+        bool ReadyForSpecHitDistanceSpatial() const
+        {
+            return hitDistRecons &&
+                hitDistReconsConf;
         }
     };
 
@@ -574,7 +601,9 @@ private:
         uint32_t& tableSrvCount,
         ID3D12Resource* signalResource,
         ID3D12Resource* momentsResource,
-        ID3D12Resource* motionConfResource);
+        ID3D12Resource* motionConfResource,
+        ID3D12Resource* hitDistResource,
+        ID3D12Resource* hitDistConfResource);
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtAtrousConstants(
         uint32_t frameIndex,
@@ -584,7 +613,8 @@ private:
         bool useMoments,
         bool finalOutputSrgb,
         float motionConfPower,
-        float motionConfMin);
+        float motionConfMin,
+        float hitDistSigmaScale);
 
     void UpdateRtSvgfPingUavTable(ID3D12Device* device);
 
@@ -596,6 +626,9 @@ private:
         ID3D12Resource* prevMomentsResource,
         ID3D12Resource* outAccumResource,
         ID3D12Resource* outMomentsResource,
+        ID3D12Resource* currHitDistResource,
+        ID3D12Resource* prevHitDistResource,
+        ID3D12Resource* prevHitDistConfResource,
         DescriptorAllocator::Allocation& srvTable,
         uint32_t& srvTableCount,
         DescriptorAllocator::Allocation& uavTable,
@@ -608,7 +641,8 @@ private:
         float temporalAlpha,
         float roughnessSigma,
         float motionConfMin,
-        float motionConfPower);
+        float motionConfPower,
+        float hitDistSigmaScale);
 
     D3D12_GPU_DESCRIPTOR_HANDLE RtSvgfPingUavGpuAt(uint32_t i) const;
 
@@ -827,6 +861,11 @@ private:
     //   45 = variance-normalized signal
     //   46 = reprojection best score
     //   47 = final alpha after variance shaping
+    //   56 = motion confidence consumed by temporal
+    //   57 = alpha after motion-confidence scaling
+    //   58 = post-power motion confidence used for temporal weighting
+    //   71 = temporal hit-distance weight visible on spec reuse
+    //   72 = mismatch mask highlights rejected spec history
     //
     // History-select pass owns:
     //   29 = final history selector mask
@@ -845,6 +884,7 @@ private:
     //   43 = center-history length attenuation factor
     //   44 = wide-iteration skip mask
     //   60 = spec A-Trous shaped motion confidence
+    //   73 = spec A-Trous hit-distance shaped weight
     //
     // Split / RayGen-owned views:
     // These write directly to m_rtOutput from RayGen.
@@ -1244,6 +1284,9 @@ private:
     float m_rtTemporalSpecDirSigma = 0.08f;
     float m_rtTemporalSpecDirRoughCutoff = 0.35f;
 
+    float m_rtHitDistSigmaScale = 0.5f;
+    float m_prevRtHitDistSigmaScale = 0.5f;
+
     float m_prevRtTemporalSpecDirSigma = 0.08f;
     float m_prevRtTemporalSpecDirRoughCutoff = 0.35f;
 
@@ -1318,7 +1361,7 @@ private:
     static constexpr uint32_t kRtUavTableCount = 9;
     static constexpr uint32_t kRtHistorySelectSrvCount = 7;
     static constexpr uint32_t kRtHistorySelectUavCount = 3;
-    static constexpr uint32_t kRtSvgfSrvCount = 5;
+    static constexpr uint32_t kRtSvgfSrvCount = 7;
     static constexpr uint32_t kRtDenoiseSrvCount = 4;
     static constexpr uint32_t kRtMotionDilateSrvCount = 5;
     static constexpr uint32_t kRtMotionDilateUavCount = 3;
@@ -1327,8 +1370,10 @@ private:
     static constexpr uint32_t kRtDiffuseDemodSrvCount = 3;
     static constexpr uint32_t kRtDiffuseDemodUavCount = 2;
     static constexpr uint32_t kRtCombineSrvCount = 3;
-    static constexpr uint32_t kRtTemporalSrvCount = 9;
+    static constexpr uint32_t kRtTemporalSrvCount = 12;
     static constexpr uint32_t kRtTemporalUavCount = 3;
+    static constexpr float kRtHitDistRoughCutoff = 0.35f;
+    static constexpr float kRtHitDistConfMin = 0.5f;
 
     RtDiffuseDemodulatePass m_rtDiffuseDemodulatePass;
 

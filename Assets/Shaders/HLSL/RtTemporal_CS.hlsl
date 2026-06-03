@@ -19,7 +19,11 @@
 //   45 = variance-normalized signal
 //   46 = reprojection best score
 //   47 = final alpha after variance shaping
-//
+//   56 = motion confidence consumed by temporal
+//   57 = alpha after motion-confidence scaling
+//   58 = post-power motion confidence used for temporal weighting
+//   71 = temporal hit-distance weight visible on spec reuse
+//   72 = mismatch mask highlights rejected spec history
 // Do not include 37..44 here.
 // Those are history-select / A-Trous debug IDs.
 
@@ -32,12 +36,17 @@ Texture2D<float> g_PrevDepth : register(t5);
 Texture2D<float2> g_PrevMoments : register(t6);
 Texture2D<float2> g_CurrPrevUV : register(t7);
 Texture2D<float> g_CurrMotionConf : register(t8);
+Texture2D<float> g_CurrHitDist : register(t9);
+Texture2D<float> g_PrevHitDist : register(t10);
+Texture2D<float> g_PrevHitDistConf : register(t11);
 
 RWTexture2D<float4> g_HistoryOut : register(u0); // linear
 RWTexture2D<float4> g_Output : register(u1); // display
 RWTexture2D<float2> g_MomentsOut : register(u2);
 
 SamplerState g_LinearClamp : register(s0);
+
+static const float HIT_DIST_INVALID = -1.0f;
 
 cbuffer RtTemporalConstants : register(b0)
 {
@@ -62,6 +71,11 @@ cbuffer RtTemporalConstants : register(b0)
     float ReprojectMinConf;
     float MotionConfMin;
     float MotionConfPower;
+    
+    float HitDistSigmaScale;
+    float HitDistRoughCutoff;
+    float HitDistConfMin;
+    float _padHitDist0;
     
     float VarianceScale;
     float VarianceBias;
@@ -178,6 +192,39 @@ float EvalSpecWeight(
     return saturate((specDot - (1.0f - SpecDirSigma)) / max(1e-4f, SpecDirSigma));
 }
 
+
+bool HitDistValid(float d)
+{
+    return d >= 0.0f;
+}
+
+float EvalHitDistWeight(
+    float currHit,
+    float prevHit,
+    float prevHitConf,
+    float currRough,
+    float prevRough)
+{
+    if (HitDistSigmaScale <= 0.0f)
+        return 1.0f;
+
+    float roughMin = min(currRough, prevRough);
+
+    if (roughMin >= HitDistRoughCutoff)
+        return 1.0f;
+
+    if (!HitDistValid(currHit) || !HitDistValid(prevHit))
+        return 1.0f;
+
+    if (prevHitConf < HitDistConfMin)
+        return 1.0f;
+
+    float sigmaHit =
+        HitDistSigmaScale * max(1e-3f, currHit);
+
+    return exp(-abs(currHit - prevHit) / max(1e-4f, sigmaHit));
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -214,6 +261,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
     
     float varNorm = 0.0f;
     float alphaConfidence = 0.0f;
+            
+    float bestCandidateBaseScore = 0.0f;
+    float bestCandidateHitWeight = 1.0f;
 
     if (TemporalEnabled != 0 && HistoryValid != 0 && currDepth < 0.9999f)
     {
@@ -243,6 +293,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
             int2 bestOffset = int2(0, 0);
         
             float normalPow = max(1.0f, 1.0f / max(1e-4f, NormalSigma));
+            
+            float currHitDist =
+                (HitDistSigmaScale > 0.0f)
+                ? g_CurrHitDist[pixel]
+                : HIT_DIST_INVALID;
         
             [unroll]
             for (int y = -2; y <= 2; ++y)
@@ -294,7 +349,25 @@ void main(uint3 dtid : SV_DispatchThreadID)
                                                     candSpecOk,
                                                     candSpecDot);
 
-                    float score = wDepth * wNormal * wRough * wSpec;
+                    float baseScore = wDepth * wNormal * wRough * wSpec;
+
+                    float candPrevHit = HIT_DIST_INVALID;
+                    float candPrevHitConf = 0.0f;
+
+                    if (HitDistSigmaScale > 0.0f)
+                    {
+                        candPrevHit = g_PrevHitDist.Load(int3(cp, 0));
+                        candPrevHitConf = saturate(g_PrevHitDistConf.Load(int3(cp, 0)));
+                    }
+
+                    float wHit = EvalHitDistWeight(
+                        currHitDist,
+                        candPrevHit,
+                        candPrevHitConf,
+                        currR,
+                        candPrevR);
+
+                    float score = baseScore * wHit;
 
                     if (score > bestCandidateScore)
                     {
@@ -308,13 +381,15 @@ void main(uint3 dtid : SV_DispatchThreadID)
                         bestSpecDot = candSpecDot;
                         bestSpecOk = candSpecOk;
                         bestOffset = int2(x, y);
+                        bestCandidateBaseScore = baseScore;
+                        bestCandidateHitWeight = wHit;
                     }
                 }
             }
         
-            rawBestScore = saturate(max(bestCandidateScore, 0.0f));
+            rawBestScore = saturate(max(bestCandidateBaseScore, 0.0f));
             bestScore = rawBestScore;
-            effectiveScore = rawBestScore * motionConfW;
+            effectiveScore = saturate(max(bestCandidateScore, 0.0f)) * motionConfW;
 
             if (bestCandidateScore >= ReprojectMinConf &&
                 motionConfRaw >= motionConfMin)
@@ -473,6 +548,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
         display = motionConfW.xxx;
     }
     
+    else if (DebugView == 71)
+    {
+        display = bestCandidateHitWeight.xxx;
+    }
+    else if (DebugView == 72)
+    {
+        float mismatch = (bestCandidateHitWeight < 0.5f) ? 1.0f : 0.0f;
+        display = mismatch.xxx;
+    }
+    
     g_HistoryOut[pixel] = float4(history, newLen);
     g_MomentsOut[pixel] = moments;
     
@@ -482,7 +567,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
         (DebugView >= 45 && DebugView <= 47) ||
         DebugView == 56 ||
         DebugView == 57 ||
-        DebugView == 58;
+        DebugView == 58 ||
+        DebugView == 71 ||
+        DebugView == 72;
 
     if (isTemporalDebug)
     {

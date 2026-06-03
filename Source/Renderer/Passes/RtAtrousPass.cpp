@@ -22,12 +22,14 @@ void RtAtrousPass::Initialize(ID3D12Device* device, const std::filesystem::path&
 void RtAtrousPass::BuildRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE srvRange;
-    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 0);
+    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0, 0); // t0..t6
     // t0 = signal
     // t1 = normal/roughness
     // t2 = depth
     // t3 = moments
     // t4 = motion confidence
+    // t5 = reconstructed hit distance
+    // t6 = reconstructed hit-distance confidence
 
     CD3DX12_DESCRIPTOR_RANGE uavRange;
     uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0); // u0 output
