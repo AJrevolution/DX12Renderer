@@ -34,7 +34,9 @@ namespace
             dv == 57 ||
             dv == 58 ||
             dv == 71 ||
-            dv == 72;
+            dv == 72 ||
+            dv == 76 ||
+            dv == 77;
     }
 
     static bool IsSvgfDebug(uint32_t dv)
@@ -43,7 +45,8 @@ namespace
             (dv == 43) ||
             (dv == 44) ||
             dv == 60 ||
-            dv == 73;
+            dv == 73 ||
+            dv == 78;
     }
 
     static bool IsHistorySelectDebug(uint32_t dv)
@@ -461,6 +464,7 @@ void Renderer::RenderFrame(
     if (drawListStructuralChanged)
     {
         m_prevRtMotionWorldsValid = false;
+        m_rtSurfaceIdHistoryValid = false;
     }
 
     const bool svgfChanged =
@@ -603,6 +607,7 @@ void Renderer::RenderFrame(
         rtPostMode == RtPostMode::RawCombineOnly)
     {
         m_rtTemporalHistoryValid = false;
+        m_rtSurfaceIdHistoryValid = false;
     }
 
     m_prevRtCamYaw = m_camYaw;
@@ -1019,6 +1024,7 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_rtAovSurfaceIdReady = false;
     m_rtAovDiffuseAlbedoReady = false;
     m_rtDiffuseDemodulatedReady = false;
+    m_rtSurfaceIdHistoryValid = false;
 
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
@@ -1604,6 +1610,7 @@ void Renderer::BuildDrawList(float time)
         item.mesh = &m_floor;
         item.material = &m_floorMaterial;
         XMStoreFloat4x4(&item.world, XMMatrixIdentity());
+        item.rtObjectId = 1u;
         m_draws.push_back(item);
     }
 
@@ -1616,6 +1623,7 @@ void Renderer::BuildDrawList(float time)
             XMMatrixRotationY(rotationAngle) *
             XMMatrixTranslation(0.0f, 0.5f, 0.0f);
         XMStoreFloat4x4(&item.world, world);
+        item.rtObjectId = 2u;
         m_draws.push_back(item);
     }
 
@@ -1628,6 +1636,7 @@ void Renderer::BuildDrawList(float time)
             XMMatrixScaling(0.9f, 0.9f, 0.9f) *
             XMMatrixTranslation(-1.75f, 0.5f, 0.0f);
         XMStoreFloat4x4(&item.world, world);
+        item.rtObjectId = 3u;
         m_draws.push_back(item);
     }
 
@@ -1640,9 +1649,9 @@ void Renderer::BuildDrawList(float time)
             XMMatrixScaling(0.9f, 0.9f, 0.9f) *
             XMMatrixTranslation(1.75f, 0.5f, 0.0f);
         XMStoreFloat4x4(&item.world, world);
+        item.rtObjectId = 4u;
         m_draws.push_back(item);
     }
-
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS Renderer::UploadPerDrawConstants(
@@ -1855,6 +1864,7 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         CreateRtHistoryResources(m_device5.Get(), width, height);
      
         m_rtTemporalHistoryValid = false;
+        m_rtSurfaceIdHistoryValid = false;
         ResetRtAccumulation();
     }
 }
@@ -1958,6 +1968,10 @@ void Renderer::EnsureRtInstanceData(uint32_t frameIndex)
         const Material* mat = item.material;
 
         RTInstanceData data{};
+
+        data.objectId = item.rtObjectId != 0u
+            ? item.rtObjectId
+            : static_cast<uint32_t>(i + 1u);
 
         data.baseColorFactor = mat ? mat->baseColorFactor : DirectX::XMFLOAT4(1, 1, 1, 1);
         data.metallic = mat ? mat->metallicFactor : 0.0f;
@@ -2236,6 +2250,7 @@ void Renderer::ResetRtAccumulation(bool resetTemporalHistory)
     if (resetTemporalHistory)
     {
         m_rtTemporalHistoryValid = false;
+        m_rtSurfaceIdHistoryValid = false;
     }
 
     m_rtHistoryValid = false;
@@ -2714,7 +2729,8 @@ bool Renderer::UpdateRtDenoiseSrvTable(
     ID3D12Device* device,
     ID3D12Resource* signalResource,
     DescriptorAllocator::Allocation& table,
-    uint32_t& tableSrvCount)
+    uint32_t& tableSrvCount,
+    ID3D12Resource* surfaceIdResource)
 {
     if (!device ||
         !signalResource ||
@@ -2723,6 +2739,11 @@ bool Renderer::UpdateRtDenoiseSrvTable(
         !m_rtAovMotionConf ||
         !m_rtAovReady ||
         !m_rtAovMotionConfReady)
+    {
+        return false;
+    }
+
+    if (!surfaceIdResource)
     {
         return false;
     }
@@ -2790,6 +2811,21 @@ bool Renderer::UpdateRtDenoiseSrvTable(
             SrvAt(3));
     }
 
+    // t4 = surface id
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_UINT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            surfaceIdResource,
+            &srv,
+            SrvAt(4));
+    }
+
     return true;
 }
 
@@ -2797,6 +2833,9 @@ void Renderer::CreateRtHistoryResources(ID3D12Device* device, uint32_t width, ui
 {
     m_rtTemporalHistoryValid = false;
     m_rtHistoryReadIndex = 0;
+    m_rtSurfaceIdHistoryValid = false;
+
+    
 
     for (auto& r : m_rtHistoryAccum)  r.Reset();
     for (auto& r : m_rtHistoryNormal) r.Reset();
@@ -2807,6 +2846,7 @@ void Renderer::CreateRtHistoryResources(ID3D12Device* device, uint32_t width, ui
     for (auto& r : m_rtHistorySpecResp)         r.Reset();
     for (auto& r : m_rtHistoryMomentsSpec)      r.Reset();
     for (auto& r : m_rtHistoryMomentsSpecResp)  r.Reset();
+    for (auto& r : m_rtHistorySurfaceId)        r.Reset();
 
     m_rtPostDiffuse.Reset();
     m_rtPostSpec.Reset();
@@ -3088,6 +3128,38 @@ void Renderer::CreateRtHistoryResources(ID3D12Device* device, uint32_t width, ui
                 m_rtHistoryHitDistConf[i].Get(),
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
+
+        {
+            auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+                DXGI_FORMAT_R32_UINT,
+                width,
+                height,
+                1,
+                1,
+                1,
+                0,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+            ThrowIfFailed(
+                device->CreateCommittedResource(
+                    &heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &desc,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    nullptr,
+                    IID_PPV_ARGS(&m_rtHistorySurfaceId[i])),
+                "Create RT surface id history");
+
+            SetD3D12ObjectName(
+                m_rtHistorySurfaceId[i].Get(),
+                i == 0
+                ? L"RT History SurfaceId 0"
+                : L"RT History SurfaceId 1");
+
+            CommandList::SetGlobalState(
+                m_rtHistorySurfaceId[i].Get(),
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
     }
     m_rtHitDistHistoryValid = false;
     UpdateRtSvgfPingUavTable(device);
@@ -3282,6 +3354,8 @@ bool Renderer::UpdateRtTemporalTables(
     ID3D12Resource* currHitDistResource,
     ID3D12Resource* prevHitDistResource,
     ID3D12Resource* prevHitDistConfResource,
+    ID3D12Resource* currSurfaceIdResource,
+    ID3D12Resource* prevSurfaceIdResource,
     DescriptorAllocator::Allocation& srvTable,
     uint32_t& srvTableCount,
     DescriptorAllocator::Allocation& uavTable,
@@ -3303,6 +3377,7 @@ bool Renderer::UpdateRtTemporalTables(
         !m_rtAovMotionConfReady ||
         !outAccumResource ||
         !outMomentsResource ||
+        !currSurfaceIdResource ||
         !m_rtAccumDiffuseReady ||
         !m_rtAccumSpecReady ||
         !m_rtAovReady ||
@@ -3462,6 +3537,27 @@ bool Renderer::UpdateRtTemporalTables(
     // t11 = previous reconstructed hit-distance confidence
     WriteR16Srv(prevHitDistConfResource, 11);
 
+    auto WriteR32UintSrv = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_UINT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
+
+    // t12 = current SurfaceId AOV
+    WriteR32UintSrv(currSurfaceIdResource, 12);
+
+    // t13 = previous SurfaceId history
+    WriteR32UintSrv(prevSurfaceIdResource, 13);
+
     return true;
 }
 
@@ -3473,7 +3569,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     float roughnessSigma,
     float motionConfMin,
     float motionConfPower,
-    float hitDistSigmaScale)
+    float hitDistSigmaScale,
+    bool surfaceIdHistoryValid)
 {
     auto alloc = m_upload.Allocate(
         frameIndex,
@@ -3512,6 +3609,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     cb->hitDistSigmaScale = std::max(0.0f, hitDistSigmaScale);
     cb->hitDistRoughCutoff = kRtHitDistRoughCutoff;
     cb->hitDistConfMin = kRtHitDistConfMin;
+    cb->surfaceIdHistoryValid = surfaceIdHistoryValid ? 1u : 0u;
 
     cb->currCameraPos = 
     {
@@ -3543,7 +3641,8 @@ bool Renderer::UpdateRtSvgfSrvTable(
     ID3D12Resource* momentsResource,
     ID3D12Resource* motionConfResource,
     ID3D12Resource* hitDistResource,
-    ID3D12Resource* hitDistConfResource)
+    ID3D12Resource* hitDistConfResource,
+    ID3D12Resource* surfaceIdResource)
 {
     if (!device ||
         !signalResource ||
@@ -3553,6 +3652,11 @@ bool Renderer::UpdateRtSvgfSrvTable(
         !motionConfResource ||
         !m_rtAovMotionConfReady ||
         iter >= kMaxRtAtrousIterations)
+    {
+        return false;
+    }
+
+    if (!surfaceIdResource)
     {
         return false;
     }
@@ -3639,6 +3743,21 @@ bool Renderer::UpdateRtSvgfSrvTable(
 
     // t6 = reconstructed hit-distance confidence
     WriteR16Srv(hitDistConfResource, 6);
+
+    // t7 = current surface id
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_UINT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            surfaceIdResource,
+            &srv,
+            HandleAt(7));
+    }
 
     return true;
 }
@@ -3972,11 +4091,13 @@ bool Renderer::RunRtDenoiseSignal(
     uint32_t width,
     uint32_t height,
     float motionConfMin,
-    float motionConfPower)
+    float motionConfPower,
+    ID3D12Resource* surfaceIdResource)
 {
     if (!device ||
         !inputSignal ||
         !outputResource ||
+        !surfaceIdResource ||
         !m_rtAovNormal ||
         !m_rtAovDepth ||
         !m_rtAovReady ||
@@ -3996,6 +4117,7 @@ bool Renderer::RunRtDenoiseSignal(
     cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(outputResource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(surfaceIdResource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.FlushBarriers();
 
     const bool okTable =
@@ -4004,7 +4126,8 @@ bool Renderer::RunRtDenoiseSignal(
             device,
             inputSignal,
             srvTable,
-            srvTableCount);
+            srvTableCount,
+            surfaceIdResource);
 
     if (!okTable)
     {
@@ -4958,7 +5081,8 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
     r.wantsSvgfDebug = IsSvgfDebug(debugView);
     r.wantsAtrousOutputDebug =
         debugView == 43 ||
-        debugView == 44;
+        debugView == 44 ||
+        debugView == 78;
     r.wantsSpecAtrousOutputDebug =
         debugView == 60 ||
         debugView == 73;
@@ -5147,6 +5271,9 @@ Renderer::RtDenoiserHistories Renderer::BuildRtDenoiserHistories(
     h.hitDistConfRead = m_rtHistoryHitDistConf[readIndex].Get();
     h.hitDistConfWrite = m_rtHistoryHitDistConf[writeIndex].Get();
 
+    h.surfaceIdRead = m_rtHistorySurfaceId[readIndex].Get();
+    h.surfaceIdWrite = m_rtHistorySurfaceId[writeIndex].Get();
+
     return h;
 }
 
@@ -5229,10 +5356,11 @@ void Renderer::RunRtDenoiser(
             rtDebug.wantsTemporalDebug ||
             rtDebug.wantsHistorySelectDebug ||
             rtDebug.wantsSvgfDebug
-            ) &&
+        ) &&
         guides.ReadyForTemporal() &&
         guides.ReadyForMotionDilate() &&
-        guides.ReadyForHitDistReconstruct();
+        guides.ReadyForHitDistReconstruct() &&
+        guides.surfaceId;
 
     const bool postMayRunSpecSpatial =
         RtPostModeRunsSpecAtrous(rtPostMode) &&
@@ -5381,6 +5509,15 @@ void Renderer::RunRtDenoiser(
         cl.Transition(m_rtHistoryMomentsSpecResp[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         cl.Transition(m_rtHistorySpecResp[writeIndex].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtHistoryMomentsSpecResp[writeIndex].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl.Transition(guides.surfaceId, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        if (m_rtSurfaceIdHistoryValid)
+        {
+            cl.Transition(
+                m_rtHistorySurfaceId[m_rtHistoryReadIndex].Get(),
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+
         if (specTemporalHitDistAvailable)
         {
             cl.Transition(guides.hitDistRecons, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -5401,6 +5538,10 @@ void Renderer::RunRtDenoiser(
             nullptr,
             nullptr,
             nullptr,
+            guides.surfaceId,
+            m_rtSurfaceIdHistoryValid
+            ? m_rtHistorySurfaceId[m_rtHistoryReadIndex].Get()
+            : nullptr,
             m_rtFrames[frameIndex].temporalDiffuseSrvTable,
             m_rtFrames[frameIndex].temporalDiffuseSrvCount,
             m_rtFrames[frameIndex].temporalDiffuseUavTable,
@@ -5417,7 +5558,8 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalRoughnessSigma,
                     m_rtTemporalMotionConfMinDiffuse,
                     m_rtTemporalMotionConfPowerDiffuse,
-                    0.0f);
+                    0.0f,
+                    m_rtSurfaceIdHistoryValid);
 
             m_rtTemporalPass.Dispatch(
                 cl,
@@ -5460,6 +5602,10 @@ void Renderer::RunRtDenoiser(
             specTemporalHitDistAvailable ? guides.hitDistRecons : nullptr,
             specTemporalHitDistAvailable ? guides.hitDistHistoryRead : nullptr,
             specTemporalHitDistAvailable ? guides.hitDistConfHistoryRead : nullptr,
+            guides.surfaceId,
+            m_rtSurfaceIdHistoryValid
+            ? m_rtHistorySurfaceId[m_rtHistoryReadIndex].Get()
+            : nullptr,
             m_rtFrames[frameIndex].temporalSpecStableSrvTable,
             m_rtFrames[frameIndex].temporalSpecStableSrvCount,
             m_rtFrames[frameIndex].temporalSpecStableUavTable,
@@ -5476,7 +5622,8 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalRoughnessSigma,
                     m_rtTemporalMotionConfMinSpec,
                     m_rtTemporalMotionConfPowerSpec,
-                    specTemporalHitDistSigmaScale);
+                    specTemporalHitDistSigmaScale,
+                    m_rtSurfaceIdHistoryValid);
 
             m_rtTemporalPass.Dispatch(
                 cl,
@@ -5520,6 +5667,10 @@ void Renderer::RunRtDenoiser(
             specTemporalHitDistAvailable ? guides.hitDistRecons : nullptr,
             specTemporalHitDistAvailable ? guides.hitDistHistoryRead : nullptr,
             specTemporalHitDistAvailable ? guides.hitDistConfHistoryRead : nullptr,
+            guides.surfaceId,
+            m_rtSurfaceIdHistoryValid
+            ? m_rtHistorySurfaceId[m_rtHistoryReadIndex].Get()
+            : nullptr,
             m_rtFrames[frameIndex].temporalSpecRespSrvTable,
             m_rtFrames[frameIndex].temporalSpecRespSrvCount,
             m_rtFrames[frameIndex].temporalSpecRespUavTable,
@@ -5536,7 +5687,8 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalRoughnessSigmaResp,
                     m_rtTemporalMotionConfMinSpec,
                     m_rtTemporalMotionConfPowerSpec,
-                    specTemporalHitDistSigmaScale);
+                    specTemporalHitDistSigmaScale,
+                    m_rtSurfaceIdHistoryValid);
 
             m_rtTemporalPass.Dispatch(
                 cl,
@@ -5610,11 +5762,21 @@ void Renderer::RunRtDenoiser(
         cl.Transition(m_rtSvgfPing[0].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtSpecSelectedMoments.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl.Transition(guides.surfaceId, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        if (m_rtSurfaceIdHistoryValid)
+        {
+            cl.Transition(
+                m_rtHistorySurfaceId[m_rtHistoryReadIndex].Get(),
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+
         if (specSpatialHitDistAvailable)
         {
             cl.Transition(guides.hitDistRecons, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(guides.hitDistReconsConf, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
+
         cl.FlushBarriers();
 
         const bool ok = UpdateRtHistorySelectTables(
@@ -5752,7 +5914,8 @@ void Renderer::RunRtDenoiser(
                         svgfMoments,
                         guides.motionConf,
                         specSpatialHitDistAvailable ? guides.hitDistRecons : nullptr,
-                        specSpatialHitDistAvailable ? guides.hitDistReconsConf : nullptr);
+                        specSpatialHitDistAvailable ? guides.hitDistReconsConf : nullptr,
+                        guides.surfaceId);
 
                     if (ok)
                     {
@@ -5822,7 +5985,8 @@ void Renderer::RunRtDenoiser(
                         width,
                         height,
                         m_rtTemporalMotionConfMinSpec,
-                        m_rtTemporalMotionConfPowerSpec);
+                        m_rtTemporalMotionConfPowerSpec,
+                        guides.surfaceId);
 
                 if (ok)
                 {
@@ -5871,6 +6035,7 @@ void Renderer::RunRtDenoiser(
                     cl.Transition(svgfMoments, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                     cl.Transition(outRes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                     cl.Transition(guides.motionConf, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    cl.Transition(guides.surfaceId, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                     cl.FlushBarriers();
 
                     const bool ok = UpdateRtSvgfSrvTable(
@@ -5883,7 +6048,8 @@ void Renderer::RunRtDenoiser(
                         svgfMoments,
                         guides.motionConf,
                         nullptr,
-                        nullptr);
+                        nullptr,
+                        guides.surfaceId);
 
                     if (ok)
                     {
@@ -5954,7 +6120,8 @@ void Renderer::RunRtDenoiser(
                         width,
                         height,
                         m_rtTemporalMotionConfMinDiffuse,
-                        m_rtTemporalMotionConfPowerDiffuse);
+                        m_rtTemporalMotionConfPowerDiffuse,
+                        guides.surfaceId);
 
                 if (ok)
                 {
@@ -6061,9 +6228,48 @@ void Renderer::RunRtDenoiser(
         cl.Transition(m_rtHistoryDepth[writeIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         cl.FlushBarriers();
 
+        CommitRtSurfaceIdHistory(cl, writeIndex);
+
         m_rtHistoryReadIndex = writeIndex;
         m_rtTemporalHistoryValid = true;
 
         CmdEndEvent(cmdList);
     }
+}
+
+void Renderer::CommitRtSurfaceIdHistory(
+    CommandList& cl,
+    uint32_t writeIndex)
+{
+    if (!m_rtAovSurfaceId ||
+        !m_rtAovSurfaceIdReady ||
+        !m_rtHistorySurfaceId[writeIndex])
+    {
+        m_rtSurfaceIdHistoryValid = false;
+        return;
+    }
+
+    auto* cmdList = cl.Get();
+
+    cl.Transition(
+        m_rtAovSurfaceId.Get(),
+        D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+    cl.Transition(
+        m_rtHistorySurfaceId[writeIndex].Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST);
+
+    cl.FlushBarriers();
+
+    cmdList->CopyResource(
+        m_rtHistorySurfaceId[writeIndex].Get(),
+        m_rtAovSurfaceId.Get());
+
+    cl.Transition(
+        m_rtHistorySurfaceId[writeIndex].Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.FlushBarriers();
+
+    m_rtSurfaceIdHistoryValid = true;
 }

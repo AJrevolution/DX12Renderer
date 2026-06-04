@@ -82,6 +82,9 @@ private:
         float hitDistConfMin = 0.5f;
         float pad1 = 0.0f;
 
+        uint32_t surfaceIdHistoryValid = 0;
+        uint32_t padSurfaceId[3] = {};
+
         float varianceScale = 16.0f;
         float varianceBias = 0.0f;
         float varianceAlphaBoost = 0.5f;
@@ -142,6 +145,7 @@ private:
         Mesh* mesh = nullptr;
         Material* material = nullptr;
         DirectX::XMFLOAT4X4 world{};
+        uint32_t rtObjectId = 0;
     };
 
     struct RtHistorySelectConstants
@@ -386,6 +390,7 @@ private:
                 depth &&
                 diffuseAlbedo &&
                 diffuseDemodulated &&
+                surfaceId &&
                 (!needsMotionConfidence || motionConf);
         }
 
@@ -430,6 +435,9 @@ private:
 
         ID3D12Resource* hitDistConfRead = nullptr;
         ID3D12Resource* hitDistConfWrite = nullptr;
+
+        ID3D12Resource* surfaceIdRead = nullptr;
+        ID3D12Resource* surfaceIdWrite = nullptr;
     };
 
     enum class RtDebugOwner : uint8_t
@@ -502,7 +510,8 @@ private:
 
     static bool IsSurfaceIdDebug(uint32_t dv)
     {
-        return dv == 65 || dv == 66;
+        return dv == 65 || dv == 66 ||
+            dv == 74 || dv == 75;
     }
 
     static bool IsDiffuseAlbedoDebug(uint32_t dv)
@@ -589,7 +598,8 @@ private:
         ID3D12Device* device,
         ID3D12Resource* signalResource,
         DescriptorAllocator::Allocation& table,
-        uint32_t& tableSrvCount);
+        uint32_t& tableSrvCount,
+        ID3D12Resource* surfaceIdResource);
     
     void CreateRtHistoryResources(ID3D12Device* device, uint32_t width, uint32_t height);
 
@@ -603,7 +613,8 @@ private:
         ID3D12Resource* momentsResource,
         ID3D12Resource* motionConfResource,
         ID3D12Resource* hitDistResource,
-        ID3D12Resource* hitDistConfResource);
+        ID3D12Resource* hitDistConfResource,
+        ID3D12Resource* surfaceIdResource);
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtAtrousConstants(
         uint32_t frameIndex,
@@ -629,6 +640,8 @@ private:
         ID3D12Resource* currHitDistResource,
         ID3D12Resource* prevHitDistResource,
         ID3D12Resource* prevHitDistConfResource,
+        ID3D12Resource* currSurfaceIdResource,
+        ID3D12Resource* prevSurfaceIdResource,
         DescriptorAllocator::Allocation& srvTable,
         uint32_t& srvTableCount,
         DescriptorAllocator::Allocation& uavTable,
@@ -642,7 +655,8 @@ private:
         float roughnessSigma,
         float motionConfMin,
         float motionConfPower,
-        float hitDistSigmaScale);
+        float hitDistSigmaScale,
+        bool surfaceIdHistoryValid);
 
     D3D12_GPU_DESCRIPTOR_HANDLE RtSvgfPingUavGpuAt(uint32_t i) const;
 
@@ -743,7 +757,8 @@ private:
         uint32_t width,
         uint32_t height,
         float motionConfMin,
-        float motionConfPower);
+        float motionConfPower,
+        ID3D12Resource* surfaceIdResource);
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRayGenConstants(uint32_t frameIndex);
     void CommitRtMotionWorlds();
@@ -823,6 +838,10 @@ private:
         ID3D12Device* device,
         uint32_t width,
         uint32_t height);
+
+    void CommitRtSurfaceIdHistory(
+        CommandList& cl,
+        uint32_t writeIndex);
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -923,6 +942,8 @@ private:
     // The RT post stack must stay disabled.
     //   65 = surfaceId visualization
     //   66 = invalid surfaceId mask
+    //   74 = surfaceId visualization
+    //   75 = invalid surfaceId mask
     // 
     // Diffuse albedo / RayGen-owned views:
     // These write directly to m_rtOutput from RayGen.
@@ -1361,8 +1382,8 @@ private:
     static constexpr uint32_t kRtUavTableCount = 9;
     static constexpr uint32_t kRtHistorySelectSrvCount = 7;
     static constexpr uint32_t kRtHistorySelectUavCount = 3;
-    static constexpr uint32_t kRtSvgfSrvCount = 7;
-    static constexpr uint32_t kRtDenoiseSrvCount = 4;
+    static constexpr uint32_t kRtSvgfSrvCount = 8;
+    static constexpr uint32_t kRtDenoiseSrvCount = 5;
     static constexpr uint32_t kRtMotionDilateSrvCount = 5;
     static constexpr uint32_t kRtMotionDilateUavCount = 3;
     static constexpr uint32_t kRtHitDistReconstructSrvCount = 8;
@@ -1370,7 +1391,7 @@ private:
     static constexpr uint32_t kRtDiffuseDemodSrvCount = 3;
     static constexpr uint32_t kRtDiffuseDemodUavCount = 2;
     static constexpr uint32_t kRtCombineSrvCount = 3;
-    static constexpr uint32_t kRtTemporalSrvCount = 12;
+    static constexpr uint32_t kRtTemporalSrvCount = 14;
     static constexpr uint32_t kRtTemporalUavCount = 3;
     static constexpr float kRtHitDistRoughCutoff = 0.35f;
     static constexpr float kRtHitDistConfMin = 0.5f;
@@ -1404,6 +1425,9 @@ private:
 
     ComPtr<ID3D12Resource> m_rtDiffuseDemodulated;
     bool m_rtDiffuseDemodulatedReady = false;
+
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistorySurfaceId{};
+    bool m_rtSurfaceIdHistoryValid = false;
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

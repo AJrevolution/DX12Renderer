@@ -24,6 +24,8 @@
 //   58 = post-power motion confidence used for temporal weighting
 //   71 = temporal hit-distance weight visible on spec reuse
 //   72 = mismatch mask highlights rejected spec history
+//   76 = SurfaceId match mask
+//   77 = SurfaceId invalid mask
 // Do not include 37..44 here.
 // Those are history-select / A-Trous debug IDs.
 
@@ -39,6 +41,8 @@ Texture2D<float> g_CurrMotionConf : register(t8);
 Texture2D<float> g_CurrHitDist : register(t9);
 Texture2D<float> g_PrevHitDist : register(t10);
 Texture2D<float> g_PrevHitDistConf : register(t11);
+Texture2D<uint> g_CurrSurfaceId : register(t12);
+Texture2D<uint> g_PrevSurfaceId : register(t13);
 
 RWTexture2D<float4> g_HistoryOut : register(u0); // linear
 RWTexture2D<float4> g_Output : register(u1); // display
@@ -47,6 +51,7 @@ RWTexture2D<float2> g_MomentsOut : register(u2);
 SamplerState g_LinearClamp : register(s0);
 
 static const float HIT_DIST_INVALID = -1.0f;
+static const uint SURFACE_ID_INVALID = 0xFFFFFFFFu;
 
 cbuffer RtTemporalConstants : register(b0)
 {
@@ -76,6 +81,9 @@ cbuffer RtTemporalConstants : register(b0)
     float HitDistRoughCutoff;
     float HitDistConfMin;
     float _padHitDist0;
+    
+    uint SurfaceIdHistoryValid;
+    uint3 _padSurfaceId0;
     
     float VarianceScale;
     float VarianceBias;
@@ -225,6 +233,19 @@ float EvalHitDistWeight(
     return exp(-abs(currHit - prevHit) / max(1e-4f, sigmaHit));
 }
 
+bool SurfaceIdValid(uint id)
+{
+    return id != SURFACE_ID_INVALID;
+}
+
+float SurfaceIdMatchWeight(uint currId, uint prevId)
+{
+    if (!SurfaceIdValid(currId) || !SurfaceIdValid(prevId))
+        return 0.0f;
+
+    return (currId == prevId) ? 1.0f : 0.0f;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -264,6 +285,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
             
     float bestCandidateBaseScore = 0.0f;
     float bestCandidateHitWeight = 1.0f;
+    
+    float bestSurfaceIdMatch = 1.0f;
+    float bestSurfaceIdInvalid = 0.0f;
+    
+    uint currSurfaceId = g_CurrSurfaceId[pixel];
 
     if (TemporalEnabled != 0 && HistoryValid != 0 && currDepth < 0.9999f)
     {
@@ -329,6 +355,31 @@ void main(uint3 dtid : SV_DispatchThreadID)
                     float candPrevR = prevNormalPacked.a;
                     float candPrevDepth = g_PrevDepth.Load(int3(cp, 0));
                     float2 candPrevMoments = g_PrevMoments.Load(int3(cp, 0));
+                    
+                    uint candPrevSurfaceId = SURFACE_ID_INVALID;
+                    // Neutral when SurfaceId history is not valid yet.
+                    // This prevents SurfaceId warmup from disabling temporal reuse entirely.
+                    float wSurfaceId = 1.0f;
+                    float surfaceInvalid = 0.0f;
+
+                    if (SurfaceIdHistoryValid != 0u)
+                    {
+                        candPrevSurfaceId = g_PrevSurfaceId.Load(int3(cp, 0));
+
+                        const bool currIdValid = SurfaceIdValid(currSurfaceId);
+                        const bool prevIdValid = SurfaceIdValid(candPrevSurfaceId);
+
+                        if (!currIdValid || !prevIdValid)
+                        {
+                            wSurfaceId = 0.0f;
+                            surfaceInvalid = 1.0f;
+                        }
+                        else
+                        {
+                            wSurfaceId = (currSurfaceId == candPrevSurfaceId) ? 1.0f : 0.0f;
+                            surfaceInvalid = 0.0f;
+                        }
+                    }
 
                     float depthDelta = abs(currDepth - candPrevDepth);
                     float roughDelta = abs(currR - candPrevR);
@@ -367,7 +418,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
                         currR,
                         candPrevR);
 
-                    float score = baseScore * wHit;
+                    float score = baseScore * wHit * wSurfaceId;
 
                     if (score > bestCandidateScore)
                     {
@@ -383,6 +434,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
                         bestOffset = int2(x, y);
                         bestCandidateBaseScore = baseScore;
                         bestCandidateHitWeight = wHit;
+                        bestSurfaceIdMatch = wSurfaceId;
+                        bestSurfaceIdInvalid = surfaceInvalid;
                     }
                 }
             }
@@ -391,8 +444,13 @@ void main(uint3 dtid : SV_DispatchThreadID)
             bestScore = rawBestScore;
             effectiveScore = saturate(max(bestCandidateScore, 0.0f)) * motionConfW;
 
+            const bool surfaceIdAccept =
+                SurfaceIdHistoryValid == 0u ||
+                bestSurfaceIdMatch > 0.5f;
+
             if (bestCandidateScore >= ReprojectMinConf &&
-                motionConfRaw >= motionConfMin)
+                motionConfRaw >= motionConfMin &&
+                surfaceIdAccept)
             {
                 prevUV = bestPrevUV;
                 prevColor = bestPrevColor;
@@ -552,10 +610,21 @@ void main(uint3 dtid : SV_DispatchThreadID)
     {
         display = bestCandidateHitWeight.xxx;
     }
+    
     else if (DebugView == 72)
     {
         float mismatch = (bestCandidateHitWeight < 0.5f) ? 1.0f : 0.0f;
         display = mismatch.xxx;
+    }
+    
+    else if (DebugView == 76)
+    {
+        display = bestSurfaceIdMatch.xxx;
+    }
+    
+    else if (DebugView == 77)
+    {
+        display = bestSurfaceIdInvalid.xxx;
     }
     
     g_HistoryOut[pixel] = float4(history, newLen);
@@ -569,7 +638,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
         DebugView == 57 ||
         DebugView == 58 ||
         DebugView == 71 ||
-        DebugView == 72;
+        DebugView == 72 ||
+        DebugView == 76 ||
+        DebugView == 77;
 
     if (isTemporalDebug)
     {

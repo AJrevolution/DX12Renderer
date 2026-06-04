@@ -4,8 +4,11 @@ Texture2D<float4> g_Signal : register(t0);
 Texture2D<float4> g_AovNormal : register(t1);
 Texture2D<float> g_AovDepth : register(t2);
 Texture2D<float> g_MotionConf : register(t3);
+Texture2D<uint> g_SurfaceId : register(t4);
 
 RWTexture2D<float4> g_Output : register(u0);
+
+static const uint SURFACE_ID_INVALID = 0xFFFFFFFFu;
 
 cbuffer DenoiseConstants : register(b0)
 {
@@ -28,6 +31,19 @@ float SpatialWeight(int2 d)
 float3 DecodeNormal(float4 packedNormalRoughness)
 {
     return SafeNormalize(packedNormalRoughness.xyz * 2.0f - 1.0f);
+}
+
+bool SurfaceIdValid(uint id)
+{
+    return id != SURFACE_ID_INVALID;
+}
+
+float SurfaceIdEdgeWeight(uint id0, uint id1)
+{
+    if (!SurfaceIdValid(id0) || !SurfaceIdValid(id1))
+        return 0.0f;
+
+    return (id0 == id1) ? 1.0f : 0.0f;
 }
 
 [numthreads(8, 8, 1)]
@@ -71,6 +87,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
     
     float3 sum = 0.0f.xxx;
     float wsum = 0.0f;
+    
+    uint surfaceId0 = g_SurfaceId[pixel];
 
     for (int y = -Radius; y <= Radius; ++y)
     {
@@ -79,20 +97,24 @@ void main(uint3 dtid : SV_DispatchThreadID)
             int2 p = int2(pixel) + int2(x, y);
             p = clamp(p, int2(0, 0), int2(int(width) - 1, int(height) - 1));
 
-            float3 c = g_Signal[p].rgb;
-            float3 n1 = DecodeNormal(g_AovNormal[p]);
-            float z1 = g_AovDepth[p];
+            uint2 q = uint2(p);
+
+            float3 c = g_Signal[q].rgb;
+            float3 n1 = DecodeNormal(g_AovNormal[q]);
+            float z1 = g_AovDepth[q];
 
             float ws = SpatialWeight(int2(x, y));
             float wn = pow(saturate(dot(n0, n1)), normalPowerEff);
             float wz = exp(-abs(z0 - z1) / max(1e-4f, sigmaDepthEff));
 
-            float w = ws * wn * wz;
+            uint surfaceId1 = g_SurfaceId[q];
+            float wSurfaceId = SurfaceIdEdgeWeight(surfaceId0, surfaceId1);
+
+            float w = ws * wn * wz * wSurfaceId;
             sum += c * w;
             wsum += w;
         }
     }
-
     float3 filtered = (wsum > 1e-6f) ? (sum / wsum) : centerColor;
     
     // Linear HDR signal output. RtCombine is the only SRGB conversion owner.

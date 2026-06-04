@@ -24,7 +24,8 @@ struct RTInstanceData
 
     uint meshType;
     uint materialId;
-    uint2 _pad1;
+    uint objectId;
+    uint _pad1;
 
     row_major float4x4 prevObjectToWorld;
 };
@@ -345,8 +346,6 @@ float3 SampleGGXHalfVector(float2 u, float alpha)
         cosTheta);
 }
 
-
-
 float3 EvalSky(float3 dir)
 {
     float t = saturate(dir.y * 0.5f + 0.5f);
@@ -513,15 +512,14 @@ bool SurfaceIdValid(uint id)
     return id != RT_SURFACE_ID_INVALID;
 }
 
-uint MakeSurfaceId(uint instanceId, uint materialId)
+uint MakeSurfaceId(uint objectId, uint materialId)
 {
-    // 9.11A/B use SurfaceId only for same-frame guide borrowing validation.
-    // InstanceID is therefore acceptable here. If SurfaceId is later used for
-    // cross-frame temporal rejection, replace this with a persistent per-draw
-    // ID carried in RTInstanceData.
-    uint instance = instanceId & 0xFFFFu;
+    // SurfaceId is used for same-frame guide validation and cross-frame temporal
+    // validation. objectId must be stable for the logical draw/object, not just
+    // the current TLAS instance ordering.
+    uint obj = objectId & 0xFFFFu;
     uint mat = materialId & 0xFFFFu;
-    return instance | (mat << 16);
+    return obj | (mat << 16);
 }
 
 uint HashSurfaceId(uint id)
@@ -556,6 +554,21 @@ bool DiffuseAlbedoStable(float3 albedo)
            maxA < RT_ALBEDO_STABLE_MAX;
 }
 
+float3 SurfaceIdToColor(uint id)
+{
+    if (!SurfaceIdValid(id))
+        return 0.0f.xxx;
+
+    uint h = HashSurfaceId(id);
+
+    float r = float((h >> 0) & 0xFFu) / 255.0f;
+    float g = float((h >> 8) & 0xFFu) / 255.0f;
+    float b = float((h >> 16) & 0xFFu) / 255.0f;
+
+    // Keep all valid IDs visible, including ID/hash values near zero.
+    return lerp(0.12f.xxx, 1.0f.xxx, float3(r, g, b));
+}
+
 // RT IBL parity target:
 // - same latlong UV mapping convention as raster
 // - same BRDF LUT usage
@@ -583,7 +596,9 @@ void RayGen()
     
     bool isSurfaceIdDebug =
         DebugView == 65 ||
-        DebugView == 66;
+        DebugView == 66 ||
+        DebugView == 74 ||
+        DebugView == 75;
     
     bool isDiffuseAlbedoDebug =
         DebugView == 67 ||
@@ -756,6 +771,21 @@ void RayGen()
         float4 albedoSample = g_AovDiffuseAlbedo[pixel];
         float v = albedoSample.a > 0.5f ? 0.0f : 1.0f;
 
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+        return;
+    }
+    
+    if (DebugView == 74)
+    {
+        uint surfaceId = g_AovSurfaceId[pixel];
+        g_Output[pixel] = float4(SurfaceIdToColor(surfaceId), 1.0f);
+        return;
+    }
+
+    if (DebugView == 75)
+    {
+        uint surfaceId = g_AovSurfaceId[pixel];
+        float v = SurfaceIdValid(surfaceId) ? 0.0f : 1.0f;
         g_Output[pixel] = float4(v.xxx, 1.0f);
         return;
     }
@@ -966,7 +996,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         g_AovNormal[pixel] = float4(geomNormal * 0.5f + 0.5f, roughness);
         g_AovDepth[pixel] = depth01;
         g_AovMotion[pixel] = prevUV;
-        g_AovSurfaceId[pixel] = MakeSurfaceId(InstanceID(), data.materialId);
+        g_AovSurfaceId[pixel] = MakeSurfaceId(data.objectId, data.materialId);
         
         // Primary visible-surface hit distance guide.
         // Used by motion dilation/confidence for glossy visible-specular stability.

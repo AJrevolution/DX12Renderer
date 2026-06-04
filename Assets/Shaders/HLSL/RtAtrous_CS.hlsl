@@ -7,6 +7,7 @@
 //   44 = wide-iteration skip mask
 //   60 = spec A-Trous shaped motion confidence
 //   73 = spec A-Trous hit-distance shaped weight
+//   78 = surface-id edge stop factor
 
 Texture2D<float4> g_Signal : register(t0);
 Texture2D<float4> g_Normal : register(t1);
@@ -15,12 +16,14 @@ Texture2D<float2> g_Moments : register(t3);
 Texture2D<float> g_MotionConf : register(t4);
 Texture2D<float> g_HitDist : register(t5);
 Texture2D<float> g_HitDistConf : register(t6);
+Texture2D<uint> g_SurfaceId : register(t7);
 
 RWTexture2D<float4> g_Output : register(u0);
 
 SamplerState g_LinearClamp : register(s0);
 
 static const float HIT_DIST_INVALID = -1.0f;
+static const uint SURFACE_ID_INVALID = 0xFFFFFFFFu;
 
 cbuffer RtAtrousConstants : register(b0)
 {
@@ -91,6 +94,19 @@ float EvalHitDistAtrousWeight(
     return exp(-abs(hit0 - hit1) / max(1e-4f, sigmaHit));
 }
 
+bool SurfaceIdValid(uint id)
+{
+    return id != SURFACE_ID_INVALID;
+}
+
+float SurfaceIdEdgeWeight(uint id0, uint id1)
+{
+    if (!SurfaceIdValid(id0) || !SurfaceIdValid(id1))
+        return 0.0f;
+
+    return (id0 == id1) ? 1.0f : 0.0f;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -149,6 +165,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
         ? saturate(g_HitDistConf[pixel])
         : 0.0f;
     
+    uint surfaceId0 = g_SurfaceId[pixel];
+    
     float l0 = 0.0f;
     float sigmaL = 1.0f;
 
@@ -185,7 +203,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
         return;
     }
     
-    if (skipWide && DebugView != 73)
+    if (skipWide && DebugView != 73 && DebugView != 78)
     {
         if (FinalOutputSrgb != 0)
             g_Output[pixel] = float4(LinearToSRGB(c0), len0);
@@ -200,6 +218,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
     
     float hitWeightDebugSum = 0.0f;
     float hitWeightDebugWeight = 0.0f;
+    float surfaceIdDebugSum = 0.0f;
+    float surfaceIdDebugWeight = 0.0f;
     
     for (int y = -2; y <= 2; ++y)
     {
@@ -254,11 +274,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
             float wLen = isCenterTap ? 1.0f : wLenCenter;
             
-            float w = ws * wn * wz * wl * wLen * wHit;
+            uint surfaceId1 = g_SurfaceId[uint2(p)];
+            float wSurfaceId = SurfaceIdEdgeWeight(surfaceId0, surfaceId1);
+
+            float w = ws * wn * wz * wl * wLen * wHit * wSurfaceId;
             sum += c * w;
             wsum += w;
             hitWeightDebugSum += wHit * ws;
             hitWeightDebugWeight += ws;
+            surfaceIdDebugSum += wSurfaceId * ws;
+            surfaceIdDebugWeight += ws;
         }
     }
 
@@ -267,6 +292,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
         float v = (hitWeightDebugWeight > 1e-6f)
             ? saturate(hitWeightDebugSum / hitWeightDebugWeight)
             : 1.0f;
+
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+        return;
+    }
+    
+    if (DebugView == 78)
+    {
+        float v = (surfaceIdDebugWeight > 1e-6f)
+        ? saturate(surfaceIdDebugSum / surfaceIdDebugWeight)
+        : 0.0f;
 
         g_Output[pixel] = float4(v.xxx, 1.0f);
         return;
