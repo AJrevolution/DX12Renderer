@@ -3,7 +3,7 @@
 Texture2D<float2> g_RawPrevUV : register(t0);
 Texture2D<float4> g_AovNormal : register(t1);
 Texture2D<float> g_AovDepth : register(t2);
-Texture2D<float> g_PrimaryHitDist : register(t3);
+Texture2D<float> g_ViewZ : register(t3);
 Texture2D<uint> g_SurfaceId : register(t4);
 
 RWTexture2D<float2> g_DilatedPrevUV : register(u0);
@@ -22,6 +22,9 @@ cbuffer MotionDilateConstants : register(b0)
     float MinScore;
     uint DebugView;
     uint _pad0;
+    
+    float3 DistanceNormParams;
+    float DistanceNormSigma;
 };
 
 bool PrevUVValid(float2 uv)
@@ -47,29 +50,6 @@ void WriteDebug(uint2 pixel, bool invalidAfterDilation, float confidence)
         float v = saturate(confidence);
         g_Output[pixel] = float4(v.xxx, 1.0f);
     }
-}
-
-bool HitDistValid(float d)
-{
-    return d >= 0.0f;
-}
-
-float HitDistanceWeight(float roughness, float hit0, float hit1)
-{
-    static const float kGlossyCutoff = 0.35f;
-
-    if (roughness >= kGlossyCutoff ||
-        !HitDistValid(hit0) ||
-        !HitDistValid(hit1))
-    {
-        return 1.0f;
-    }
-
-    static const float kHitDistSigmaScale = 0.5f;
-    static const float kHitDistMinSigma = 0.10f;
-
-    float sigmaHit = max(kHitDistMinSigma, kHitDistSigmaScale * max(1e-3f, hit0));
-    return exp(-abs(hit0 - hit1) / max(1e-4f, sigmaHit));
 }
 
 bool SurfaceIdValid(uint id)
@@ -121,7 +101,12 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float4 centerNormalRough = g_AovNormal[pixel];
     float3 centerNormal = DecodeGuideNormal(centerNormalRough);
     float centerRoughness = centerNormalRough.a;
-    float centerHitDist = g_PrimaryHitDist[pixel];
+    float centerViewZ = g_ViewZ[pixel];
+    
+    float centerNormZ =
+    DistanceValid(centerViewZ)
+        ? NormalizeDistance(centerViewZ, centerViewZ, centerRoughness, DistanceNormParams)
+        : 0.0f;
 
     float bestScore = 0.0f;
     float2 bestPrevUV = float2(-1.0f, -1.0f);
@@ -155,11 +140,25 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
             float3 candidateNormal = DecodeGuideNormal(g_AovNormal[q]);
             
-            float candidateHitDist = g_PrimaryHitDist[q];
-            float hitWeight = HitDistanceWeight(
-                centerRoughness,
-                centerHitDist,
-                candidateHitDist);
+            float candidateViewZ = g_ViewZ[q];
+            
+            float wViewZ = 1.0f;
+
+            if (centerRoughness < 0.35f)
+            {
+                if (DistanceValid(centerViewZ) && DistanceValid(candidateViewZ))
+                {
+                    float candidateNormZ =
+                        NormalizeDistance(candidateViewZ, centerViewZ, centerRoughness, DistanceNormParams);
+
+                    wViewZ =
+                        DistanceSimilarityWeight(centerNormZ, candidateNormZ, DistanceNormSigma);
+                }
+                else
+                {
+                    wViewZ = 0.0f;
+                }
+            }
 
             float depthDelta = abs(centerDepth - candidateDepth);
             float depthWeight = exp(-depthDelta / max(1e-5f, DepthSigma));
@@ -171,7 +170,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
             float spatialSigma = max(1.0f, float(Radius));
             float spatialWeight = exp(-spatialDist2 / max(1e-5f, 2.0f * spatialSigma * spatialSigma));
 
-            float score = depthWeight * normalWeight * spatialWeight * hitWeight;
+            float score = depthWeight * normalWeight * spatialWeight * wViewZ;
 
             if (score > bestScore)
             {

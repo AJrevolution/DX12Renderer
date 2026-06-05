@@ -1,19 +1,28 @@
 #include "Common.hlsli"
 
-Texture2D<float> g_RawHitDist : register(t0);
+// RT ViewZ reconstruction
+// 63 = reconstructed ViewZ heatmap
+// 64 = reconstructed ViewZ confidence
+// 79 = normalized reconstructed ViewZ comparison-space value
+// 80 = invalid normalized ViewZ mask
+
+Texture2D<float> g_RawViewZ : register(t0);
 Texture2D<float4> g_CurrNormalRough : register(t1);
 Texture2D<float> g_CurrDepth : register(t2);
 Texture2D<float2> g_RawPrevUV : register(t3);
-Texture2D<float> g_PrevHitDist : register(t4);
+Texture2D<float> g_PrevViewZ : register(t4);
 Texture2D<float> g_PrevDepth : register(t5);
 Texture2D<float4> g_PrevNormalRough : register(t6);
 Texture2D<uint> g_SurfaceId : register(t7);
 
-RWTexture2D<float> g_ReconsHitDist : register(u0);
-RWTexture2D<float> g_ReconsConf : register(u1);
+RWTexture2D<float> g_ViewZRecons : register(u0);
+RWTexture2D<float> g_ViewZReconsConf : register(u1);
 RWTexture2D<float4> g_Output : register(u2);
 
-cbuffer HitDistReconstructConstants : register(b0)
+static const uint SURFACE_ID_INVALID = 0xFFFFFFFFu;
+static const float VIEWZ_INVALID = DISTANCE_INVALID;
+
+cbuffer RtViewZReconstructConstants : register(b0)
 {
     float2 InvResolution;
     float Alpha;
@@ -25,15 +34,16 @@ cbuffer HitDistReconstructConstants : register(b0)
     uint DebugView;
 
     uint Radius;
-    float HitDistVisMax;
+    float ViewZVisMax;
     uint2 _pad0;
+    
+    float3 DistanceNormParams;  // ViewZRaw / ViewZRecons invalid = -1.
+    float DistanceNormSigma;    // ViewZReconsConf invalid / unknown = 0.
 };
 
-static const float HIT_DIST_INVALID = -1.0f;
-
-bool HitDistValid(float d)
+bool ViewZValid(float z)
 {
-    return d >= 0.0f;
+    return DistanceValid(z);
 }
 
 bool PrevUVValid(float2 uv)
@@ -68,12 +78,54 @@ float GuideScore(
     return depthW * normalW * roughW;
 }
 
-void WriteDebug(uint2 pixel, float hitDist, float conf)
+bool SurfaceIdValid(uint id)
+{
+    return id != SURFACE_ID_INVALID;
+}
+
+float CenterNormViewZ(float centerViewZ, float roughness)
+{
+    return NormalizeDistance(
+        centerViewZ,
+        centerViewZ,
+        roughness,
+        DistanceNormParams);
+}
+
+float CandidateNormViewZ(float candidateViewZ, float centerViewZ, float roughness)
+{
+    return NormalizeDistance(
+        candidateViewZ,
+        centerViewZ,
+        roughness,
+        DistanceNormParams);
+}
+
+float ViewZSimilarityWeight(
+    float centerViewZ,
+    float candidateViewZ,
+    float centerRoughness)
+{
+    if (!ViewZValid(candidateViewZ))
+        return 0.0f;
+
+    // Important for reconstruction:
+    // if the center has no ViewZ yet, do not block history/spatial hole fill.
+    if (!ViewZValid(centerViewZ))
+        return 1.0f;
+
+    float n0 = CenterNormViewZ(centerViewZ, centerRoughness);
+    float n1 = CandidateNormViewZ(candidateViewZ, centerViewZ, centerRoughness);
+
+    return DistanceSimilarityWeight(n0, n1, DistanceNormSigma);
+}
+
+void WriteDebug(uint2 pixel, float viewZ, float conf, float roughness)
 {
     if (DebugView == 63u)
     {
-        float v = HitDistValid(hitDist)
-            ? saturate(hitDist / max(1e-4f, HitDistVisMax))
+        float v = ViewZValid(viewZ)
+            ? saturate(viewZ / max(1e-4f, ViewZVisMax))
             : 0.0f;
 
         g_Output[pixel] = float4(v.xxx, 1.0f);
@@ -82,13 +134,30 @@ void WriteDebug(uint2 pixel, float hitDist, float conf)
     {
         g_Output[pixel] = float4(saturate(conf).xxx, 1.0f);
     }
-}
+    
+    else if (DebugView == 79u)
+    {
+        float v = 0.0f;
 
-static const uint SURFACE_ID_INVALID = 0xFFFFFFFFu;
+        if (ViewZValid(viewZ))
+        {
+        // Contract debug: visualize the same normalized distance space used by
+        // ViewZ reconstruction / temporal / A-Trous comparison logic.
+            v = NormalizeDistance(
+            viewZ,
+            viewZ,
+            roughness,
+            DistanceNormParams);
+        }
 
-bool SurfaceIdValid(uint id)
-{
-    return id != SURFACE_ID_INVALID;
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+    }
+    
+    else if (DebugView == 80u)
+    {
+        float v = ViewZValid(viewZ) ? 0.0f : 1.0f;
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+    }
 }
 
 [numthreads(8, 8, 1)]
@@ -97,12 +166,12 @@ void main(uint3 dtid : SV_DispatchThreadID)
     uint2 pixel = dtid.xy;
 
     uint width, height;
-    g_ReconsHitDist.GetDimensions(width, height);
+    g_ViewZRecons.GetDimensions(width, height);
 
     if (pixel.x >= width || pixel.y >= height)
         return;
 
-    float rawHit = g_RawHitDist[pixel];
+    float rawViewZ = g_RawViewZ[pixel];
 
     float4 currNR = g_CurrNormalRough[pixel];
     float3 currN = DecodeNormal(currNR);
@@ -110,18 +179,20 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float currDepth = g_CurrDepth[pixel];
     uint centerSurfaceId = g_SurfaceId[pixel];
     bool centerSurfaceValid = SurfaceIdValid(centerSurfaceId);
+    
+    
 
-    float outHit = HIT_DIST_INVALID;
+    float outViewZ = VIEWZ_INVALID;
     float outConf = 0.0f;
 
     const bool rawValid =
         centerSurfaceValid &&
-        HitDistValid(rawHit) &&
+        ViewZValid(rawViewZ) &&
         currDepth < 0.9999f;
 
     if (rawValid)
     {
-        outHit = rawHit;
+        outViewZ = rawViewZ;
         outConf = 1.0f;
     }
 
@@ -131,21 +202,22 @@ void main(uint3 dtid : SV_DispatchThreadID)
     if (centerSurfaceValid &&
         HistoryValid != 0u &&
         PrevUVValid(prevUV) &&
+        (!ViewZValid(outViewZ) || outConf < 0.35f) &&
         currDepth < 0.9999f)
     {
         int2 prevPixel = int2(prevUV * float2(width, height));
         prevPixel = clamp(prevPixel, int2(0, 0), int2(int(width) - 1, int(height) - 1));
 
-        float prevHit = g_PrevHitDist[prevPixel];
+        float prevViewZ = g_PrevViewZ[prevPixel];
 
-        if (HitDistValid(prevHit))
+        if (ViewZValid(prevViewZ))
         {
             float prevDepth = g_PrevDepth[prevPixel];
             float4 prevNR = g_PrevNormalRough[prevPixel];
             float3 prevN = DecodeNormal(prevNR);
             float prevRough = prevNR.a;
 
-            float score = GuideScore(
+            float guideScore = GuideScore(
                 currDepth,
                 prevDepth,
                 currN,
@@ -153,34 +225,43 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 currRough,
                 prevRough);
 
+            float centerCompareViewZ = outViewZ;
+
+            float wViewZ = ViewZSimilarityWeight(
+                centerCompareViewZ,
+                prevViewZ,
+                currRough);
+
+            float score = guideScore * wViewZ;
+
             if (score > 0.10f)
             {
                 float histConf = saturate(score);
 
-                if (HitDistValid(outHit))
+                if (ViewZValid(outViewZ))
                 {
                     // Alpha is the current-sample weight. Low alpha gives stable history;
                     // high alpha follows current raw guide more aggressively.
                     float currentWeight = saturate(Alpha);
-                    outHit = lerp(prevHit, outHit, currentWeight);
+                    outViewZ = lerp(prevViewZ, outViewZ, currentWeight);
                     outConf = max(outConf, histConf);
                 }
                 else
                 {
-                    outHit = prevHit;
+                    outViewZ = prevViewZ;
                     outConf = max(outConf, histConf * 0.85f);
                 }
             }
         }
     }
 
-    // Current-frame hole fill from raw neighboring hit distances.
+    // Current-frame hole fill from raw neighboring ViewZ samples.
     if (centerSurfaceValid &&
-        (!HitDistValid(outHit) || outConf < 0.35f) &&
-        currDepth < 0.9999f)
+    (!ViewZValid(outViewZ) || outConf < 0.35f) &&
+    currDepth < 0.9999f)
     {
         float bestScore = 0.0f;
-        float bestHit = HIT_DIST_INVALID;
+        float bestViewZ = VIEWZ_INVALID;
 
         const int r = int(Radius);
 
@@ -198,10 +279,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
                 if (qSurfaceId != centerSurfaceId)
                     continue;
-                
-                float candidateHit = g_RawHitDist[q];
 
-                if (!HitDistValid(candidateHit))
+                float candidateViewZ = g_RawViewZ[q];
+
+                if (!ViewZValid(candidateViewZ))
                     continue;
 
                 float qDepth = g_CurrDepth[q];
@@ -214,38 +295,45 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 float qRough = qNR.a;
 
                 float guideScore = GuideScore(
-                    currDepth,
-                    qDepth,
-                    currN,
-                    qN,
-                    currRough,
-                    qRough);
+                currDepth,
+                qDepth,
+                currN,
+                qN,
+                currRough,
+                qRough);
 
                 float spatialDist2 = float(x * x + y * y);
                 float sigmaSpatial = max(1.0f, float(Radius));
-                float spatialW = exp(-spatialDist2 / max(1e-5f, 2.0f * sigmaSpatial * sigmaSpatial));
+                float spatialW = exp(
+                -spatialDist2 /
+                max(1e-5f, 2.0f * sigmaSpatial * sigmaSpatial));
 
-                float score = guideScore * spatialW;
+                float wViewZ = ViewZSimilarityWeight(
+                outViewZ,
+                candidateViewZ,
+                currRough);
+
+                float score = guideScore * spatialW * wViewZ;
 
                 if (score > bestScore)
                 {
                     bestScore = score;
-                    bestHit = candidateHit;
+                    bestViewZ = candidateViewZ;
                 }
             }
         }
 
-        if (bestScore > 0.05f && HitDistValid(bestHit))
+        if (bestScore > 0.05f && ViewZValid(bestViewZ))
         {
-            if (HitDistValid(outHit))
+            if (ViewZValid(outViewZ))
             {
                 float fillW = saturate((1.0f - outConf) * bestScore);
-                outHit = lerp(outHit, bestHit, fillW);
+                outViewZ = lerp(outViewZ, bestViewZ, fillW);
                 outConf = max(outConf, bestScore * 0.65f);
             }
             else
             {
-                outHit = bestHit;
+                outViewZ = bestViewZ;
                 outConf = bestScore * 0.65f;
             }
         }
@@ -253,12 +341,12 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     if (!centerSurfaceValid || currDepth >= 0.9999f)
     {
-        outHit = HIT_DIST_INVALID;
+        outViewZ = VIEWZ_INVALID;
         outConf = 0.0f;
     }
 
-    g_ReconsHitDist[pixel] = HitDistValid(outHit) ? outHit : HIT_DIST_INVALID;
-    g_ReconsConf[pixel] = saturate(outConf);
+    g_ViewZRecons[pixel] = ViewZValid(outViewZ) ? outViewZ : VIEWZ_INVALID;
+    g_ViewZReconsConf[pixel] = saturate(outConf);
 
-    WriteDebug(pixel, outHit, outConf);
+    WriteDebug(pixel, outViewZ, outConf, currRough);
 }

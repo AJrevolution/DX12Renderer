@@ -73,8 +73,8 @@ static const uint RT_RAY_PRIMARY_DIFFUSE = 0u;
 static const uint RT_RAY_SHADOW = 1u;
 static const uint RT_RAY_INDIRECT = 2u;
 static const uint RT_RAY_PRIMARY_SPECULAR = 3u;
-static const float RT_HIT_DIST_INVALID = -1.0f;
-static const float RT_PRIMARY_HIT_DIST_VIS_MAX = 25.0f;
+static const float RT_VIEWZ_INVALID = DISTANCE_INVALID;
+static const float RT_VIEWZ_VIS_MAX = 25.0f;
 static const uint RT_SURFACE_ID_INVALID = 0xFFFFFFFFu;
 static const float RT_ALBEDO_STABLE_MIN = 0.03f;
 static const float RT_ALBEDO_STABLE_MAX = 0.97f;
@@ -104,9 +104,9 @@ RWTexture2D<float4>                 g_AccumSpec : register(u2);
 RWTexture2D<float4>                 g_AovNormal : register(u3);
 RWTexture2D<float>                  g_AovDepth : register(u4);
 RWTexture2D<float2>                 g_AovMotion : register(u5);         // prevUV, (-1,-1) invalid
-RWTexture2D<float>                  g_AovPrimaryHitDist : register(u6); // primary visible-surface RayT, -1 invalid
+RWTexture2D<float>                  g_AovViewZRaw : register(u6);       // primary ray distance / ViewZ-compatible guide, -1 invalid
 RWTexture2D<uint>                   g_AovSurfaceId : register(u7);      // object/material id, 0xFFFFFFFF invalid
-RWTexture2D<float4>                 g_AovDiffuseAlbedo : register(u8); // rgb=diffuse albedo, a=stable demod flag
+RWTexture2D<float4>                 g_AovDiffuseAlbedo : register(u8);  // rgb=diffuse albedo, a=stable demod flag
 StructuredBuffer<VertexRT>          g_QuadVerts : register(t1);
 ByteAddressBuffer                   g_QuadIndices : register(t2);
 StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);
@@ -502,9 +502,9 @@ bool PrevUVValid(float2 uv)
            uv.y >= 0.0f && uv.y <= 1.0f;
 }
 
-bool HitDistValid(float d)
+bool ViewZValid(float z)
 {
-    return d >= 0.0f;
+    return DistanceValid(z);
 }
 
 bool SurfaceIdValid(uint id)
@@ -590,7 +590,7 @@ void RayGen()
         DebugView == 52 ||
         DebugView == 53;
     
-    bool isHitDistDebug =
+    bool isViewZDebug =
         DebugView == 61 ||
         DebugView == 62;
     
@@ -608,11 +608,11 @@ void RayGen()
         (RtAccumulate == 0) ||
         isRtShadingDebug ||
         isMotionDebug ||
-        isHitDistDebug ||
+        isViewZDebug ||
         isSurfaceIdDebug ||
         isDiffuseAlbedoDebug;
     
-    g_AovPrimaryHitDist[pixel] = RT_HIT_DIST_INVALID;
+    g_AovViewZRaw[pixel] = RT_VIEWZ_INVALID;
     g_AovSurfaceId[pixel] = RT_SURFACE_ID_INVALID;
     g_AovDiffuseAlbedo[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
     
@@ -722,11 +722,11 @@ void RayGen()
 
     if (DebugView == 61)
     {
-        float hitDist = g_AovPrimaryHitDist[pixel];
-        bool validHit = HitDistValid(hitDist);
+        float viewZ = g_AovViewZRaw[pixel];
+        bool validViewZ = ViewZValid(viewZ);
 
         // Conservative bring-up visualization range. Promote to a knob later only if needed.
-        float v = validHit ? saturate(hitDist / RT_PRIMARY_HIT_DIST_VIS_MAX) : 0.0f;
+        float v = validViewZ ? saturate(viewZ / RT_VIEWZ_VIS_MAX) : 0.0f;
 
         g_Output[pixel] = float4(v.xxx, 1.0f);
         return;
@@ -734,8 +734,8 @@ void RayGen()
 
     if (DebugView == 62)
     {
-        float hitDist = g_AovPrimaryHitDist[pixel];
-        float v = HitDistValid(hitDist) ? 0.0f : 1.0f;
+        float viewZ = g_AovViewZRaw[pixel];
+        float v = ViewZValid(viewZ) ? 0.0f : 1.0f;
 
         g_Output[pixel] = float4(v.xxx, 1.0f);
         return;
@@ -884,7 +884,7 @@ void Miss(inout RayPayload payload)
     if (payload.rayType == RT_RAY_PRIMARY_SPECULAR)
     {
         uint2 pixel = DispatchRaysIndex().xy;
-        g_AovPrimaryHitDist[pixel] = RT_HIT_DIST_INVALID;
+        g_AovViewZRaw[pixel] = RT_VIEWZ_INVALID;
         
         payload.color = 0.0f.xxx;
         return;
@@ -900,7 +900,7 @@ void Miss(inout RayPayload payload)
         g_AovNormal[pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
         g_AovDepth[pixel] = 1.0f;
         g_AovMotion[pixel] = float2(-1.0f, -1.0f);
-        g_AovPrimaryHitDist[pixel] = RT_HIT_DIST_INVALID;
+        g_AovViewZRaw[pixel] = RT_VIEWZ_INVALID;
         g_AovSurfaceId[pixel] = RT_SURFACE_ID_INVALID;
         g_AovDiffuseAlbedo[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
         
@@ -917,7 +917,11 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     if (payload.rayType == RT_RAY_PRIMARY_SPECULAR)
     {
         uint2 pixel = DispatchRaysIndex().xy;
-        g_AovPrimaryHitDist[pixel] = RayTCurrent();
+        // Linear primary visible-surface distance in world units.
+        // Current implementation stores RayT along the primary camera ray.
+        // This is a ViewZ-compatible primary distance guide,
+        // not strict camera-space Z and not specular secondary-ray hit distance.
+        g_AovViewZRaw[pixel] = RayTCurrent();
     }
     
     if (payload.rayType == RT_RAY_SHADOW)
@@ -998,9 +1002,11 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         g_AovMotion[pixel] = prevUV;
         g_AovSurfaceId[pixel] = MakeSurfaceId(data.objectId, data.materialId);
         
-        // Primary visible-surface hit distance guide.
-        // Used by motion dilation/confidence for glossy visible-specular stability.
-        g_AovPrimaryHitDist[pixel] = RayTCurrent();
+        // Linear primary visible-surface distance in world units.
+        // Current implementation stores RayT along the primary camera ray.
+        // Used as a ViewZ-compatible guide for motion dilation/confidence.
+        // This is not strict camera-space Z and not specular secondary-ray hit distance.
+        g_AovViewZRaw[pixel] = RayTCurrent();
         
         float3 diffuseAlbedo = saturate(base * (1.0f - saturate(metallic)));
         float stableAlbedo = DiffuseAlbedoStable(diffuseAlbedo) ? 1.0f : 0.0f;

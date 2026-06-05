@@ -6,7 +6,7 @@
 //   43 = center-history length attenuation factor
 //   44 = wide-iteration skip mask
 //   60 = spec A-Trous shaped motion confidence
-//   73 = spec A-Trous hit-distance shaped weight
+//   73 = spec A-Trous ViewZ shaped weight
 //   78 = surface-id edge stop factor
 
 Texture2D<float4> g_Signal : register(t0);
@@ -14,15 +14,14 @@ Texture2D<float4> g_Normal : register(t1);
 Texture2D<float> g_Depth : register(t2);
 Texture2D<float2> g_Moments : register(t3);
 Texture2D<float> g_MotionConf : register(t4);
-Texture2D<float> g_HitDist : register(t5);
-Texture2D<float> g_HitDistConf : register(t6);
+Texture2D<float> g_ViewZ : register(t5);
+Texture2D<float> g_ViewZConf : register(t6);
 Texture2D<uint> g_SurfaceId : register(t7);
 
 RWTexture2D<float4> g_Output : register(u0);
 
 SamplerState g_LinearClamp : register(s0);
 
-static const float HIT_DIST_INVALID = -1.0f;
 static const uint SURFACE_ID_INVALID = 0xFFFFFFFFu;
 
 cbuffer RtAtrousConstants : register(b0)
@@ -46,11 +45,14 @@ cbuffer RtAtrousConstants : register(b0)
     float MotionConfPower;
     float MotionConfMin;
     
-    float HitDistSigmaScale;
-    float HitDistRoughCutoff;
+    float ViewZSigmaScale;
+    float ViewZRoughCutoff;
 
-    float HitDistConfMin;
-    float _padHitDist0;
+    float ViewZConfMin;
+    float _padViewZ0;
+
+    float3 DistanceNormParams;
+    float DistanceNormSigma;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -63,35 +65,43 @@ float Luminance(float3 c)
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
-bool HitDistValid(float d)
-{
-    return d >= 0.0f;
-}
-
-float EvalHitDistAtrousWeight(
-    float hit0,
-    float hit1,
+float EvalViewZAtrousWeight(
+    float viewZ0,
+    float viewZ1,
     float conf0,
     float conf1,
     float roughMin)
 {
-    // MotionConfPower > 0 is the existing spec-path indicator.
-    if (MotionConfPower <= 0.0f || HitDistSigmaScale <= 0.0f)
+    // MotionConfPower > 0 remains the existing spec-path indicator.
+    if (MotionConfPower <= 0.0f || ViewZSigmaScale <= 0.0f)
         return 1.0f;
 
-    if (roughMin >= HitDistRoughCutoff)
+    if (roughMin >= ViewZRoughCutoff)
         return 1.0f;
 
-    if (!HitDistValid(hit0) || !HitDistValid(hit1))
+    if (!DistanceValid(viewZ0) || !DistanceValid(viewZ1))
         return 1.0f;
 
-    if (conf0 < HitDistConfMin || conf1 < HitDistConfMin)
+    if (conf0 < ViewZConfMin || conf1 < ViewZConfMin)
         return 1.0f;
 
-    float sigmaHit =
-        HitDistSigmaScale * max(1e-3f, hit0);
+    float n0 = NormalizeDistance(
+        viewZ0,
+        viewZ0,
+        roughMin,
+        DistanceNormParams);
 
-    return exp(-abs(hit0 - hit1) / max(1e-4f, sigmaHit));
+    float n1 = NormalizeDistance(
+        viewZ1,
+        viewZ0,
+        roughMin,
+        DistanceNormParams);
+
+    float sigma = max(
+        1e-4f,
+        DistanceNormSigma * max(0.0f, ViewZSigmaScale));
+
+    return DistanceSimilarityWeight(n0, n1, sigma);
 }
 
 bool SurfaceIdValid(uint id)
@@ -155,14 +165,14 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float rough0 = n0Packed.a;
     float z0 = g_Depth[pixel];
     
-    float hit0 =
-    (HitDistSigmaScale > 0.0f)
-        ? g_HitDist[pixel]
-        : HIT_DIST_INVALID;
+    float viewZ0 =
+    (ViewZSigmaScale > 0.0f)
+        ? g_ViewZ[pixel]
+        : DISTANCE_INVALID;
 
-    float hitConf0 =
-    (HitDistSigmaScale > 0.0f)
-        ? saturate(g_HitDistConf[pixel])
+    float viewZConf0 =
+    (ViewZSigmaScale > 0.0f)
+        ? saturate(g_ViewZConf[pixel])
         : 0.0f;
     
     uint surfaceId0 = g_SurfaceId[pixel];
@@ -216,8 +226,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float3 sum = 0.0f.xxx;
     float wsum = 0.0f;
     
-    float hitWeightDebugSum = 0.0f;
-    float hitWeightDebugWeight = 0.0f;
+    float viewZWeightDebugSum = 0.0f;
+    float viewZWeightDebugWeight = 0.0f;
     float surfaceIdDebugSum = 0.0f;
     float surfaceIdDebugWeight = 0.0f;
     
@@ -240,21 +250,22 @@ void main(uint3 dtid : SV_DispatchThreadID)
             float ws = kernel[abs(x)] * kernel[abs(y)];
 
             float roughMin = min(rough0, rough);
-            float hit1 = HIT_DIST_INVALID;
-            float hitConf1 = 0.0f;
+            float viewZ1 = DISTANCE_INVALID;
+            float viewZConf1 = 0.0f;
 
-            if (HitDistSigmaScale > 0.0f)
+            if (ViewZSigmaScale > 0.0f)
             {
-                hit1 = g_HitDist[uint2(p)];
-                hitConf1 = saturate(g_HitDistConf[uint2(p)]);
+                viewZ1 = g_ViewZ[uint2(p)];
+                viewZConf1 = saturate(g_ViewZConf[uint2(p)]);
             }
 
-            float wHit = EvalHitDistAtrousWeight(
-                hit0,
-                hit1,
-                hitConf0,
-                hitConf1,
+            float wViewZ = EvalViewZAtrousWeight(
+                viewZ0,
+                viewZ1,
+                viewZConf0,
+                viewZConf1,
                 roughMin);
+            
             float basePow = lerp(128.0f, 32.0f, roughMin);
             float normalScale = clamp(0.25f / max(1e-4f, SigmaNormal), 0.5f, 2.0f);
             float normalPow = basePow * normalScale;
@@ -277,11 +288,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
             uint surfaceId1 = g_SurfaceId[uint2(p)];
             float wSurfaceId = SurfaceIdEdgeWeight(surfaceId0, surfaceId1);
 
-            float w = ws * wn * wz * wl * wLen * wHit * wSurfaceId;
+            float w = ws * wn * wz * wl * wLen * wViewZ * wSurfaceId;
             sum += c * w;
             wsum += w;
-            hitWeightDebugSum += wHit * ws;
-            hitWeightDebugWeight += ws;
+            viewZWeightDebugSum += wViewZ * ws;
+            viewZWeightDebugWeight += ws;
             surfaceIdDebugSum += wSurfaceId * ws;
             surfaceIdDebugWeight += ws;
         }
@@ -289,9 +300,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     if (DebugView == 73)
     {
-        float v = (hitWeightDebugWeight > 1e-6f)
-            ? saturate(hitWeightDebugSum / hitWeightDebugWeight)
-            : 1.0f;
+        float v = (viewZWeightDebugWeight > 1e-6f)
+        ? saturate(viewZWeightDebugSum / viewZWeightDebugWeight)
+        : 1.0f;
 
         g_Output[pixel] = float4(v.xxx, 1.0f);
         return;

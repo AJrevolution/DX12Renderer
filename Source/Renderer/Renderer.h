@@ -77,10 +77,13 @@ private:
         float motionConfMin = 0.20f;
         float motionConfPower = 1.0f;
 
-        float hitDistSigmaScale = 0.0f;
-        float hitDistRoughCutoff = 0.35f;
-        float hitDistConfMin = 0.5f;
+        float viewZSigmaScale = 0.0f;
+        float viewZRoughCutoff = 0.35f;
+        float viewZConfMin = 0.5f;
         float pad1 = 0.0f;
+
+        DirectX::XMFLOAT3 distanceNormParams{ 1.0f, 0.0f, 1.0f };
+        float distanceNormSigma = 0.08f;
 
         uint32_t surfaceIdHistoryValid = 0;
         uint32_t padSurfaceId[3] = {};
@@ -132,11 +135,14 @@ private:
         float motionConfPower = 0.0f;
         float motionConfMin = 0.0f;
 
-        float hitDistSigmaScale = 0.0f;
-        float hitDistRoughCutoff = 0.35f;
+        float viewZSigmaScale = 0.0f;
+        float viewZRoughCutoff = 0.35f;
 
-        float hitDistConfMin = 0.5f;
+        float viewZConfMin = 0.5f;
         float pad = 0.0f;
+
+        DirectX::XMFLOAT3 distanceNormParams{ 1.0f, 0.0f, 1.0f };
+        float distanceNormSigma = 0.08f;
     };
     static_assert((sizeof(RtAtrousConstants) % 16) == 0, "RtAtrousConstants must be 16-byte aligned.");
 
@@ -174,8 +180,10 @@ private:
         float minScore = 0.05f;
         uint32_t debugView = 0;
         uint32_t pad0 = 0;
+        
+        DirectX::XMFLOAT3 distanceNormParams{ 1.0f, 0.0f, 1.0f };
+        float distanceNormSigma = 0.08f;
     };
-
     static_assert((sizeof(RtMotionDilateConstants) % 16) == 0, "RtMotionDilateConstants must be 16-byte aligned.");
     
     enum class RtSignal : uint32_t
@@ -240,7 +248,7 @@ private:
         virtual ~IRtSpatialFilter() = default;
     };  
 
-    struct RtHitDistReconstructConstants
+    struct RtViewZReconstructConstants
     {
         DirectX::XMFLOAT2 invResolution{};
         float alpha = 0.20f;
@@ -252,10 +260,13 @@ private:
         uint32_t debugView = 0;
 
         uint32_t radius = 2;
-        float hitDistVisMax = 25.0f;
+        float viewZVisMax = 25.0f;
         uint32_t pad0[2] = {};
+
+        DirectX::XMFLOAT3 distanceNormParams{ 1.0f, 0.0f, 1.0f };
+        float distanceNormSigma = 0.08f;
     };
-    static_assert((sizeof(RtHitDistReconstructConstants) % 16) == 0, "RtHitDistReconstructConstants must be 16-byte aligned.");
+    static_assert((sizeof(RtViewZReconstructConstants) % 16) == 0, "RtViewZReconstructConstants must be 16-byte aligned.");
 
     struct RtDiffuseDemodulateConstants
     {
@@ -333,27 +344,27 @@ private:
         ID3D12Resource* prevUVDilated = nullptr;        // R16G16, compute
         ID3D12Resource* motionConf = nullptr;           // R16, compute
 
-        ID3D12Resource* primaryHitDistRaw = nullptr;    // R16, DXR u6
-        ID3D12Resource* hitDistRecons = nullptr;        // R16, compute
-        ID3D12Resource* hitDistReconsConf = nullptr;    // R16, compute
+        ID3D12Resource* viewZRaw = nullptr;    // R16, DXR u6
+        ID3D12Resource* viewZRecons = nullptr;        // R16, compute
+        ID3D12Resource* viewZReconsConf = nullptr;    // R16, compute
 
-        ID3D12Resource* hitDistHistoryRead = nullptr;        // R16, previous reconstructed hit distance
-        ID3D12Resource* hitDistConfHistoryRead = nullptr;    // R16, previous reconstructed confidence
+        ID3D12Resource* viewZHistoryRead = nullptr;        // R16, previous reconstructed viewZ
+        ID3D12Resource* viewZConfHistoryRead = nullptr;    // R16, previous reconstructed confidence
 
         ID3D12Resource* surfaceId = nullptr;            // R32_UINT
         ID3D12Resource* diffuseAlbedo = nullptr;        // R16G16B16A16, a=stable demod flag
 
         ID3D12Resource* diffuseDemodulated = nullptr;   // R16G16B16A16, diffuse lighting
 
-        bool ReadyForHitDistReconstruct() const
+        bool ReadyForViewZReconstruct() const
         {
-            return primaryHitDistRaw &&
+            return viewZRaw &&
                 normalRough &&
                 depth &&
                 prevUVRaw &&
                 surfaceId &&
-                hitDistRecons &&
-                hitDistReconsConf;
+                viewZRecons &&
+                viewZReconsConf;
         }
 
         bool ReadyForMotionDilate() const
@@ -363,7 +374,7 @@ private:
                 motionConf &&
                 normalRough &&
                 depth &&
-                primaryHitDistRaw &&
+                viewZRaw &&
                 surfaceId;
         }
 
@@ -399,17 +410,17 @@ private:
             return diffuseAlbedo != nullptr;
         }
 
-        bool ReadyForSpecHitDistanceTemporal() const
+        bool ReadyForViewZTemporal() const
         {
-            return hitDistRecons &&
-                hitDistHistoryRead &&
-                hitDistConfHistoryRead;
+            return viewZRecons &&
+                viewZHistoryRead &&
+                viewZConfHistoryRead;
         }
 
-        bool ReadyForSpecHitDistanceSpatial() const
+        bool ReadyForViewZSpatial() const
         {
-            return hitDistRecons &&
-                hitDistReconsConf;
+            return viewZRecons &&
+                viewZReconsConf;
         }
     };
 
@@ -430,11 +441,11 @@ private:
         ID3D12Resource* depthRead = nullptr;
         ID3D12Resource* depthWrite = nullptr;
 
-        ID3D12Resource* hitDistRead = nullptr;
-        ID3D12Resource* hitDistWrite = nullptr;
+        ID3D12Resource* viewZRead = nullptr;
+        ID3D12Resource* viewZWrite = nullptr;
 
-        ID3D12Resource* hitDistConfRead = nullptr;
-        ID3D12Resource* hitDistConfWrite = nullptr;
+        ID3D12Resource* viewZConfRead = nullptr;
+        ID3D12Resource* viewZConfWrite = nullptr;
 
         ID3D12Resource* surfaceIdRead = nullptr;
         ID3D12Resource* surfaceIdWrite = nullptr;
@@ -464,8 +475,8 @@ private:
         bool wantsSplitDebug = false;
         bool wantsMotionDebug = false;
         bool wantsMotionDilateDebug = false;
-        bool wantsHitDistDebug = false;
-        bool wantsHitDistReconstructDebug = false;
+        bool wantsViewZDebug = false;
+        bool wantsViewZReconstructDebug = false;
         bool wantsSurfaceIdDebug = false;
         bool wantsDiffuseAlbedoDebug = false;
         bool wantsDiffuseDemodDebug = false;
@@ -498,14 +509,15 @@ private:
         return dv == 54 || dv == 55;
     }
 
-    static bool IsHitDistDebug(uint32_t dv)
+    static bool IsViewZDebug(uint32_t dv)
     {
         return dv == 61 || dv == 62;
     }
 
-    static bool IsHitDistReconstructDebug(uint32_t dv)
+    static bool IsViewZReconstructDebug(uint32_t dv)
     {
-        return dv == 63 || dv == 64;
+        return dv == 63 || dv == 64 ||
+            dv == 79 || dv == 80;
     }
 
     static bool IsSurfaceIdDebug(uint32_t dv)
@@ -522,6 +534,11 @@ private:
     static bool IsDiffuseDemodulateDebug(uint32_t dv)
     {
         return dv == 69 || dv == 70;
+    }
+
+    static DirectX::XMFLOAT3 RtDistanceNormParams()
+    {
+        return DirectX::XMFLOAT3(1.0f, 0.0f, 1.0f);
     }
 
     std::vector<DrawItem> m_draws;
@@ -612,8 +629,8 @@ private:
         ID3D12Resource* signalResource,
         ID3D12Resource* momentsResource,
         ID3D12Resource* motionConfResource,
-        ID3D12Resource* hitDistResource,
-        ID3D12Resource* hitDistConfResource,
+        ID3D12Resource* viewZResource,
+        ID3D12Resource* viewZConfResource,
         ID3D12Resource* surfaceIdResource);
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtAtrousConstants(
@@ -625,7 +642,7 @@ private:
         bool finalOutputSrgb,
         float motionConfPower,
         float motionConfMin,
-        float hitDistSigmaScale);
+        float viewZSigmaScale);
 
     void UpdateRtSvgfPingUavTable(ID3D12Device* device);
 
@@ -637,9 +654,9 @@ private:
         ID3D12Resource* prevMomentsResource,
         ID3D12Resource* outAccumResource,
         ID3D12Resource* outMomentsResource,
-        ID3D12Resource* currHitDistResource,
-        ID3D12Resource* prevHitDistResource,
-        ID3D12Resource* prevHitDistConfResource,
+        ID3D12Resource* currViewZResource,
+        ID3D12Resource* prevViewZResource,
+        ID3D12Resource* prevViewZConfResource,
         ID3D12Resource* currSurfaceIdResource,
         ID3D12Resource* prevSurfaceIdResource,
         DescriptorAllocator::Allocation& srvTable,
@@ -655,7 +672,7 @@ private:
         float roughnessSigma,
         float motionConfMin,
         float motionConfPower,
-        float hitDistSigmaScale,
+        float viewZSigmaScale,
         bool surfaceIdHistoryValid);
 
     D3D12_GPU_DESCRIPTOR_HANDLE RtSvgfPingUavGpuAt(uint32_t i) const;
@@ -766,7 +783,7 @@ private:
     bool UpdateRtMotionDilateTables(
         uint32_t frameIndex,
         ID3D12Device* device,
-        bool useReconstructedHitDist);
+        bool useReconstructedViewZ);
 
     bool RunRtMotionDilate(
         CommandList& cl,
@@ -774,30 +791,30 @@ private:
         ID3D12Device* device,
         uint32_t width,
         uint32_t height,
-        bool useReconstructedHitDist);
+        bool useReconstructedViewZ);
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtMotionDilateConstants(
         uint32_t frameIndex,
         uint32_t width,
         uint32_t height);
 
-    bool UpdateRtHitDistReconstructTables(
+    bool UpdateRtViewZReconstructTables(
         uint32_t frameIndex,
         ID3D12Device* device);
 
-    bool RunRtHitDistReconstruct(
+    bool RunRtViewZReconstruct(
         CommandList& cl,
         uint32_t frameIndex,
         ID3D12Device* device,
         uint32_t width,
         uint32_t height);
 
-    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHitDistReconstructConstants(
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtViewZReconstructConstants(
         uint32_t frameIndex,
         uint32_t width,
         uint32_t height);
 
-    void CommitRtHitDistHistory(
+    void CommitRtViewZHistory(
         CommandList& cl,
         uint32_t writeIndex);
 
@@ -925,17 +942,19 @@ private:
     //   54 = dilated previous UV validity mask, white = invalid
     //   55 = motion confidence, white = high confidence
     // 
-    // Primary hit-distance / RayGen-owned views:
+    // ViewZ / RayGen-owned views:
     // These write directly to m_rtOutput from RayGen.
     // The RT post stack must stay disabled.
-    //   61 = primary hit distance visualization
-    //   62 = invalid primary hit distance mask
+    //   61 = raw ViewZ heatmap
+    //   62 = invalid raw ViewZ mask
     // 
-    // Hit-distance reconstruction / compute-owned producer views:
-    // These are produced by RtHitDistReconstructPass.
-    // The RT post stack must stay disabled, but the reconstruct pass still runs explicitly.
-    //   63 = reconstructed primary hit distance visualization
-    //   64 = reconstructed primary hit-distance confidence
+    // ViewZ reconstruction / compute-owned producer views:
+    // These are produced by RtViewZReconstruct.
+    // The RT post stack must stay disabled, but the RunRtViewZReconstruct pass still runs explicitly.
+    //   63 = reconstructed ViewZ heatmap
+    //   64 = reconstructed ViewZ confidence
+    //   79 = normalized reconstructed ViewZ comparison-space value
+    //   80 = invalid normalized ViewZ mask
     //
     // SurfaceId / RayGen-owned views:
     // These write directly to m_rtOutput from RayGen.
@@ -1128,10 +1147,10 @@ private:
 
         uint32_t capacity = 0;
 
-        DescriptorAllocator::Allocation hitDistReconstructSrvTable{}; // kRtHitDistReconstructSrvCount SRVs
-        DescriptorAllocator::Allocation hitDistReconstructUavTable{}; // kRtHitDistReconstructUavCount UAVs
-        uint32_t hitDistReconstructSrvCount = 0;
-        uint32_t hitDistReconstructUavCount = 0;
+        DescriptorAllocator::Allocation viewZReconstructSrvTable{}; // kRtViewZReconstructSrvCount SRVs
+        DescriptorAllocator::Allocation viewZReconstructUavTable{}; // kRtViewZReconstructUavCount UAVs
+        uint32_t viewZReconstructSrvCount = 0;
+        uint32_t viewZReconstructUavCount = 0;
 
         DescriptorAllocator::Allocation diffuseDemodSrvTable{}; // kRtDiffuseDemodSrvCount SRVs
         DescriptorAllocator::Allocation diffuseDemodUavTable{}; // kRtDiffuseDemodUavCount UAVs
@@ -1153,7 +1172,7 @@ private:
     // u3 = m_rtAovNormal       R16G16B16A16_FLOAT rgb=geom normal, a=roughness
     // u4 = m_rtAovDepth        R32_FLOAT
     // u5 = m_rtAovMotion       R16G16_FLOAT prevUV, (-1,-1) invalid
-    // u6 = m_rtAovPrimaryHitDist  R16_FLOAT visible-surface RayT, -1 invalid
+    // u6 = m_rtAovViewZRaw  R16_FLOAT visible-surface RayT, -1 invalid
     // u7 = m_rtAovSurfaceId    R32_UINT object/material id, 0xFFFFFFFF invalid
     // u8 = m_rtAovDiffuseAlbedo R16G16B16A16_FLOAT rgb=diffuse albedo, a=stable demod flag
     DescriptorAllocator::Allocation m_rtOutputUav{};
@@ -1220,8 +1239,8 @@ private:
     bool m_rtAovMotionDilatedReady = false;
     ComPtr<ID3D12Resource> m_rtAovMotionConf;
     bool m_rtAovMotionConfReady = false;
-    ComPtr<ID3D12Resource> m_rtAovPrimaryHitDist;
-    bool m_rtAovPrimaryHitDistReady = false;
+    ComPtr<ID3D12Resource> m_rtAovViewZRaw;
+    bool m_rtAovViewZRawReady = false;
 
     ComPtr<ID3D12Resource> m_rtAovSurfaceId;
     bool m_rtAovSurfaceIdReady = false;
@@ -1305,8 +1324,8 @@ private:
     float m_rtTemporalSpecDirSigma = 0.08f;
     float m_rtTemporalSpecDirRoughCutoff = 0.35f;
 
-    float m_rtHitDistSigmaScale = 0.5f;
-    float m_prevRtHitDistSigmaScale = 0.5f;
+    float m_rtViewZSigmaScale = 0.5f;
+    float m_prevRtViewZSigmaScale = 0.5f;
 
     float m_prevRtTemporalSpecDirSigma = 0.08f;
     float m_prevRtTemporalSpecDirRoughCutoff = 0.35f;
@@ -1386,15 +1405,16 @@ private:
     static constexpr uint32_t kRtDenoiseSrvCount = 5;
     static constexpr uint32_t kRtMotionDilateSrvCount = 5;
     static constexpr uint32_t kRtMotionDilateUavCount = 3;
-    static constexpr uint32_t kRtHitDistReconstructSrvCount = 8;
-    static constexpr uint32_t kRtHitDistReconstructUavCount = 3;
+    static constexpr uint32_t kRtViewZReconstructSrvCount = 8;
+    static constexpr uint32_t kRtViewZReconstructUavCount = 3;
     static constexpr uint32_t kRtDiffuseDemodSrvCount = 3;
     static constexpr uint32_t kRtDiffuseDemodUavCount = 2;
     static constexpr uint32_t kRtCombineSrvCount = 3;
     static constexpr uint32_t kRtTemporalSrvCount = 14;
     static constexpr uint32_t kRtTemporalUavCount = 3;
-    static constexpr float kRtHitDistRoughCutoff = 0.35f;
-    static constexpr float kRtHitDistConfMin = 0.5f;
+    static constexpr float kRtViewZRoughCutoff = 0.35f;
+    static constexpr float kRtViewZConfMin = 0.5f;
+    static constexpr float kRtDistanceNormSigma = 0.08f;
 
     RtDiffuseDemodulatePass m_rtDiffuseDemodulatePass;
 
@@ -1406,19 +1426,19 @@ private:
     float m_rtMotionDilateNormalSigma = 0.25f;
     float m_rtMotionDilateMinScore = 0.05f;
 
-    RtHitDistReconstructPass m_rtHitDistReconstructPass;
+    RtHitDistReconstructPass m_rtViewZReconstructPass;
 
-    ComPtr<ID3D12Resource> m_rtAovHitDistRecons;
-    ComPtr<ID3D12Resource> m_rtAovHitDistReconsConf;
-    bool m_rtAovHitDistReconsReady = false;
-    bool m_rtAovHitDistReconsConfReady = false;
+    ComPtr<ID3D12Resource> m_rtAovViewZRecons;
+    ComPtr<ID3D12Resource> m_rtAovViewZReconsConf;
+    bool m_rtAovViewZReconsReady = false;
+    bool m_rtAovViewZReconsConfReady = false;
 
-    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryHitDist{};
-    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryHitDistConf{};
-    bool m_rtHitDistHistoryValid = false;
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryViewZ{};
+    std::array<ComPtr<ID3D12Resource>, 2> m_rtHistoryViewZConf{};
+    bool m_rtViewZHistoryValid = false;
 
-    float m_rtHitDistReconsAlpha = 0.20f;
-    float m_prevRtHitDistReconsAlpha = 0.20f;
+    float m_rtViewZReconsAlpha = 0.20f;
+    float m_prevRtViewZReconsAlpha = 0.20f;
 
     ComPtr<ID3D12Resource> m_rtAovDiffuseAlbedo;
     bool m_rtAovDiffuseAlbedoReady = false;

@@ -408,8 +408,8 @@ void Renderer::RenderFrame(
     const bool wantsSplitDebug = rtDebug.wantsSplitDebug;
     const bool wantsMotionDebug = rtDebug.wantsMotionDebug;
     const bool wantsMotionDilateDebug = rtDebug.wantsMotionDilateDebug;
-    const bool wantsHitDistDebug = rtDebug.wantsHitDistDebug;
-    const bool wantsHitDistReconstructDebug = rtDebug.wantsHitDistReconstructDebug;
+    const bool wantsViewZDebug = rtDebug.wantsViewZDebug;
+    const bool wantsViewZReconstructDebug = rtDebug.wantsViewZReconstructDebug;
     const bool wantsSurfaceIdDebug = rtDebug.wantsSurfaceIdDebug;
     const bool wantsDiffuseAlbedoDebug = rtDebug.wantsDiffuseAlbedoDebug;
     const bool wantsDiffuseDemodDebug = rtDebug.wantsDiffuseDemodDebug;
@@ -420,7 +420,7 @@ void Renderer::RenderFrame(
     const bool allowRtAccumulation =
         m_rtAccumulate &&
         !wantsMotionDilateDebug &&
-        !wantsHitDistReconstructDebug &&
+        !wantsViewZReconstructDebug &&
         !wantsDiffuseDemodDebug &&
         ((m_debugView == 0) || wantsRtInspectionDebug) &&
         (
@@ -428,7 +428,7 @@ void Renderer::RenderFrame(
             (!m_autoOrbit && m_pauseAnimation) ||
             wantsSplitDebug ||
             wantsMotionDebug ||
-            wantsHitDistDebug ||
+            wantsViewZDebug ||
             wantsSurfaceIdDebug ||
             wantsDiffuseAlbedoDebug
         );
@@ -511,11 +511,11 @@ void Renderer::RenderFrame(
         (rtHasBrdfLut != m_prevRtHasBrdfLut) ||
         (rtHasIbl != m_prevRtHasIbl);
 
-    const bool hitDistReconsSettingsChanged =
-        std::fabs(m_rtHitDistReconsAlpha - m_prevRtHitDistReconsAlpha) > 1e-6f;
+    const bool viewZReconsSettingsChanged =
+        std::fabs(m_rtViewZReconsAlpha - m_prevRtViewZReconsAlpha) > 1e-6f;
 
-    const bool hitDistPolicyChanged =
-        std::fabs(m_rtHitDistSigmaScale - m_prevRtHitDistSigmaScale) > 1e-6f;
+    const bool viewZPolicyChanged =
+        std::fabs(m_rtViewZSigmaScale - m_prevRtViewZSigmaScale) > 1e-6f;
 
     const bool temporalSettingsChanged =
         !m_rtHistoryValid ||
@@ -540,9 +540,9 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtTemporalMotionConfMinSpec - m_prevRtTemporalMotionConfMinSpec) > 1e-6f) ||
         (std::fabs(m_rtTemporalMotionConfPowerDiffuse - m_prevRtTemporalMotionConfPowerDiffuse) > 1e-6f) ||
         (std::fabs(m_rtTemporalMotionConfPowerSpec - m_prevRtTemporalMotionConfPowerSpec) > 1e-6f) ||
-        hitDistReconsSettingsChanged ||
+        viewZReconsSettingsChanged ||
         (m_rtTemporalEnableVarianceBoost != m_prevRtTemporalEnableVarianceBoost) ||
-            hitDistPolicyChanged;
+            viewZPolicyChanged;
 
     const bool resetRawAccumulation =
         cameraChanged ||
@@ -579,9 +579,9 @@ void Renderer::RenderFrame(
     if (drawListStructuralChanged ||
         bigCameraChanged ||
         !m_prevRtMotionWorldsValid ||
-        hitDistReconsSettingsChanged)
+        viewZReconsSettingsChanged)
     {
-        m_rtHitDistHistoryValid = false;
+        m_rtViewZHistoryValid = false;
     }
 
     // This must always be assigned before DXR dispatch and before post-stack gating.
@@ -589,7 +589,7 @@ void Renderer::RenderFrame(
     m_rtAccumulateThisFrame = allowRtAccumulation;
 
     if (wantsMotionDilateDebug ||
-        wantsHitDistReconstructDebug ||
+        wantsViewZReconstructDebug ||
         wantsDiffuseDemodDebug)
     {
         // Debug 54 is produced by RtMotionDilatePass.
@@ -650,8 +650,8 @@ void Renderer::RenderFrame(
     m_prevRtTemporalMotionConfMinSpec = m_rtTemporalMotionConfMinSpec;
     m_prevRtTemporalMotionConfPowerDiffuse = m_rtTemporalMotionConfPowerDiffuse;
     m_prevRtTemporalMotionConfPowerSpec = m_rtTemporalMotionConfPowerSpec;
-    m_prevRtHitDistReconsAlpha = m_rtHitDistReconsAlpha;
-    m_prevRtHitDistSigmaScale = m_rtHitDistSigmaScale;
+    m_prevRtViewZReconsAlpha = m_rtViewZReconsAlpha;
+    m_prevRtViewZSigmaScale = m_rtViewZSigmaScale;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -808,7 +808,7 @@ void Renderer::RenderFrame(
         cl.Transition(m_rtAovMotion.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cl.Transition(m_rtAovPrimaryHitDist.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl.Transition(m_rtAovViewZRaw.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovSurfaceId.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovDiffuseAlbedo.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         
@@ -817,14 +817,14 @@ void Renderer::RenderFrame(
             cl.Transition(m_rtDiffuseDemodulated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
 
-        if (m_rtAovHitDistReconsReady)
+        if (m_rtAovViewZReconsReady)
         {
-            cl.Transition(m_rtAovHitDistRecons.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovViewZRecons.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
 
-        if (m_rtAovHitDistReconsConfReady)
+        if (m_rtAovViewZReconsConfReady)
         {
-            cl.Transition(m_rtAovHitDistReconsConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovViewZReconsConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
         if (m_rtPostReady)
         {
@@ -1017,10 +1017,10 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_prevRtMotionWorldsValid = false;
     m_prevRtMotionWorlds.clear();
     m_rtSpecSelectedMomentsReady = false;
-    m_rtAovPrimaryHitDistReady = false;
-    m_rtAovHitDistReconsReady = false;
-    m_rtAovHitDistReconsConfReady = false;
-    m_rtHitDistHistoryValid = false;
+    m_rtAovViewZRawReady = false;
+    m_rtAovViewZReconsReady = false;
+    m_rtAovViewZReconsConfReady = false;
+    m_rtViewZHistoryValid = false;
     m_rtAovSurfaceIdReady = false;
     m_rtAovDiffuseAlbedoReady = false;
     m_rtDiffuseDemodulatedReady = false;
@@ -1226,7 +1226,7 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         m_rtAtrousPass.Initialize(device, Paths::ShaderDir());
         m_rtHistorySelectPass.Initialize(device, Paths::ShaderDir());
         m_rtCombinePass.Initialize(device, Paths::ShaderDir());
-        m_rtHitDistReconstructPass.Initialize(device, Paths::ShaderDir());
+        m_rtViewZReconstructPass.Initialize(device, Paths::ShaderDir());
         m_rtDiffuseDemodulatePass.Initialize(device, Paths::ShaderDir());
     }
 
@@ -1834,17 +1834,17 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         !m_rtPostReady ||
         !m_rtSpecSelectedMoments ||
         !m_rtSpecSelectedMomentsReady ||
-        !m_rtAovPrimaryHitDist ||
-        !m_rtAovPrimaryHitDistReady ||
+        !m_rtAovViewZRaw ||
+        !m_rtAovViewZRawReady ||
         (m_rtOutputWidth != width) ||
-        !m_rtAovHitDistRecons ||
-        !m_rtAovHitDistReconsReady ||
-        !m_rtAovHitDistReconsConf ||
-        !m_rtAovHitDistReconsConfReady ||
-        !m_rtHistoryHitDist[0] ||
-        !m_rtHistoryHitDist[1] ||
-        !m_rtHistoryHitDistConf[0] ||
-        !m_rtHistoryHitDistConf[1] ||
+        !m_rtAovViewZRecons ||
+        !m_rtAovViewZReconsReady ||
+        !m_rtAovViewZReconsConf ||
+        !m_rtAovViewZReconsConfReady ||
+        !m_rtHistoryViewZ[0] ||
+        !m_rtHistoryViewZ[1] ||
+        !m_rtHistoryViewZConf[0] ||
+        !m_rtHistoryViewZConf[1] ||
         !m_rtAovSurfaceId ||
         !m_rtAovSurfaceIdReady ||
         !m_rtAovDiffuseAlbedo ||
@@ -2348,12 +2348,12 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
     m_rtAovMotionDilated.Reset();
     m_rtAovMotionConfReady = false;
     m_rtAovMotionConf.Reset();
-    m_rtAovPrimaryHitDistReady = false;
-    m_rtAovPrimaryHitDist.Reset();
-    m_rtAovHitDistReconsReady = false;
-    m_rtAovHitDistReconsConfReady = false;
-    m_rtAovHitDistRecons.Reset();
-    m_rtAovHitDistReconsConf.Reset();
+    m_rtAovViewZRawReady = false;
+    m_rtAovViewZRaw.Reset();
+    m_rtAovViewZReconsReady = false;
+    m_rtAovViewZReconsConfReady = false;
+    m_rtAovViewZRecons.Reset();
+    m_rtAovViewZReconsConf.Reset();
     m_rtAovSurfaceIdReady = false;
     m_rtAovSurfaceId.Reset();
     m_rtAovDiffuseAlbedoReady = false;
@@ -2543,15 +2543,15 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
                 &desc,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 nullptr,
-                IID_PPV_ARGS(&m_rtAovPrimaryHitDist)),
-            "Create RT AOV primary hit distance");
+                IID_PPV_ARGS(&m_rtAovViewZRaw)),
+            "Create RT AOV primary ViewZ Raw");
 
         SetD3D12ObjectName(
-            m_rtAovPrimaryHitDist.Get(),
-            L"RT AOV Primary Hit Distance");
+            m_rtAovViewZRaw.Get(),
+            L"RT AOV Primary ViewZ Raw");
 
         CommandList::SetGlobalState(
-            m_rtAovPrimaryHitDist.Get(),
+            m_rtAovViewZRaw.Get(),
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
@@ -2559,7 +2559,7 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
         uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 
         device->CreateUnorderedAccessView(
-            m_rtAovPrimaryHitDist.Get(),
+            m_rtAovViewZRaw.Get(),
             nullptr,
             &uav,
             RtUavCpuAt(6));
@@ -2705,19 +2705,19 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
     };
 
     CreateR16UavTexture(
-        m_rtAovHitDistRecons,
-        L"RT AOV Hit Distance Reconstructed");
+        m_rtAovViewZRecons,
+        L"RT AOV ViewZ Reconstructed");
 
     CreateR16UavTexture(
-        m_rtAovHitDistReconsConf,
-        L"RT AOV Hit Distance Reconstructed Confidence");
+        m_rtAovViewZReconsConf,
+        L"RT AOV ViewZ Reconstructed Confidence");
 
     m_rtAovDiffuseAlbedoReady = true;
     m_rtDiffuseDemodulatedReady = true;
     m_rtAovSurfaceIdReady = true;
-    m_rtAovHitDistReconsReady = true;
-    m_rtAovHitDistReconsConfReady = true;
-    m_rtAovPrimaryHitDistReady = true;
+    m_rtAovViewZReconsReady = true;
+    m_rtAovViewZReconsConfReady = true;
+    m_rtAovViewZRawReady = true;
     m_rtAovMotionConfReady = true;
     m_rtAovMotionDilatedReady = true;
     m_rtAovMotionReady = true;
@@ -3079,8 +3079,8 @@ void Renderer::CreateRtHistoryResources(ID3D12Device* device, uint32_t width, ui
         }
 
         {
-            m_rtHistoryHitDist[i].Reset();
-            m_rtHistoryHitDistConf[i].Reset();
+            m_rtHistoryViewZ[i].Reset();
+            m_rtHistoryViewZConf[i].Reset();
 
             auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
                 DXGI_FORMAT_R16_FLOAT,
@@ -3099,15 +3099,15 @@ void Renderer::CreateRtHistoryResources(ID3D12Device* device, uint32_t width, ui
                     &desc,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     nullptr,
-                    IID_PPV_ARGS(&m_rtHistoryHitDist[i])),
-                "Create RT history hit distance");
+                    IID_PPV_ARGS(&m_rtHistoryViewZ[i])),
+                "Create RT history ViewZ");
 
             SetD3D12ObjectName(
-                m_rtHistoryHitDist[i].Get(),
-                i == 0 ? L"RT History Hit Distance 0" : L"RT History Hit Distance 1");
+                m_rtHistoryViewZ[i].Get(),
+                i == 0 ? L"RT History ViewZ 0" : L"RT History ViewZ 1");
 
             CommandList::SetGlobalState(
-                m_rtHistoryHitDist[i].Get(),
+                m_rtHistoryViewZ[i].Get(),
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
             ThrowIfFailed(
@@ -3117,15 +3117,15 @@ void Renderer::CreateRtHistoryResources(ID3D12Device* device, uint32_t width, ui
                     &desc,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     nullptr,
-                    IID_PPV_ARGS(&m_rtHistoryHitDistConf[i])),
-                "Create RT history hit distance confidence");
+                    IID_PPV_ARGS(&m_rtHistoryViewZConf[i])),
+                "Create RT history ViewZ confidence");
 
             SetD3D12ObjectName(
-                m_rtHistoryHitDistConf[i].Get(),
-                i == 0 ? L"RT History Hit Distance Confidence 0" : L"RT History Hit Distance Confidence 1");
+                m_rtHistoryViewZConf[i].Get(),
+                i == 0 ? L"RT History ViewZ Confidence 0" : L"RT History ViewZ Confidence 1");
 
             CommandList::SetGlobalState(
-                m_rtHistoryHitDistConf[i].Get(),
+                m_rtHistoryViewZConf[i].Get(),
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
 
@@ -3161,7 +3161,7 @@ void Renderer::CreateRtHistoryResources(ID3D12Device* device, uint32_t width, ui
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
     }
-    m_rtHitDistHistoryValid = false;
+    m_rtViewZHistoryValid = false;
     UpdateRtSvgfPingUavTable(device);
     CreateRtPostResources(device, width, height);
 }
@@ -3351,9 +3351,9 @@ bool Renderer::UpdateRtTemporalTables(
     ID3D12Resource* prevMomentsResource,
     ID3D12Resource* outAccumResource,
     ID3D12Resource* outMomentsResource,
-    ID3D12Resource* currHitDistResource,
-    ID3D12Resource* prevHitDistResource,
-    ID3D12Resource* prevHitDistConfResource,
+    ID3D12Resource* currViewZResource,
+    ID3D12Resource* prevViewZResource,
+    ID3D12Resource* prevViewZConfResource,
     ID3D12Resource* currSurfaceIdResource,
     ID3D12Resource* prevSurfaceIdResource,
     DescriptorAllocator::Allocation& srvTable,
@@ -3528,14 +3528,14 @@ bool Renderer::UpdateRtTemporalTables(
             SrvAt(slot));
     };
 
-    // t9 = current reconstructed hit distance
-    WriteR16Srv(currHitDistResource, 9);
+    // t9 = current reconstructed ViewZ
+    WriteR16Srv(currViewZResource, 9);
 
-    // t10 = previous reconstructed hit distance
-    WriteR16Srv(prevHitDistResource, 10);
+    // t10 = previous reconstructed ViewZ
+    WriteR16Srv(prevViewZResource, 10);
 
-    // t11 = previous reconstructed hit-distance confidence
-    WriteR16Srv(prevHitDistConfResource, 11);
+    // t11 = previous reconstructed ViewZ confidence
+    WriteR16Srv(prevViewZConfResource, 11);
 
     auto WriteR32UintSrv = [&](ID3D12Resource* resource, uint32_t slot)
     {
@@ -3569,7 +3569,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     float roughnessSigma,
     float motionConfMin,
     float motionConfPower,
-    float hitDistSigmaScale,
+    float viewZSigmaScale,
     bool surfaceIdHistoryValid)
 {
     auto alloc = m_upload.Allocate(
@@ -3606,10 +3606,12 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     cb->enableVarianceBoost = m_rtTemporalEnableVarianceBoost ? 1u : 0u;
     cb->motionConfMin = std::clamp(motionConfMin, 0.0f, 1.0f);
     cb->motionConfPower = std::max(0.0f, motionConfPower);
-    cb->hitDistSigmaScale = std::max(0.0f, hitDistSigmaScale);
-    cb->hitDistRoughCutoff = kRtHitDistRoughCutoff;
-    cb->hitDistConfMin = kRtHitDistConfMin;
+    cb->viewZSigmaScale = std::max(0.0f, viewZSigmaScale);
+    cb->viewZRoughCutoff = kRtViewZRoughCutoff;
+    cb->viewZConfMin = kRtViewZConfMin;
     cb->surfaceIdHistoryValid = surfaceIdHistoryValid ? 1u : 0u;
+    cb->distanceNormParams = RtDistanceNormParams();
+    cb->distanceNormSigma = kRtDistanceNormSigma;
 
     cb->currCameraPos = 
     {
@@ -3640,8 +3642,8 @@ bool Renderer::UpdateRtSvgfSrvTable(
     ID3D12Resource* signalResource,
     ID3D12Resource* momentsResource,
     ID3D12Resource* motionConfResource,
-    ID3D12Resource* hitDistResource,
-    ID3D12Resource* hitDistConfResource,
+    ID3D12Resource* viewZResource,
+    ID3D12Resource* viewZConfResource,
     ID3D12Resource* surfaceIdResource)
 {
     if (!device ||
@@ -3738,11 +3740,11 @@ bool Renderer::UpdateRtSvgfSrvTable(
             HandleAt(slot));
     };
 
-    // t5 = reconstructed hit distance
-    WriteR16Srv(hitDistResource, 5);
+    // t5 = reconstructed ViewZ
+    WriteR16Srv(viewZResource, 5);
 
-    // t6 = reconstructed hit-distance confidence
-    WriteR16Srv(hitDistConfResource, 6);
+    // t6 = reconstructed ViewZ confidence
+    WriteR16Srv(viewZConfResource, 6);
 
     // t7 = current surface id
     {
@@ -3771,7 +3773,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtAtrousConstants(
     bool finalOutputSrgb,
     float motionConfPower,
     float motionConfMin,
-    float hitDistSigmaScale)
+    float viewZSigmaScale)
 {
     auto alloc = m_upload.Allocate(
         frameIndex,
@@ -3796,12 +3798,14 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtAtrousConstants(
     cb->lengthPower = std::max(1e-4f, m_rtAtrousLengthPower);
     cb->motionConfPower = std::max(0.0f, motionConfPower);
     cb->motionConfMin = std::max(0.0f, std::min(1.0f, motionConfMin));
-    cb->hitDistSigmaScale = std::max(0.0f, hitDistSigmaScale);
-    cb->hitDistRoughCutoff = kRtHitDistRoughCutoff;
-    cb->hitDistConfMin = kRtHitDistConfMin;
+    cb->viewZSigmaScale = std::max(0.0f, viewZSigmaScale);
+    cb->viewZRoughCutoff = kRtViewZRoughCutoff;
+    cb->viewZConfMin = kRtViewZConfMin;
     cb->debugView = m_debugView;
     cb->lengthSkipThreshold = std::clamp(m_rtAtrousLengthSkipThreshold, 0.0f, 1.0f);
     cb->enableLengthSkip = m_rtAtrousEnableLengthSkip ? 1u : 0u;
+    cb->distanceNormParams = RtDistanceNormParams();
+    cb->distanceNormSigma = kRtDistanceNormSigma;
 
     return alloc.gpu;
 }
@@ -4197,14 +4201,14 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex)
 bool Renderer::UpdateRtMotionDilateTables(
     uint32_t frameIndex,
     ID3D12Device* device,
-    bool useReconstructedHitDist)
+    bool useReconstructedViewZ)
 {
-    ID3D12Resource* hitDistResource =
-        (useReconstructedHitDist &&
-            m_rtAovHitDistRecons &&
-            m_rtAovHitDistReconsReady)
-        ? m_rtAovHitDistRecons.Get()
-        : m_rtAovPrimaryHitDist.Get();
+    ID3D12Resource* viewZResource =
+        (useReconstructedViewZ &&
+            m_rtAovViewZRecons &&
+            m_rtAovViewZReconsReady)
+        ? m_rtAovViewZRecons.Get()
+        : m_rtAovViewZRaw.Get();
 
     if (!device ||
         !m_rtAovMotion ||
@@ -4217,9 +4221,9 @@ bool Renderer::UpdateRtMotionDilateTables(
         !m_rtAovMotionConf ||
         !m_rtAovMotionConfReady ||
         !m_rtAovReady ||
-        !m_rtAovPrimaryHitDist ||
-        !m_rtAovPrimaryHitDistReady ||
-        !hitDistResource ||
+        !m_rtAovViewZRaw ||
+        !m_rtAovViewZRawReady ||
+        !viewZResource ||
         !m_rtAovSurfaceId ||
         !m_rtAovSurfaceIdReady ||
         !m_rtOutputReady)
@@ -4300,7 +4304,7 @@ bool Renderer::UpdateRtMotionDilateTables(
             SrvAt(2));
     }
 
-    // t3 =  primary hit distance
+    // t3 =  viewZ distance
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
         srv.Format = DXGI_FORMAT_R16_FLOAT;
@@ -4310,7 +4314,7 @@ bool Renderer::UpdateRtMotionDilateTables(
         srv.Texture2D.MipLevels = 1;
 
         device->CreateShaderResourceView(
-            hitDistResource,
+            viewZResource,
             &srv,
             SrvAt(3));
     }
@@ -4376,14 +4380,14 @@ bool Renderer::RunRtMotionDilate(
     ID3D12Device* device,
     uint32_t width,
     uint32_t height,
-    bool useReconstructedHitDist)
+    bool useReconstructedViewZ)
 {
-    ID3D12Resource* hitDistResource =
-        (useReconstructedHitDist &&
-            m_rtAovHitDistRecons &&
-            m_rtAovHitDistReconsReady)
-        ? m_rtAovHitDistRecons.Get()
-        : m_rtAovPrimaryHitDist.Get();
+    ID3D12Resource* viewZResource =
+        (useReconstructedViewZ &&
+            m_rtAovViewZRecons &&
+            m_rtAovViewZReconsReady)
+        ? m_rtAovViewZRecons.Get()
+        : m_rtAovViewZRaw.Get();
 
     if (!device ||
         !m_rtAovMotion ||
@@ -4396,9 +4400,9 @@ bool Renderer::RunRtMotionDilate(
         !m_rtAovMotionConf ||
         !m_rtAovMotionConfReady ||
         !m_rtAovReady ||
-        !m_rtAovPrimaryHitDist ||
-        !m_rtAovPrimaryHitDistReady ||
-        !hitDistResource || 
+        !m_rtAovViewZRaw ||
+        !m_rtAovViewZRawReady ||
+        !viewZResource || 
         !m_rtAovSurfaceId ||
         !m_rtAovSurfaceIdReady ||
         !m_rtOutputReady)
@@ -4419,7 +4423,7 @@ bool Renderer::RunRtMotionDilate(
     cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    cl.Transition(hitDistResource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(viewZResource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtAovSurfaceId.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.FlushBarriers();
 
@@ -4427,7 +4431,7 @@ bool Renderer::RunRtMotionDilate(
         UpdateRtMotionDilateTables(
             frameIndex,
             device,
-            useReconstructedHitDist);
+            useReconstructedViewZ);
 
     if (!okTables)
     {
@@ -4485,32 +4489,34 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtMotionDilateConstants(
     cb->minScore = m_rtMotionDilateMinScore;
     cb->debugView = m_debugView;
     cb->pad0 = 0;
+    cb->distanceNormParams = RtDistanceNormParams();
+    cb->distanceNormSigma = kRtDistanceNormSigma;
 
     return alloc.gpu;
 }
 
-bool Renderer::UpdateRtHitDistReconstructTables(
+bool Renderer::UpdateRtViewZReconstructTables(
     uint32_t frameIndex,
     ID3D12Device* device)
 {
     if (!device ||
-        !m_rtAovPrimaryHitDist ||
+        !m_rtAovViewZRaw ||
         !m_rtAovNormal ||
         !m_rtAovDepth ||
         !m_rtAovMotion ||
-        !m_rtHistoryHitDist[0] ||
-        !m_rtHistoryHitDist[1] ||
+        !m_rtHistoryViewZ[0] ||
+        !m_rtHistoryViewZ[1] ||
         !m_rtHistoryDepth[0] ||
         !m_rtHistoryDepth[1] ||
         !m_rtHistoryNormal[0] ||
         !m_rtHistoryNormal[1] ||
-        !m_rtAovHitDistRecons ||
-        !m_rtAovHitDistReconsConf ||
+        !m_rtAovViewZRecons ||
+        !m_rtAovViewZReconsConf ||
         !m_rtOutput ||
-        !m_rtAovPrimaryHitDistReady ||
+        !m_rtAovViewZRawReady ||
         !m_rtAovMotionReady ||
-        !m_rtAovHitDistReconsReady ||
-        !m_rtAovHitDistReconsConfReady ||
+        !m_rtAovViewZReconsReady ||
+        !m_rtAovViewZReconsConfReady ||
         !m_rtAovReady ||
         !m_rtAovSurfaceId ||
         !m_rtAovSurfaceIdReady ||
@@ -4522,27 +4528,27 @@ bool Renderer::UpdateRtHitDistReconstructTables(
     auto& frame = m_rtFrames[frameIndex];
 
     EnsureRtDescriptorTable(
-        frame.hitDistReconstructSrvTable,
-        frame.hitDistReconstructSrvCount,
-        kRtHitDistReconstructSrvCount);
+        frame.viewZReconstructSrvTable,
+        frame.viewZReconstructSrvCount,
+        kRtViewZReconstructSrvCount);
 
     EnsureRtDescriptorTable(
-        frame.hitDistReconstructUavTable,
-        frame.hitDistReconstructUavCount,
-        kRtHitDistReconstructUavCount);
+        frame.viewZReconstructUavTable,
+        frame.viewZReconstructUavCount,
+        kRtViewZReconstructUavCount);
 
     const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
 
     auto SrvAt = [&](uint32_t slot)
     {
-        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.hitDistReconstructSrvTable.cpu;
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.viewZReconstructSrvTable.cpu;
         h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
         return h;
     };
 
     auto UavAt = [&](uint32_t slot)
     {
-        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.hitDistReconstructUavTable.cpu;
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.viewZReconstructUavTable.cpu;
         h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
         return h;
     };
@@ -4575,8 +4581,8 @@ bool Renderer::UpdateRtHitDistReconstructTables(
             UavAt(slot));
     };
 
-    // t0 = raw primary hit distance
-    WriteR16Srv(m_rtAovPrimaryHitDist.Get(), 0);
+    // t0 = raw primary ViewZ
+    WriteR16Srv(m_rtAovViewZRaw.Get(), 0);
 
     // t1 = current normal/roughness
     {
@@ -4625,8 +4631,8 @@ bool Renderer::UpdateRtHitDistReconstructTables(
 
     const uint32_t readIndex = m_rtHistoryReadIndex;
 
-    // t4 = previous reconstructed hit distance
-    WriteR16Srv(m_rtHistoryHitDist[readIndex].Get(), 4);
+    // t4 = previous reconstructed ViewZ
+    WriteR16Srv(m_rtHistoryViewZ[readIndex].Get(), 4);
 
     // t5 = previous depth
     {
@@ -4673,11 +4679,11 @@ bool Renderer::UpdateRtHitDistReconstructTables(
             SrvAt(7));
     }
 
-    // u0 = reconstructed hit distance
-    WriteR16Uav(m_rtAovHitDistRecons.Get(), 0);
+    // u0 = reconstructed ViewZ
+    WriteR16Uav(m_rtAovViewZRecons.Get(), 0);
 
     // u1 = reconstructed confidence
-    WriteR16Uav(m_rtAovHitDistReconsConf.Get(), 1);
+    WriteR16Uav(m_rtAovViewZReconsConf.Get(), 1);
 
     // u2 = debug/display output
     {
@@ -4695,17 +4701,17 @@ bool Renderer::UpdateRtHitDistReconstructTables(
     return true;
 }
 
-D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtHitDistReconstructConstants(
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtViewZReconstructConstants(
     uint32_t frameIndex,
     uint32_t width,
     uint32_t height)
 {
     auto alloc = m_upload.Allocate(
         frameIndex,
-        sizeof(RtHitDistReconstructConstants),
+        sizeof(RtViewZReconstructConstants),
         256);
 
-    auto* cb = reinterpret_cast<RtHitDistReconstructConstants*>(alloc.cpu);
+    auto* cb = reinterpret_cast<RtViewZReconstructConstants*>(alloc.cpu);
     *cb = {};
 
     cb->invResolution = {
@@ -4714,21 +4720,23 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtHitDistReconstructConstants(
     };
 
     cb->alpha =
-        std::max(0.0f, std::min(1.0f, m_rtHitDistReconsAlpha));
+        std::max(0.0f, std::min(1.0f, m_rtViewZReconsAlpha));
 
     cb->depthSigma = 0.02f;
     cb->normalSigma = 0.25f;
     cb->roughnessSigma = 0.20f;
 
-    cb->historyValid = m_rtHitDistHistoryValid ? 1u : 0u;
+    cb->historyValid = m_rtViewZHistoryValid ? 1u : 0u;
     cb->debugView = m_debugView;
     cb->radius = 2u;
-    cb->hitDistVisMax = 25.0f;
+    cb->viewZVisMax = 25.0f;
+    cb->distanceNormParams = RtDistanceNormParams();
+    cb->distanceNormSigma = kRtDistanceNormSigma;
 
     return alloc.gpu;
 }
 
-bool Renderer::RunRtHitDistReconstruct(
+bool Renderer::RunRtViewZReconstruct(
     CommandList& cl,
     uint32_t frameIndex,
     ID3D12Device* device,
@@ -4736,18 +4744,18 @@ bool Renderer::RunRtHitDistReconstruct(
     uint32_t height)
 {
     if (!device ||
-        !m_rtAovPrimaryHitDist ||
+        !m_rtAovViewZRaw ||
         !m_rtAovNormal ||
         !m_rtAovDepth ||
         !m_rtAovMotion ||
-        !m_rtAovHitDistRecons ||
-        !m_rtAovHitDistReconsConf ||
+        !m_rtAovViewZRecons ||
+        !m_rtAovViewZReconsConf ||
         !m_rtOutput ||
-        !m_rtAovPrimaryHitDistReady ||
+        !m_rtAovViewZRawReady ||
         !m_rtAovMotionReady ||
         !m_rtAovReady ||
-        !m_rtAovHitDistReconsReady ||
-        !m_rtAovHitDistReconsConfReady ||
+        !m_rtAovViewZReconsReady ||
+        !m_rtAovViewZReconsConfReady ||
         !m_rtAovSurfaceId ||
         !m_rtAovSurfaceIdReady ||
         !m_rtOutputReady)
@@ -4760,23 +4768,23 @@ bool Renderer::RunRtHitDistReconstruct(
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
     cmdList->SetDescriptorHeaps(1, heaps);
 
-    CmdBeginEvent(cmdList, "RT Hit Distance Reconstruct");
+    CmdBeginEvent(cmdList, "RT ViewZ Reconstruct");
 
-    cl.Transition(m_rtAovPrimaryHitDist.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovViewZRaw.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtAovMotion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    cl.Transition(m_rtHistoryHitDist[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtHistoryViewZ[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtHistoryDepth[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtHistoryNormal[m_rtHistoryReadIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    cl.Transition(m_rtAovHitDistRecons.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    cl.Transition(m_rtAovHitDistReconsConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(m_rtAovViewZRecons.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(m_rtAovViewZReconsConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.Transition(m_rtAovSurfaceId.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.FlushBarriers();
 
     const bool okTables =
-        UpdateRtHitDistReconstructTables(
+        UpdateRtViewZReconstructTables(
             frameIndex,
             device);
 
@@ -4787,26 +4795,26 @@ bool Renderer::RunRtHitDistReconstruct(
     }
 
     const D3D12_GPU_VIRTUAL_ADDRESS cb =
-        UpdateRtHitDistReconstructConstants(
+        UpdateRtViewZReconstructConstants(
             frameIndex,
             width,
             height);
 
-    m_rtHitDistReconstructPass.Dispatch(
+    m_rtViewZReconstructPass.Dispatch(
         cl,
         cb,
-        m_rtFrames[frameIndex].hitDistReconstructSrvTable.gpu,
-        m_rtFrames[frameIndex].hitDistReconstructUavTable.gpu,
+        m_rtFrames[frameIndex].viewZReconstructSrvTable.gpu,
+        m_rtFrames[frameIndex].viewZReconstructUavTable.gpu,
         width,
         height);
 
     D3D12_RESOURCE_BARRIER barriers[3]{};
 
     barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    barriers[0].UAV.pResource = m_rtAovHitDistRecons.Get();
+    barriers[0].UAV.pResource = m_rtAovViewZRecons.Get();
 
     barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    barriers[1].UAV.pResource = m_rtAovHitDistReconsConf.Get();
+    barriers[1].UAV.pResource = m_rtAovViewZReconsConf.Get();
 
     barriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     barriers[2].UAV.pResource = m_rtOutput.Get();
@@ -4817,43 +4825,43 @@ bool Renderer::RunRtHitDistReconstruct(
     return true;
 }
 
-void Renderer::CommitRtHitDistHistory(
+void Renderer::CommitRtViewZHistory(
     CommandList& cl,
     uint32_t writeIndex)
 {
     if (writeIndex >= 2 ||
-        !m_rtAovHitDistRecons ||
-        !m_rtAovHitDistReconsConf ||
-        !m_rtHistoryHitDist[writeIndex] ||
-        !m_rtHistoryHitDistConf[writeIndex] ||
-        !m_rtAovHitDistReconsReady ||
-        !m_rtAovHitDistReconsConfReady)
+        !m_rtAovViewZRecons ||
+        !m_rtAovViewZReconsConf ||
+        !m_rtHistoryViewZ[writeIndex] ||
+        !m_rtHistoryViewZConf[writeIndex] ||
+        !m_rtAovViewZReconsReady ||
+        !m_rtAovViewZReconsConfReady)
     {
-        m_rtHitDistHistoryValid = false;
+        m_rtViewZHistoryValid = false;
         return;
     }
 
     auto* cmdList = cl.Get();
 
-    cl.Transition(m_rtAovHitDistRecons.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
-    cl.Transition(m_rtAovHitDistReconsConf.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
-    cl.Transition(m_rtHistoryHitDist[writeIndex].Get(), D3D12_RESOURCE_STATE_COPY_DEST);
-    cl.Transition(m_rtHistoryHitDistConf[writeIndex].Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+    cl.Transition(m_rtAovViewZRecons.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cl.Transition(m_rtAovViewZReconsConf.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cl.Transition(m_rtHistoryViewZ[writeIndex].Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+    cl.Transition(m_rtHistoryViewZConf[writeIndex].Get(), D3D12_RESOURCE_STATE_COPY_DEST);
     cl.FlushBarriers();
 
     cmdList->CopyResource(
-        m_rtHistoryHitDist[writeIndex].Get(),
-        m_rtAovHitDistRecons.Get());
+        m_rtHistoryViewZ[writeIndex].Get(),
+        m_rtAovViewZRecons.Get());
 
     cmdList->CopyResource(
-        m_rtHistoryHitDistConf[writeIndex].Get(),
-        m_rtAovHitDistReconsConf.Get());
+        m_rtHistoryViewZConf[writeIndex].Get(),
+        m_rtAovViewZReconsConf.Get());
 
-    cl.Transition(m_rtHistoryHitDist[writeIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    cl.Transition(m_rtHistoryHitDistConf[writeIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtHistoryViewZ[writeIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtHistoryViewZConf[writeIndex].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.FlushBarriers();
 
-    m_rtHitDistHistoryValid = true;
+    m_rtViewZHistoryValid = true;
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtDiffuseDemodulateConstants(
@@ -5092,8 +5100,8 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
     r.wantsSplitDebug = IsSplitDebug(debugView);
     r.wantsMotionDebug = IsMotionDebug(debugView);
     r.wantsMotionDilateDebug = IsMotionDilateDebug(debugView);
-    r.wantsHitDistDebug = IsHitDistDebug(debugView);
-    r.wantsHitDistReconstructDebug = IsHitDistReconstructDebug(debugView);
+    r.wantsViewZDebug = IsViewZDebug(debugView);
+    r.wantsViewZReconstructDebug = IsViewZReconstructDebug(debugView);
     r.wantsSurfaceIdDebug = IsSurfaceIdDebug(debugView);
     r.wantsDiffuseAlbedoDebug = IsDiffuseAlbedoDebug(debugView);
     r.wantsDiffuseDemodDebug = IsDiffuseDemodulateDebug(debugView);
@@ -5109,8 +5117,8 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
         r.wantsSplitDebug ||
         r.wantsMotionDebug ||
         r.wantsMotionDilateDebug ||
-        r.wantsHitDistDebug ||
-        r.wantsHitDistReconstructDebug ||
+        r.wantsViewZDebug ||
+        r.wantsViewZReconstructDebug ||
         r.wantsSurfaceIdDebug ||
         r.wantsDiffuseAlbedoDebug ||
         r.wantsDiffuseDemodDebug;
@@ -5121,14 +5129,14 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
 
     if (r.wantsSplitDebug ||
         r.wantsMotionDebug ||
-        r.wantsHitDistDebug ||
+        r.wantsViewZDebug ||
         r.wantsSurfaceIdDebug ||
         r.wantsDiffuseAlbedoDebug)
     {
         r.owner = RtDebugOwner::RayGen;
     }
     else if (r.wantsMotionDilateDebug ||
-        r.wantsHitDistReconstructDebug ||
+        r.wantsViewZReconstructDebug ||
         r.wantsDiffuseDemodDebug)
     {
         r.owner = RtDebugOwner::GuideReconstruct;
@@ -5200,14 +5208,14 @@ Renderer::RtDenoiserGuides Renderer::BuildRtDenoiserGuides() const
     if (m_rtAovMotionConfReady)
         g.motionConf = m_rtAovMotionConf.Get();
 
-    if (m_rtAovPrimaryHitDistReady)
-        g.primaryHitDistRaw = m_rtAovPrimaryHitDist.Get();
+    if (m_rtAovViewZRawReady)
+        g.viewZRaw = m_rtAovViewZRaw.Get();
 
-    if (m_rtAovHitDistReconsReady)
-        g.hitDistRecons = m_rtAovHitDistRecons.Get();
+    if (m_rtAovViewZReconsReady)
+        g.viewZRecons = m_rtAovViewZRecons.Get();
 
-    if (m_rtAovHitDistReconsConfReady)
-        g.hitDistReconsConf = m_rtAovHitDistReconsConf.Get();
+    if (m_rtAovViewZReconsConfReady)
+        g.viewZReconsConf = m_rtAovViewZReconsConf.Get();
 
     if (m_rtAovSurfaceIdReady)
         g.surfaceId = m_rtAovSurfaceId.Get();
@@ -5218,18 +5226,12 @@ Renderer::RtDenoiserGuides Renderer::BuildRtDenoiserGuides() const
     if (m_rtDiffuseDemodulatedReady)
         g.diffuseDemodulated = m_rtDiffuseDemodulated.Get();
 
-    if (m_rtAovHitDistReconsReady)
-        g.hitDistRecons = m_rtAovHitDistRecons.Get();
-
-    if (m_rtAovHitDistReconsConfReady)
-        g.hitDistReconsConf = m_rtAovHitDistReconsConf.Get();
-
-    if (m_rtHitDistHistoryValid &&
-        m_rtHistoryHitDist[m_rtHistoryReadIndex] &&
-        m_rtHistoryHitDistConf[m_rtHistoryReadIndex])
+    if (m_rtViewZHistoryValid &&
+        m_rtHistoryViewZ[m_rtHistoryReadIndex] &&
+        m_rtHistoryViewZConf[m_rtHistoryReadIndex])
     {
-        g.hitDistHistoryRead = m_rtHistoryHitDist[m_rtHistoryReadIndex].Get();
-        g.hitDistConfHistoryRead = m_rtHistoryHitDistConf[m_rtHistoryReadIndex].Get();
+        g.viewZHistoryRead = m_rtHistoryViewZ[m_rtHistoryReadIndex].Get();
+        g.viewZConfHistoryRead = m_rtHistoryViewZConf[m_rtHistoryReadIndex].Get();
     }
 
     return g;
@@ -5265,11 +5267,11 @@ Renderer::RtDenoiserHistories Renderer::BuildRtDenoiserHistories(
     h.depthRead = m_rtHistoryDepth[readIndex].Get();
     h.depthWrite = m_rtHistoryDepth[writeIndex].Get();
 
-    h.hitDistRead = m_rtHistoryHitDist[readIndex].Get();
-    h.hitDistWrite = m_rtHistoryHitDist[writeIndex].Get();
+    h.viewZRead = m_rtHistoryViewZ[readIndex].Get();
+    h.viewZWrite = m_rtHistoryViewZ[writeIndex].Get();
 
-    h.hitDistConfRead = m_rtHistoryHitDistConf[readIndex].Get();
-    h.hitDistConfWrite = m_rtHistoryHitDistConf[writeIndex].Get();
+    h.viewZConfRead = m_rtHistoryViewZConf[readIndex].Get();
+    h.viewZConfWrite = m_rtHistoryViewZConf[writeIndex].Get();
 
     h.surfaceIdRead = m_rtHistorySurfaceId[readIndex].Get();
     h.surfaceIdWrite = m_rtHistorySurfaceId[writeIndex].Get();
@@ -5344,7 +5346,7 @@ void Renderer::RunRtDenoiser(
     // ---------------------------------------------------------------------
     // GuideReconstructionPath
     // Existing stages, same order:
-    //   1. HitDistReconstruct
+    //   1. ViewZReconstruct
     //   2. MotionDilate
     // ---------------------------------------------------------------------
 
@@ -5359,33 +5361,33 @@ void Renderer::RunRtDenoiser(
         ) &&
         guides.ReadyForTemporal() &&
         guides.ReadyForMotionDilate() &&
-        guides.ReadyForHitDistReconstruct() &&
+        guides.ReadyForViewZReconstruct() &&
         guides.surfaceId;
 
     const bool postMayRunSpecSpatial =
         RtPostModeRunsSpecAtrous(rtPostMode) &&
         m_rtSvgf &&
-        m_rtHitDistSigmaScale > 0.0f;
+        m_rtViewZSigmaScale > 0.0f;
 
-    const bool shouldRunHitDistReconstruct =
+    const bool shouldRunViewZReconstruct =
         temporalWouldRun ||
         postMayRunSpecSpatial ||
         rtDebug.wantsMotionDilateDebug ||
-        rtDebug.wantsHitDistReconstructDebug;
+        rtDebug.wantsViewZReconstructDebug;
 
-    const bool ranHitDistReconstruct =
-        shouldRunHitDistReconstruct &&
-        RunRtHitDistReconstruct(
+    const bool ranViewZReconstruct =
+        shouldRunViewZReconstruct &&
+        RunRtViewZReconstruct(
             cl,
             frameIndex,
             device,
             width,
             height);
 
-    if (ranHitDistReconstruct)
+    if (ranViewZReconstruct)
     {
-        guides.hitDistRecons = m_rtAovHitDistRecons.Get();
-        guides.hitDistReconsConf = m_rtAovHitDistReconsConf.Get();
+        guides.viewZRecons = m_rtAovViewZRecons.Get();
+        guides.viewZReconsConf = m_rtAovViewZReconsConf.Get();
     }
 
     const bool ranMotionDilate =
@@ -5396,27 +5398,27 @@ void Renderer::RunRtDenoiser(
             device,
             width,
             height,
-            ranHitDistReconstruct);
+            ranViewZReconstruct);
 
-    const bool specTemporalHitDistAvailable =
-        m_rtHitDistSigmaScale > 0.0f &&
-        ranHitDistReconstruct &&
-        m_rtHitDistHistoryValid &&
-        guides.hitDistRecons &&
-        guides.hitDistHistoryRead &&
-        guides.hitDistConfHistoryRead;
+    const bool specTemporalViewZAvailable =
+        m_rtViewZSigmaScale > 0.0f &&
+        ranViewZReconstruct &&
+        m_rtViewZHistoryValid &&
+        guides.viewZRecons &&
+        guides.viewZHistoryRead &&
+        guides.viewZConfHistoryRead;
 
-    const float specTemporalHitDistSigmaScale =
-        specTemporalHitDistAvailable ? m_rtHitDistSigmaScale : 0.0f;
+    const float specTemporalViewZSigmaScale =
+        specTemporalViewZAvailable ? m_rtViewZSigmaScale : 0.0f;
 
-    const bool specSpatialHitDistAvailable =
-        m_rtHitDistSigmaScale > 0.0f &&
-        ranHitDistReconstruct &&
-        guides.hitDistRecons &&
-        guides.hitDistReconsConf;
+    const bool specSpatialViewZAvailable =
+        m_rtViewZSigmaScale > 0.0f &&
+        ranViewZReconstruct &&
+        guides.viewZRecons &&
+        guides.viewZReconsConf;
 
-    const float specSpatialHitDistSigmaScale =
-        specSpatialHitDistAvailable ? m_rtHitDistSigmaScale : 0.0f;
+    const float specSpatialViewZSigmaScale =
+        specSpatialViewZAvailable ? m_rtViewZSigmaScale : 0.0f;
 
     if (ranMotionDilate)
     {
@@ -5518,11 +5520,11 @@ void Renderer::RunRtDenoiser(
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
 
-        if (specTemporalHitDistAvailable)
+        if (specTemporalViewZAvailable)
         {
-            cl.Transition(guides.hitDistRecons, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            cl.Transition(guides.hitDistHistoryRead, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            cl.Transition(guides.hitDistConfHistoryRead, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(guides.viewZRecons, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(guides.viewZHistoryRead, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(guides.viewZConfHistoryRead, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         cl.FlushBarriers();
 
@@ -5599,9 +5601,9 @@ void Renderer::RunRtDenoiser(
             m_rtHistoryMomentsSpec[m_rtHistoryReadIndex].Get(),
             m_rtHistorySpec[writeIndex].Get(),
             m_rtHistoryMomentsSpec[writeIndex].Get(),
-            specTemporalHitDistAvailable ? guides.hitDistRecons : nullptr,
-            specTemporalHitDistAvailable ? guides.hitDistHistoryRead : nullptr,
-            specTemporalHitDistAvailable ? guides.hitDistConfHistoryRead : nullptr,
+            specTemporalViewZAvailable ? guides.viewZRecons : nullptr,
+            specTemporalViewZAvailable ? guides.viewZHistoryRead : nullptr,
+            specTemporalViewZAvailable ? guides.viewZConfHistoryRead : nullptr,
             guides.surfaceId,
             m_rtSurfaceIdHistoryValid
             ? m_rtHistorySurfaceId[m_rtHistoryReadIndex].Get()
@@ -5622,7 +5624,7 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalRoughnessSigma,
                     m_rtTemporalMotionConfMinSpec,
                     m_rtTemporalMotionConfPowerSpec,
-                    specTemporalHitDistSigmaScale,
+                    specTemporalViewZSigmaScale,
                     m_rtSurfaceIdHistoryValid);
 
             m_rtTemporalPass.Dispatch(
@@ -5664,9 +5666,9 @@ void Renderer::RunRtDenoiser(
             m_rtHistoryMomentsSpecResp[m_rtHistoryReadIndex].Get(),
             m_rtHistorySpecResp[writeIndex].Get(),
             m_rtHistoryMomentsSpecResp[writeIndex].Get(),
-            specTemporalHitDistAvailable ? guides.hitDistRecons : nullptr,
-            specTemporalHitDistAvailable ? guides.hitDistHistoryRead : nullptr,
-            specTemporalHitDistAvailable ? guides.hitDistConfHistoryRead : nullptr,
+            specTemporalViewZAvailable ? guides.viewZRecons : nullptr,
+            specTemporalViewZAvailable ? guides.viewZHistoryRead : nullptr,
+            specTemporalViewZAvailable ? guides.viewZConfHistoryRead : nullptr,
             guides.surfaceId,
             m_rtSurfaceIdHistoryValid
             ? m_rtHistorySurfaceId[m_rtHistoryReadIndex].Get()
@@ -5687,7 +5689,7 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalRoughnessSigmaResp,
                     m_rtTemporalMotionConfMinSpec,
                     m_rtTemporalMotionConfPowerSpec,
-                    specTemporalHitDistSigmaScale,
+                    specTemporalViewZSigmaScale,
                     m_rtSurfaceIdHistoryValid);
 
             m_rtTemporalPass.Dispatch(
@@ -5771,10 +5773,10 @@ void Renderer::RunRtDenoiser(
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
 
-        if (specSpatialHitDistAvailable)
+        if (specSpatialViewZAvailable)
         {
-            cl.Transition(guides.hitDistRecons, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            cl.Transition(guides.hitDistReconsConf, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(guides.viewZRecons, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            cl.Transition(guides.viewZReconsConf, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
 
         cl.FlushBarriers();
@@ -5892,14 +5894,14 @@ void Renderer::RunRtDenoiser(
                     cl.Transition(guides.motionConf, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                     cl.Transition(svgfMoments, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                     cl.Transition(outRes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                    if (specSpatialHitDistAvailable)
+                    if (specSpatialViewZAvailable)
                     {
                         cl.Transition(
-                            guides.hitDistRecons,
+                            guides.viewZRecons,
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
                         cl.Transition(
-                            guides.hitDistReconsConf,
+                            guides.viewZReconsConf,
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                     }
                     cl.FlushBarriers();
@@ -5913,8 +5915,8 @@ void Renderer::RunRtDenoiser(
                         svgfSignal,
                         svgfMoments,
                         guides.motionConf,
-                        specSpatialHitDistAvailable ? guides.hitDistRecons : nullptr,
-                        specSpatialHitDistAvailable ? guides.hitDistReconsConf : nullptr,
+                        specSpatialViewZAvailable ? guides.viewZRecons : nullptr,
+                        specSpatialViewZAvailable ? guides.viewZReconsConf : nullptr,
                         guides.surfaceId);
 
                     if (ok)
@@ -5929,7 +5931,7 @@ void Renderer::RunRtDenoiser(
                                 false,
                                 m_rtTemporalMotionConfPowerSpec,
                                 m_rtTemporalMotionConfMinSpec,
-                                specSpatialHitDistSigmaScale);
+                                specSpatialViewZSigmaScale);
 
                         D3D12_GPU_DESCRIPTOR_HANDLE outUav = finalIter
                             ? (wantsSpecAtrousOutputDebug ? m_rtOutputUav.gpu : RtPostUavGpuAt(1))
@@ -6213,13 +6215,13 @@ void Renderer::RunRtDenoiser(
         cl.Get()->CopyResource(m_rtHistoryNormal[writeIndex].Get(), guides.normalRough);
         cl.Get()->CopyResource(m_rtHistoryDepth[writeIndex].Get(), guides.depth);
 
-        if (ranHitDistReconstruct && ranMotionDilate && temporalWouldRun)
+        if (ranViewZReconstruct && ranMotionDilate && temporalWouldRun)
         {
-            CommitRtHitDistHistory(cl, writeIndex);
+            CommitRtViewZHistory(cl, writeIndex);
         }
         else if (!temporalWouldRun)
         {
-            m_rtHitDistHistoryValid = false;
+            m_rtViewZHistoryValid = false;
         }
 
         cl.Transition(guides.normalRough, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);

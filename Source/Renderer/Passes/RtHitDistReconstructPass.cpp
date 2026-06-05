@@ -31,7 +31,7 @@ void RtHitDistReconstructPass::BuildRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE srvRange;
     srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 8, 0, 0);
-    // t0 raw primary hit distance
+    // t0 raw ViewZ-compatible distance
     // t1 current normal/roughness
     // t2 current depth
     // t3 raw prevUV

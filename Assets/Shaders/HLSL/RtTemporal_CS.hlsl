@@ -22,8 +22,8 @@
 //   56 = motion confidence consumed by temporal
 //   57 = alpha after motion-confidence scaling
 //   58 = post-power motion confidence used for temporal weighting
-//   71 = temporal hit-distance weight visible on spec reuse
-//   72 = mismatch mask highlights rejected spec history
+//   71 = temporal ViewZ similarity weight visible on spec reuse
+//   72 = ViewZ mismatch mask highlights rejected spec history
 //   76 = SurfaceId match mask
 //   77 = SurfaceId invalid mask
 // Do not include 37..44 here.
@@ -38,9 +38,9 @@ Texture2D<float> g_PrevDepth : register(t5);
 Texture2D<float2> g_PrevMoments : register(t6);
 Texture2D<float2> g_CurrPrevUV : register(t7);
 Texture2D<float> g_CurrMotionConf : register(t8);
-Texture2D<float> g_CurrHitDist : register(t9);
-Texture2D<float> g_PrevHitDist : register(t10);
-Texture2D<float> g_PrevHitDistConf : register(t11);
+Texture2D<float> g_CurrViewZ : register(t9);
+Texture2D<float> g_PrevViewZ : register(t10);
+Texture2D<float> g_PrevViewZConf : register(t11);
 Texture2D<uint> g_CurrSurfaceId : register(t12);
 Texture2D<uint> g_PrevSurfaceId : register(t13);
 
@@ -50,7 +50,6 @@ RWTexture2D<float2> g_MomentsOut : register(u2);
 
 SamplerState g_LinearClamp : register(s0);
 
-static const float HIT_DIST_INVALID = -1.0f;
 static const uint SURFACE_ID_INVALID = 0xFFFFFFFFu;
 
 cbuffer RtTemporalConstants : register(b0)
@@ -77,11 +76,14 @@ cbuffer RtTemporalConstants : register(b0)
     float MotionConfMin;
     float MotionConfPower;
     
-    float HitDistSigmaScale;
-    float HitDistRoughCutoff;
-    float HitDistConfMin;
-    float _padHitDist0;
-    
+    float ViewZSigmaScale;
+    float ViewZRoughCutoff;
+    float ViewZConfMin;
+    float _padViewZ0;
+
+    float3 DistanceNormParams;
+    float DistanceNormSigma;
+
     uint SurfaceIdHistoryValid;
     uint3 _padSurfaceId0;
     
@@ -200,37 +202,44 @@ float EvalSpecWeight(
     return saturate((specDot - (1.0f - SpecDirSigma)) / max(1e-4f, SpecDirSigma));
 }
 
-
-bool HitDistValid(float d)
-{
-    return d >= 0.0f;
-}
-
-float EvalHitDistWeight(
-    float currHit,
-    float prevHit,
-    float prevHitConf,
+float EvalViewZWeight(
+    float currViewZ,
+    float prevViewZ,
+    float prevViewZConf,
     float currRough,
     float prevRough)
 {
-    if (HitDistSigmaScale <= 0.0f)
+    if (ViewZSigmaScale <= 0.0f)
         return 1.0f;
 
     float roughMin = min(currRough, prevRough);
 
-    if (roughMin >= HitDistRoughCutoff)
+    if (roughMin >= ViewZRoughCutoff)
         return 1.0f;
 
-    if (!HitDistValid(currHit) || !HitDistValid(prevHit))
+    if (!DistanceValid(currViewZ) || !DistanceValid(prevViewZ))
         return 1.0f;
 
-    if (prevHitConf < HitDistConfMin)
+    if (prevViewZConf < ViewZConfMin)
         return 1.0f;
 
-    float sigmaHit =
-        HitDistSigmaScale * max(1e-3f, currHit);
+    float n0 = NormalizeDistance(
+        currViewZ,
+        currViewZ,
+        currRough,
+        DistanceNormParams);
 
-    return exp(-abs(currHit - prevHit) / max(1e-4f, sigmaHit));
+    float n1 = NormalizeDistance(
+        prevViewZ,
+        currViewZ,
+        currRough,
+        DistanceNormParams);
+
+    float sigma = max(
+        1e-4f,
+        DistanceNormSigma * max(0.0f, ViewZSigmaScale));
+
+    return DistanceSimilarityWeight(n0, n1, sigma);
 }
 
 bool SurfaceIdValid(uint id)
@@ -284,7 +293,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float alphaConfidence = 0.0f;
             
     float bestCandidateBaseScore = 0.0f;
-    float bestCandidateHitWeight = 1.0f;
+    float bestCandidateViewZWeight = 1.0f;
     
     float bestSurfaceIdMatch = 1.0f;
     float bestSurfaceIdInvalid = 0.0f;
@@ -320,10 +329,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
         
             float normalPow = max(1.0f, 1.0f / max(1e-4f, NormalSigma));
             
-            float currHitDist =
-                (HitDistSigmaScale > 0.0f)
-                ? g_CurrHitDist[pixel]
-                : HIT_DIST_INVALID;
+            float currViewZ =
+                (ViewZSigmaScale > 0.0f)
+                ? g_CurrViewZ[pixel]
+                : DISTANCE_INVALID;
         
             [unroll]
             for (int y = -2; y <= 2; ++y)
@@ -402,23 +411,23 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
                     float baseScore = wDepth * wNormal * wRough * wSpec;
 
-                    float candPrevHit = HIT_DIST_INVALID;
-                    float candPrevHitConf = 0.0f;
+                    float candPrevViewZ = DISTANCE_INVALID;
+                    float candPrevViewZConf = 0.0f;
 
-                    if (HitDistSigmaScale > 0.0f)
+                    if (ViewZSigmaScale > 0.0f)
                     {
-                        candPrevHit = g_PrevHitDist.Load(int3(cp, 0));
-                        candPrevHitConf = saturate(g_PrevHitDistConf.Load(int3(cp, 0)));
+                        candPrevViewZ = g_PrevViewZ.Load(int3(cp, 0));
+                        candPrevViewZConf = saturate(g_PrevViewZConf.Load(int3(cp, 0)));
                     }
 
-                    float wHit = EvalHitDistWeight(
-                        currHitDist,
-                        candPrevHit,
-                        candPrevHitConf,
+                    float wViewZ = EvalViewZWeight(
+                        currViewZ,
+                        candPrevViewZ,
+                        candPrevViewZConf,
                         currR,
                         candPrevR);
 
-                    float score = baseScore * wHit * wSurfaceId;
+                    float score = baseScore * wViewZ * wSurfaceId;
 
                     if (score > bestCandidateScore)
                     {
@@ -433,7 +442,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
                         bestSpecOk = candSpecOk;
                         bestOffset = int2(x, y);
                         bestCandidateBaseScore = baseScore;
-                        bestCandidateHitWeight = wHit;
+                        bestCandidateViewZWeight = wViewZ;
                         bestSurfaceIdMatch = wSurfaceId;
                         bestSurfaceIdInvalid = surfaceInvalid;
                     }
@@ -608,12 +617,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
     
     else if (DebugView == 71)
     {
-        display = bestCandidateHitWeight.xxx;
+        display = bestCandidateViewZWeight.xxx;
     }
-    
     else if (DebugView == 72)
     {
-        float mismatch = (bestCandidateHitWeight < 0.5f) ? 1.0f : 0.0f;
+        float mismatch = (bestCandidateViewZWeight < 0.5f) ? 1.0f : 0.0f;
         display = mismatch.xxx;
     }
     
