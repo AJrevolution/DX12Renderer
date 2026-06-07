@@ -26,8 +26,9 @@
 //   72 = ViewZ mismatch mask highlights rejected spec history
 //   76 = SurfaceId match mask
 //   77 = SurfaceId invalid mask
-// Do not include 37..44 here.
-// Those are history-select / A-Trous debug IDs.
+//   84 = temporal history color clamp amount
+//   85 = temporal moment variance clamp mask
+
 
 Texture2D<float4> g_CurrAccum : register(t0);
 Texture2D<float4> g_CurrNormal : register(t1);
@@ -94,6 +95,16 @@ cbuffer RtTemporalConstants : register(b0)
     
     float4 CurrCameraPos;
     float4 PrevCameraPos;
+    
+    uint EnableRobustMoments;
+    float MomentLuminanceMax;
+    float MomentVarianceMax;
+    float HistoryClampStrength;
+
+    float TemporalNeighborhoodSigmaK;
+    float TemporalClampMinWeight;
+    float TemporalClampRelaxation;
+    float _padRobust0;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -150,7 +161,7 @@ void NeighborhoodMinMax(uint2 pixel, out float3 cmin, out float3 cmax)
             int2 p = int2(pixel) + int2(x, y);
             p = clamp(p, int2(0, 0), int2(int(width) - 1, int(height) - 1));
 
-            float3 c = g_CurrAccum[uint2(p)].rgb;
+            float3 c = SanitizeRadiance(g_CurrAccum[uint2(p)].rgb);
             cmin = min(cmin, c);
             cmax = max(cmax, c);
         }
@@ -255,6 +266,106 @@ float SurfaceIdMatchWeight(uint currId, uint prevId)
     return (currId == prevId) ? 1.0f : 0.0f;
 }
 
+struct TemporalNeighborhoodStats
+{
+    float weight;
+    float mean;
+    float meanSq;
+};
+
+TemporalNeighborhoodStats BuildTemporalStats(uint2 pixel, uint width, uint height)
+{
+    TemporalNeighborhoodStats s;
+    s.weight = 0.0f;
+    s.mean = 0.0f;
+    s.meanSq = 0.0f;
+
+    float4 centerNR = g_CurrNormal[pixel];
+    float3 centerN = UnpackNormal(centerNR);
+    float centerR = centerNR.a;
+    float centerDepth = g_CurrDepth[pixel];
+    uint centerId = g_CurrSurfaceId[pixel];
+
+    if (!SurfaceIdValid(centerId) || centerDepth >= 0.9999f)
+        return s;
+
+    [unroll]
+    for (int y = -1; y <= 1; ++y)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; ++x)
+        {
+            int2 qI = int2(pixel) + int2(x, y);
+            qI = clamp(qI, int2(0, 0), int2(int(width) - 1, int(height) - 1));
+            uint2 q = uint2(qI);
+
+            uint qId = g_CurrSurfaceId[q];
+            if (!SurfaceIdValid(qId) || qId != centerId)
+                continue;
+
+            float qDepth = g_CurrDepth[q];
+            if (qDepth >= 0.9999f)
+                continue;
+
+            float4 qNR = g_CurrNormal[q];
+            float3 qN = UnpackNormal(qNR);
+            float qR = qNR.a;
+
+            float wDepth =
+                exp(-abs(centerDepth - qDepth) / max(1e-5f, DepthSigma));
+
+            float wNormal =
+                exp(-(1.0f - saturate(dot(centerN, qN))) / max(1e-5f, NormalSigma));
+
+            float wRough =
+                exp(-abs(centerR - qR) / max(1e-5f, RoughnessSigma));
+
+            float wViewZ = 1.0f;
+
+            if (ViewZSigmaScale > 0.0f)
+            {
+                float z0 = g_CurrViewZ[pixel];
+                float z1 = g_CurrViewZ[q];
+
+                if (DistanceValid(z0) && DistanceValid(z1))
+                {
+                    float n0 = NormalizeDistance(
+                        z0,
+                        z0,
+                        centerR,
+                        DistanceNormParams);
+
+                    float n1 = NormalizeDistance(
+                        z1,
+                        z0,
+                        centerR,
+                        DistanceNormParams);
+
+                    float sigma =
+                        max(1e-4f, DistanceNormSigma * max(0.0f, ViewZSigmaScale));
+
+                    wViewZ = DistanceSimilarityWeight(n0, n1, sigma);
+                }
+            }
+
+            float lum = SafeLuminance(g_CurrAccum[q].rgb);
+            float w = wDepth * wNormal * wRough * wViewZ;
+
+            s.mean += lum * w;
+            s.meanSq += lum * lum * w;
+            s.weight += w;
+        }
+    }
+
+    if (s.weight > 1e-6f)
+    {
+        s.mean /= s.weight;
+        s.meanSq /= s.weight;
+    }
+
+    return s;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -265,7 +376,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
     if (pixel.x >= width || pixel.y >= height)
         return;
 
-    float3 currColor = g_CurrAccum[pixel].rgb;
+    float3 currColorRaw = g_CurrAccum[pixel].rgb;
+    float3 currColor = SanitizeRadiance(currColorRaw);
     float3 currNormal = UnpackNormal(g_CurrNormal[pixel]);
     float currDepth = g_CurrDepth[pixel];
     float currR = g_CurrNormal[pixel].a;
@@ -297,6 +409,15 @@ void main(uint3 dtid : SV_DispatchThreadID)
     
     float bestSurfaceIdMatch = 1.0f;
     float bestSurfaceIdInvalid = 0.0f;
+    
+    float momentClampMask = 0.0f;
+    float historyClampAmount = 0.0f;
+
+    if (EnableRobustMoments != 0u &&
+    (!IsFinite3(currColorRaw) || any(currColorRaw < 0.0f.xxx)))
+    {
+        momentClampMask = 1.0f;
+    }
     
     uint currSurfaceId = g_CurrSurfaceId[pixel];
 
@@ -474,10 +595,84 @@ void main(uint3 dtid : SV_DispatchThreadID)
             }
         }
     }
+    
+    if (validReuse)
+    {
+        prevColor = SanitizeRadiance(prevColor);
+
+        if (EnableRobustMoments != 0u)
+        {
+            float prevM1 = prevMoments.x;
+            float prevM2 = prevMoments.y;
+
+            if (!IsFiniteScalar(prevM1))
+            {
+                prevM1 = 0.0f;
+                momentClampMask = 1.0f;
+            }
+
+            prevM1 = max(prevM1, 0.0f);
+
+            if (prevM1 > MomentLuminanceMax)
+            {
+                prevM1 = MomentLuminanceMax;
+                momentClampMask = 1.0f;
+            }
+
+            if (!IsFiniteScalar(prevM2))
+            {
+                prevM2 = prevM1 * prevM1;
+                momentClampMask = 1.0f;
+            }
+
+            prevM2 = max(prevM2, prevM1 * prevM1);
+
+            if (prevM2 > MomentVarianceMax)
+            {
+                prevM2 = MomentVarianceMax;
+                momentClampMask = 1.0f;
+            }
+
+            prevMoments = float2(prevM1, prevM2);
+        }
+    }
 
     float3 currMin, currMax;
     NeighborhoodMinMax(pixel, currMin, currMax);
     float3 prevClamped = clamp(prevColor, currMin, currMax);
+    
+    if (EnableRobustMoments != 0u && validReuse)
+    {
+        TemporalNeighborhoodStats stats = BuildTemporalStats(pixel, width, height);
+
+        if (stats.weight >= TemporalClampMinWeight)
+        {
+            float sigma = RobustSigmaFromMoments(stats.mean, stats.meanSq);
+
+            float sigmaK =
+            TemporalNeighborhoodSigmaK *
+            lerp(
+                1.0f + max(0.0f, TemporalClampRelaxation),
+                1.0f,
+                motionConfW);
+
+            float upper =
+            min(MomentLuminanceMax, stats.mean + sigmaK * sigma);
+
+            float histLum = SafeLuminance(prevClamped);
+
+            if (histLum > upper)
+            {
+                float targetLum =
+                lerp(histLum, upper, saturate(HistoryClampStrength));
+
+                historyClampAmount =
+                saturate(1.0f - targetLum / max(histLum, RT_LUMINANCE_EPS));
+
+                prevClamped = ScaleToLuminance(prevClamped, targetLum);
+            }
+        }
+    }
     
     if (validReuse)
     {
@@ -497,8 +692,29 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float alphaAfterMotionConf = 0.0f;
     float3 history = currColor;
     
-    float currLuma = Luminance(currColor);
-    float2 currMoments = float2(currLuma, currLuma * currLuma);
+    float currLumRaw = SafeLuminance(currColor);
+
+    float currLum =
+    (EnableRobustMoments != 0u)
+    ? min(currLumRaw, MomentLuminanceMax)
+    : currLumRaw;
+
+    float m1 = currLum;
+    float m2 = currLum * currLum;
+
+    if (EnableRobustMoments != 0u)
+    {
+        if (currLumRaw > MomentLuminanceMax)
+            momentClampMask = 1.0f;
+
+        if (m2 > MomentVarianceMax)
+        {
+            m2 = MomentVarianceMax;
+            momentClampMask = 1.0f;
+        }
+    }
+
+    float2 currMoments = float2(m1, m2);
     float2 moments = currMoments;
     
     if (validReuse)
@@ -635,6 +851,16 @@ void main(uint3 dtid : SV_DispatchThreadID)
         display = bestSurfaceIdInvalid.xxx;
     }
     
+    else if (DebugView == 84)
+    {
+        display = historyClampAmount.xxx;
+    }
+    
+    else if (DebugView == 85)
+    {
+        display = momentClampMask.xxx;
+    }
+    
     g_HistoryOut[pixel] = float4(history, newLen);
     g_MomentsOut[pixel] = moments;
     
@@ -648,7 +874,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
         DebugView == 71 ||
         DebugView == 72 ||
         DebugView == 76 ||
-        DebugView == 77;
+        DebugView == 77 ||
+        DebugView == 84 ||
+        DebugView == 85;
 
     if (isTemporalDebug)
     {

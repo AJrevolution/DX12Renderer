@@ -53,6 +53,9 @@ cbuffer RtAtrousConstants : register(b0)
 
     float3 DistanceNormParams;
     float DistanceNormSigma;
+    
+    float AtrousContributionMaxLuminance;
+    float3 _padSafety0;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -62,7 +65,7 @@ float3 UnpackNormal(float4 packed)
 
 float Luminance(float3 c)
 {
-    return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+    return SafeLuminance(c);
 }
 
 float EvalViewZAtrousWeight(
@@ -130,8 +133,14 @@ void main(uint3 dtid : SV_DispatchThreadID)
     static const float kernel[3] = { 1.0f, 2.0f, 1.0f };
 
     float4 centerSig = g_Signal[pixel];
-    float3 c0 = centerSig.rgb;
-    float len0 = centerSig.a;
+
+    float3 c0 = ClampRadianceLuminance(
+        centerSig.rgb,
+        AtrousContributionMaxLuminance);
+
+    float len0 = IsFiniteScalar(centerSig.a)
+        ? clamp(centerSig.a, 0.0f, 255.0f)
+        : 0.0f;
     float lenN0 = saturate(len0 / 255.0f);
 
     float motionConfRaw = saturate(g_MotionConf[pixel]);
@@ -183,9 +192,19 @@ void main(uint3 dtid : SV_DispatchThreadID)
     if (UseMoments != 0)
     {
         float2 m0 = g_Moments[pixel];
-        float variance = max(m0.y - m0.x * m0.x, 0.0f);
+
+        float m1 = IsFiniteScalar(m0.x) ? max(m0.x, 0.0f) : SafeLuminance(c0);
+        float m2 = IsFiniteScalar(m0.y) ? m0.y : (m1 * m1);
+
+        m2 = max(m2, m1 * m1);
+
+        float variance = max(m2 - m1 * m1, 0.0f);
+        variance = min(
+            variance,
+            AtrousContributionMaxLuminance * AtrousContributionMaxLuminance);
+
         sigmaL = max(1e-4f, VarianceScale * sqrt(variance));
-        l0 = Luminance(c0);
+        l0 = SafeLuminance(c0);
     }
     
     if (DebugView == 28)
@@ -240,7 +259,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
             p = clamp(p, int2(0, 0), int2(int(width) - 1, int(height) - 1));
 
             float4 sig = g_Signal[uint2(p)];
-            float3 c = sig.rgb;
+
+            float3 c = ClampRadianceLuminance(
+                sig.rgb,
+                AtrousContributionMaxLuminance);
 
             float4 nPacked = g_Normal[uint2(p)];
             float3 n = UnpackNormal(nPacked);
@@ -276,7 +298,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
             float wl = 1.0f;
             if (UseMoments != 0)
             {
-                float l = Luminance(c);
+                float l = SafeLuminance(c);
                 float sigmaLUsed = max(1e-4f, sigmaL * lerp(0.5f, 1.0f, roughMin));
                 wl = exp(-abs(l - l0) / sigmaLUsed);
 
@@ -289,6 +311,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
             float wSurfaceId = SurfaceIdEdgeWeight(surfaceId0, surfaceId1);
 
             float w = ws * wn * wz * wl * wLen * wViewZ * wSurfaceId;
+            
+            if (!IsFiniteScalar(w) || w <= 0.0f)
+                continue;
+            
             sum += c * w;
             wsum += w;
             viewZWeightDebugSum += wViewZ * ws;
@@ -319,6 +345,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
     
     float3 filtered = (wsum > 1e-6f) ? (sum / wsum) : c0;
+
+    filtered = ClampRadianceLuminance(
+        filtered,
+        AtrousContributionMaxLuminance);
 
     if (FinalOutputSrgb != 0)
         g_Output[pixel] = float4(LinearToSRGB(filtered), len0);

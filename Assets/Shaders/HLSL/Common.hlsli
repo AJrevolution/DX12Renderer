@@ -38,6 +38,7 @@
 
 static const float PI = 3.14159265359f;
 static const float DISTANCE_INVALID = -1.0f;
+static const float RT_LUMINANCE_EPS = 1e-5f;
 
 bool DistanceValid(float d)
 {
@@ -87,5 +88,58 @@ float3 SRGBToLinear(float3 c)
 float3 LinearToSRGB(float3 c)
 {
     return pow(saturate(c), 1.0f / 2.2f);
+}
+
+bool IsFiniteScalar(float v)
+{
+    return !isnan(v) && !isinf(v);
+}
+
+bool IsFinite3(float3 v)
+{
+    return IsFiniteScalar(v.x) &&
+           IsFiniteScalar(v.y) &&
+           IsFiniteScalar(v.z);
+}
+
+float3 SanitizeRadiance(float3 c)
+{
+    if (!IsFinite3(c))
+        return 0.0f.xxx;
+
+    return max(c, 0.0f.xxx);
+}
+
+float SafeLuminance(float3 c)
+{
+    c = SanitizeRadiance(c);
+    return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+}
+
+float3 ScaleToLuminance(float3 c, float targetLum)
+{
+    c = SanitizeRadiance(c);
+
+    float lum = SafeLuminance(c);
+    if (lum <= RT_LUMINANCE_EPS)
+        return c;
+
+    return c * (max(0.0f, targetLum) / lum);
+}
+
+float3 ClampRadianceLuminance(float3 c, float maxLum)
+{
+    c = SanitizeRadiance(c);
+
+    float lum = SafeLuminance(c);
+    if (lum <= maxLum)
+        return c;
+
+    return ScaleToLuminance(c, maxLum);
+}
+
+float RobustSigmaFromMoments(float mean, float meanSq)
+{
+    return sqrt(max(0.0f, meanSq - mean * mean));
 }
 #endif // ASSETS_SHADERS_HLSL_COMMON

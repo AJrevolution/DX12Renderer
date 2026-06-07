@@ -36,7 +36,9 @@ namespace
             dv == 71 ||
             dv == 72 ||
             dv == 76 ||
-            dv == 77;
+            dv == 77 ||
+            dv == 84 ||
+            dv == 85;
     }
 
     static bool IsSvgfDebug(uint32_t dv)
@@ -414,6 +416,7 @@ void Renderer::RenderFrame(
     const bool wantsDiffuseAlbedoDebug = rtDebug.wantsDiffuseAlbedoDebug;
     const bool wantsDiffuseDemodDebug = rtDebug.wantsDiffuseDemodDebug;
     const bool wantsRtInspectionDebug = rtDebug.wantsRtInspectionDebug;
+    const bool wantsOutlierClampDebug = rtDebug.wantsOutlierClampDebug;
 
     RtPostMode rtPostMode = ResolveRtPostMode(rtDebug);
 
@@ -422,6 +425,7 @@ void Renderer::RenderFrame(
         !wantsMotionDilateDebug &&
         !wantsViewZReconstructDebug &&
         !wantsDiffuseDemodDebug &&
+        !wantsOutlierClampDebug &&
         ((m_debugView == 0) || wantsRtInspectionDebug) &&
         (
             m_rtTemporal ||
@@ -590,7 +594,8 @@ void Renderer::RenderFrame(
 
     if (wantsMotionDilateDebug ||
         wantsViewZReconstructDebug ||
-        wantsDiffuseDemodDebug)
+        wantsDiffuseDemodDebug ||
+        wantsOutlierClampDebug)
     {
         // Debug 54 is produced by RtMotionDilatePass.
         // DXR still runs to author raw motion/depth/normal guides, but it must not
@@ -812,6 +817,16 @@ void Renderer::RenderFrame(
         cl.Transition(m_rtAovSurfaceId.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cl.Transition(m_rtAovDiffuseAlbedo.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         
+        if (m_rtDiffuseRobustInputReady)
+        {
+            cl.Transition(m_rtDiffuseRobustInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
+
+        if (m_rtSpecRobustInputReady)
+        {
+            cl.Transition(m_rtSpecRobustInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
+
         if (m_rtDiffuseDemodulatedReady)
         {
             cl.Transition(m_rtDiffuseDemodulated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1025,6 +1040,8 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_rtAovDiffuseAlbedoReady = false;
     m_rtDiffuseDemodulatedReady = false;
     m_rtSurfaceIdHistoryValid = false;
+    m_rtDiffuseRobustInputReady = false;
+    m_rtSpecRobustInputReady = false;
 
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
@@ -1228,6 +1245,7 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         m_rtCombinePass.Initialize(device, Paths::ShaderDir());
         m_rtViewZReconstructPass.Initialize(device, Paths::ShaderDir());
         m_rtDiffuseDemodulatePass.Initialize(device, Paths::ShaderDir());
+        m_rtOutlierClampPass.Initialize(device, Paths::ShaderDir());
     }
 
     // Load a real texture from disk 
@@ -1851,6 +1869,10 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         !m_rtAovDiffuseAlbedoReady ||
         !m_rtDiffuseDemodulated ||
         !m_rtDiffuseDemodulatedReady ||
+        !m_rtDiffuseRobustInput ||
+        !m_rtDiffuseRobustInputReady ||
+        !m_rtSpecRobustInput ||
+        !m_rtSpecRobustInputReady ||
         (m_rtOutputHeight != height);
 
     if (sizeMismatch)
@@ -2362,6 +2384,11 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
     m_rtDiffuseDemodulatedReady = false;
     m_rtDiffuseDemodulated.Reset();
 
+    m_rtDiffuseRobustInputReady = false;
+    m_rtSpecRobustInputReady = false;
+    m_rtDiffuseRobustInput.Reset();
+    m_rtSpecRobustInput.Reset();
+
     if (!m_rtOutputUav.IsValid())
         m_rtOutputUav = m_srvHeap.Allocate(kRtUavTableCount);
 
@@ -2703,6 +2730,41 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
             resource.Get(),
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     };
+
+    auto CreateRobustTexture = [&](ComPtr<ID3D12Resource>& resource, const wchar_t* name)
+    {
+        auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&resource)),
+            "Create RT robust input");
+
+        SetD3D12ObjectName(resource.Get(), name);
+
+        CommandList::SetGlobalState(
+            resource.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    };
+
+    CreateRobustTexture(m_rtDiffuseRobustInput, L"RT Diffuse Robust Input");
+    CreateRobustTexture(m_rtSpecRobustInput, L"RT Spec Robust Input");
+
+    m_rtDiffuseRobustInputReady = true;
+    m_rtSpecRobustInputReady = true;
 
     CreateR16UavTexture(
         m_rtAovViewZRecons,
@@ -3570,7 +3632,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     float motionConfMin,
     float motionConfPower,
     float viewZSigmaScale,
-    bool surfaceIdHistoryValid)
+    bool surfaceIdHistoryValid,
+    float historyClampStrength)
 {
     auto alloc = m_upload.Allocate(
         frameIndex,
@@ -3612,6 +3675,18 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     cb->surfaceIdHistoryValid = surfaceIdHistoryValid ? 1u : 0u;
     cb->distanceNormParams = RtDistanceNormParams();
     cb->distanceNormSigma = kRtDistanceNormSigma;
+    cb->enableRobustMoments = m_rtEnableRobustMoments ? 1u : 0u;
+
+    const float maxLum =
+        std::max(1e-3f, m_rtOutlierClampMaxLuminance);
+
+    cb->momentLuminanceMax = maxLum;
+    cb->momentVarianceMax = maxLum * maxLum;
+    cb->historyClampStrength = std::clamp(historyClampStrength, 0.0f, 1.0f);
+
+    cb->temporalNeighborhoodSigmaK = m_rtTemporalNeighborhoodSigmaK;
+    cb->temporalClampMinWeight = m_rtTemporalClampMinWeight;
+    cb->temporalClampRelaxation = m_rtTemporalClampRelaxation;
 
     cb->currCameraPos = 
     {
@@ -3806,6 +3881,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtAtrousConstants(
     cb->enableLengthSkip = m_rtAtrousEnableLengthSkip ? 1u : 0u;
     cb->distanceNormParams = RtDistanceNormParams();
     cb->distanceNormSigma = kRtDistanceNormSigma;
+    cb->atrousContributionMaxLuminance = std::max(1e-3f, m_rtAtrousContributionMaxLuminance);
 
     return alloc.gpu;
 }
@@ -5105,6 +5181,7 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
     r.wantsSurfaceIdDebug = IsSurfaceIdDebug(debugView);
     r.wantsDiffuseAlbedoDebug = IsDiffuseAlbedoDebug(debugView);
     r.wantsDiffuseDemodDebug = IsDiffuseDemodulateDebug(debugView);
+    r.wantsOutlierClampDebug = IsOutlierClampDebug(debugView);
 
     r.wantsSpatialDebug = r.wantsSvgfDebug;
 
@@ -5121,7 +5198,8 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
         r.wantsViewZReconstructDebug ||
         r.wantsSurfaceIdDebug ||
         r.wantsDiffuseAlbedoDebug ||
-        r.wantsDiffuseDemodDebug;
+        r.wantsDiffuseDemodDebug ||
+        r.wantsOutlierClampDebug;
 
     r.wantsRtInspectionDebug =
         r.wantsRtPostDebug ||
@@ -5135,9 +5213,11 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
     {
         r.owner = RtDebugOwner::RayGen;
     }
+
     else if (r.wantsMotionDilateDebug ||
         r.wantsViewZReconstructDebug ||
-        r.wantsDiffuseDemodDebug)
+        r.wantsDiffuseDemodDebug ||
+        r.wantsOutlierClampDebug)
     {
         r.owner = RtDebugOwner::GuideReconstruct;
     }
@@ -5373,7 +5453,8 @@ void Renderer::RunRtDenoiser(
         temporalWouldRun ||
         postMayRunSpecSpatial ||
         rtDebug.wantsMotionDilateDebug ||
-        rtDebug.wantsViewZReconstructDebug;
+        rtDebug.wantsViewZReconstructDebug ||
+        rtDebug.wantsOutlierClampDebug;
 
     const bool ranViewZReconstruct =
         shouldRunViewZReconstruct &&
@@ -5391,7 +5472,9 @@ void Renderer::RunRtDenoiser(
     }
 
     const bool ranMotionDilate =
-        (temporalWouldRun || rtDebug.wantsMotionDilateDebug) &&
+        (temporalWouldRun ||
+            rtDebug.wantsMotionDilateDebug ||
+            rtDebug.wantsOutlierClampDebug) &&
         RunRtMotionDilate(
             cl,
             frameIndex,
@@ -5426,6 +5509,15 @@ void Renderer::RunRtDenoiser(
         guides.motionConf = m_rtAovMotionConf.Get();
     }
 
+    const bool outlierClampCanUseViewZ =
+        ranViewZReconstruct &&
+        guides.viewZRecons &&
+        guides.viewZReconsConf;
+
+    const bool outlierClampCanUseMotionConf =
+        ranMotionDilate &&
+        guides.motionConf;
+
     // ---------------------------------------------------------------------
     // SignalPrepPath
     // Existing stage:
@@ -5436,9 +5528,18 @@ void Renderer::RunRtDenoiser(
         rtPostMode != RtPostMode::Disabled &&
         rtPostMode != RtPostMode::RawCombineOnly;
 
+    const bool wantsDiffuseOutlierDebug =
+        m_debugView == 81 ||
+        m_debugView == 83 ||
+        m_debugView == 86;
+
+    const bool wantsSpecOutlierDebug =
+        m_debugView == 82;
+
     const bool shouldRunDiffuseDemodulate =
         postNeedsDemodulatedDiffuse ||
-        rtDebug.wantsDiffuseDemodDebug;
+        rtDebug.wantsDiffuseDemodDebug ||
+        wantsDiffuseOutlierDebug;
 
     const bool ranDiffuseDemodulate =
         shouldRunDiffuseDemodulate &&
@@ -5454,29 +5555,96 @@ void Renderer::RunRtDenoiser(
         guides.diffuseDemodulated = m_rtDiffuseDemodulated.Get();
     }
 
-    // Fallback signal setup. In post-stack modes, diffuse should be demodulated
-    // once DiffuseDemodulate has run. RawCombineOnly is handled separately above.
-    rtSignals.diffuse = 
+    ID3D12Resource* diffuseTemporalInput =
+        ranDiffuseDemodulate
+        ? guides.diffuseDemodulated
+        : m_rtAccumDiffuse.Get();
+
+    ID3D12Resource* specTemporalInput =
+        m_rtAccumSpec.Get();
+
+    const bool shouldClampDiffuse =
+        m_rtEnableOutlierClamp &&
+        m_rtDiffuseRobustInputReady &&
+        diffuseTemporalInput &&
+        (
+            temporalWouldRun ||
+            RtPostModeRunsDiffuseAtrous(rtPostMode) ||
+            wantsDiffuseOutlierDebug
+            );
+
+    const bool ranDiffuseClamp =
+        shouldClampDiffuse &&
+        RunRtOutlierClamp(
+            cl,
+            frameIndex,
+            device,
+            width,
+            height,
+            false, // diffuse
+            diffuseTemporalInput,
+            m_rtDiffuseRobustInput.Get(),
+            outlierClampCanUseViewZ,
+            outlierClampCanUseMotionConf,
+            wantsDiffuseOutlierDebug);
+
+    if (ranDiffuseClamp)
     {
-        ranDiffuseDemodulate ? guides.diffuseDemodulated : m_rtAccumDiffuse.Get(),
+        diffuseTemporalInput = m_rtDiffuseRobustInput.Get();
+    }
+
+    const bool shouldClampSpec =
+        m_rtEnableOutlierClamp &&
+        m_rtSpecRobustInputReady &&
+        specTemporalInput &&
+        (
+            temporalWouldRun ||
+            RtPostModeRunsSpecAtrous(rtPostMode) ||
+            wantsSpecOutlierDebug
+            );
+
+    const bool ranSpecClamp =
+        shouldClampSpec &&
+        RunRtOutlierClamp(
+            cl,
+            frameIndex,
+            device,
+            width,
+            height,
+            true, // specular
+            specTemporalInput,
+            m_rtSpecRobustInput.Get(),
+            outlierClampCanUseViewZ,
+            outlierClampCanUseMotionConf,
+            wantsSpecOutlierDebug);
+
+    if (ranSpecClamp)
+    {
+        specTemporalInput = m_rtSpecRobustInput.Get();
+    }
+
+    // Fallback signal setup, now using robust inputs when available.
+    rtSignals.diffuse =
+    {
+        diffuseTemporalInput,
         m_rtHistoryMoments[m_rtHistoryReadIndex].Get()
     };
 
-    rtSignals.specStable = 
+    rtSignals.specStable =
     {
-        m_rtAccumSpec.Get(),
+        specTemporalInput,
         m_rtHistoryMomentsSpec[m_rtHistoryReadIndex].Get()
     };
 
-    rtSignals.specResponsive = 
+    rtSignals.specResponsive =
     {
-        m_rtAccumSpec.Get(),
+        specTemporalInput,
         m_rtHistoryMomentsSpecResp[m_rtHistoryReadIndex].Get()
     };
 
-    rtSignals.specSelected = 
+    rtSignals.specSelected =
     {
-        m_rtAccumSpec.Get(),
+        specTemporalInput,
         rtSignals.specStable.moments
     };
 
@@ -5486,8 +5654,8 @@ void Renderer::RunRtDenoiser(
     {
         CmdBeginEvent(cmdList, "RT Temporal");
 
-        cl.Transition(m_rtAccumDiffuse.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        cl.Transition(m_rtAccumSpec.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        cl.Transition(diffuseTemporalInput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        cl.Transition(specTemporalInput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -5532,7 +5700,7 @@ void Renderer::RunRtDenoiser(
         const bool okDiffuse = UpdateRtTemporalTables(
             frameIndex,
             device,
-            guides.diffuseDemodulated,
+            diffuseTemporalInput,
             m_rtHistoryAccum[m_rtHistoryReadIndex].Get(),
             m_rtHistoryMoments[m_rtHistoryReadIndex].Get(),
             m_rtHistoryAccum[writeIndex].Get(),
@@ -5561,7 +5729,8 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalMotionConfMinDiffuse,
                     m_rtTemporalMotionConfPowerDiffuse,
                     0.0f,
-                    m_rtSurfaceIdHistoryValid);
+                    m_rtSurfaceIdHistoryValid,
+                    m_rtTemporalHistoryClampStrengthDiffuse);
 
             m_rtTemporalPass.Dispatch(
                 cl,
@@ -5586,8 +5755,8 @@ void Renderer::RunRtDenoiser(
 
             rtSignals.diffuse = 
             {
-             m_rtHistoryAccum[writeIndex].Get(),
-             m_rtHistoryMoments[writeIndex].Get()
+                m_rtHistoryAccum[writeIndex].Get(),
+                m_rtHistoryMoments[writeIndex].Get()
             };
 
             ranDiffuseTemporal = true;
@@ -5596,7 +5765,7 @@ void Renderer::RunRtDenoiser(
         const bool okSpecStable = UpdateRtTemporalTables(
             frameIndex,
             device,
-            m_rtAccumSpec.Get(),
+            specTemporalInput,
             m_rtHistorySpec[m_rtHistoryReadIndex].Get(),
             m_rtHistoryMomentsSpec[m_rtHistoryReadIndex].Get(),
             m_rtHistorySpec[writeIndex].Get(),
@@ -5625,7 +5794,8 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalMotionConfMinSpec,
                     m_rtTemporalMotionConfPowerSpec,
                     specTemporalViewZSigmaScale,
-                    m_rtSurfaceIdHistoryValid);
+                    m_rtSurfaceIdHistoryValid,
+                    m_rtTemporalHistoryClampStrengthSpec);
 
             m_rtTemporalPass.Dispatch(
                 cl,
@@ -5661,7 +5831,7 @@ void Renderer::RunRtDenoiser(
         const bool okSpecResp = UpdateRtTemporalTables(
             frameIndex,
             device,
-            m_rtAccumSpec.Get(),
+            specTemporalInput,
             m_rtHistorySpecResp[m_rtHistoryReadIndex].Get(),
             m_rtHistoryMomentsSpecResp[m_rtHistoryReadIndex].Get(),
             m_rtHistorySpecResp[writeIndex].Get(),
@@ -5690,7 +5860,8 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalMotionConfMinSpec,
                     m_rtTemporalMotionConfPowerSpec,
                     specTemporalViewZSigmaScale,
-                    m_rtSurfaceIdHistoryValid);
+                    m_rtSurfaceIdHistoryValid,
+                    m_rtTemporalHistoryClampStrengthSpec);
 
             m_rtTemporalPass.Dispatch(
                 cl,
@@ -6274,4 +6445,374 @@ void Renderer::CommitRtSurfaceIdHistory(
     cl.FlushBarriers();
 
     m_rtSurfaceIdHistoryValid = true;
+}
+
+bool Renderer::UpdateRtOutlierClampTables(
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    bool specSignal,
+    ID3D12Resource* inputResource,
+    ID3D12Resource* outputResource,
+    bool useViewZ,
+    bool useMotionConf,
+    bool writeDebug)
+{
+    if (!device ||
+        !inputResource ||
+        !outputResource ||
+        !m_rtAovNormal ||
+        !m_rtAovDepth ||
+        !m_rtAovSurfaceId ||
+        !m_rtAovReady ||
+        !m_rtAovSurfaceIdReady)
+    {
+        return false;
+    }
+
+    if (writeDebug && (!m_rtOutput || !m_rtOutputReady))
+    {
+        return false;
+    }
+
+    if (useViewZ &&
+        (!m_rtAovViewZRecons ||
+            !m_rtAovViewZReconsConf ||
+            !m_rtAovViewZReconsReady ||
+            !m_rtAovViewZReconsConfReady))
+    {
+        return false;
+    }
+
+    if (useMotionConf &&
+        (!m_rtAovMotionConf ||
+            !m_rtAovMotionConfReady))
+    {
+        return false;
+    }
+
+    auto& frame = m_rtFrames[frameIndex];
+
+    auto& srvTable = specSignal
+        ? frame.outlierSpecSrvTable
+        : frame.outlierDiffuseSrvTable;
+
+    auto& uavTable = specSignal
+        ? frame.outlierSpecUavTable
+        : frame.outlierDiffuseUavTable;
+
+    auto& srvCount = specSignal
+        ? frame.outlierSpecSrvCount
+        : frame.outlierDiffuseSrvCount;
+
+    auto& uavCount = specSignal
+        ? frame.outlierSpecUavCount
+        : frame.outlierDiffuseUavCount;
+
+    EnsureRtDescriptorTable(
+        srvTable,
+        srvCount,
+        kRtOutlierClampSrvCount);
+
+    EnsureRtDescriptorTable(
+        uavTable,
+        uavCount,
+        kRtOutlierClampUavCount);
+
+    const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
+
+    auto SrvAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = srvTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    auto UavAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = uavTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    auto WriteSrv2D = [&](ID3D12Resource* resource, DXGI_FORMAT format, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = format;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
+
+    auto WriteUav2D = [&](ID3D12Resource* resource, DXGI_FORMAT format, uint32_t slot)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = format;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            resource,
+            nullptr,
+            &uav,
+            UavAt(slot));
+    };
+
+    // t0 = input signal
+    WriteSrv2D(inputResource, DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+
+    // t1 = normal/roughness
+    WriteSrv2D(m_rtAovNormal.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
+
+    // t2 = depth
+    WriteSrv2D(m_rtAovDepth.Get(), DXGI_FORMAT_R32_FLOAT, 2);
+
+    // t3 = surface id
+    WriteSrv2D(m_rtAovSurfaceId.Get(), DXGI_FORMAT_R32_UINT, 3);
+
+    // t4 = reconstructed ViewZ, optional null SRV
+    WriteSrv2D(
+        useViewZ ? m_rtAovViewZRecons.Get() : nullptr,
+        DXGI_FORMAT_R16_FLOAT,
+        4);
+
+    // t5 = reconstructed ViewZ confidence, optional null SRV
+    WriteSrv2D(
+        useViewZ ? m_rtAovViewZReconsConf.Get() : nullptr,
+        DXGI_FORMAT_R16_FLOAT,
+        5);
+
+    // t6 = motion confidence, optional null SRV
+    WriteSrv2D(
+        useMotionConf ? m_rtAovMotionConf.Get() : nullptr,
+        DXGI_FORMAT_R16_FLOAT,
+        6);
+
+    // u0 = robust/clamped output
+    WriteUav2D(outputResource, DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+
+    // u1 = debug output when requested; otherwise bind a no-op alias to the
+    // robust output so m_rtOutput does not need a UAV transition for non-debug runs.
+    if (writeDebug)
+    {
+        WriteUav2D(m_rtOutput.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, 1);
+    }
+    else
+    {
+        WriteUav2D(outputResource, DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
+    }
+
+    return true;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtOutlierClampConstants(
+    uint32_t frameIndex,
+    uint32_t width,
+    uint32_t height,
+    bool specSignal,
+    bool useViewZ,
+    bool useMotionConf,
+    bool writeDebug)
+{
+    constexpr uint32_t cbSize =
+        (sizeof(RtOutlierClampConstants) + 255u) & ~255u;
+
+    auto alloc = m_upload.Allocate(frameIndex, cbSize, 256);
+    auto* cb = reinterpret_cast<RtOutlierClampConstants*>(alloc.cpu);
+
+    *cb = {};
+
+    cb->invResolution = {
+        1.0f / static_cast<float>(width),
+        1.0f / static_cast<float>(height)
+    };
+
+    cb->radius = 1;
+    cb->signalKind = specSignal ? 1u : 0u;
+
+    cb->depthSigma = m_rtTemporalDepthSigma;
+    cb->normalSigma = m_rtTemporalNormalSigma;
+    cb->roughnessSigma = 0.20f;
+    cb->padGuide0 = 0.0f;
+
+    cb->sigmaK = specSignal
+        ? m_rtOutlierClampSpecSigmaK
+        : m_rtOutlierClampDiffuseSigmaK;
+
+    const float maxLum =
+        std::max(1e-3f, m_rtOutlierClampMaxLuminance);
+
+    cb->maxLuminance = maxLum;
+    cb->minNeighborhoodWeight = 1.0f;
+    cb->minClampLuminance = 0.0f;
+
+    cb->surfaceIdRequired = 1.0f;
+    cb->clampStrength = std::clamp(
+        specSignal
+        ? m_rtOutlierClampSpecStrength
+        : m_rtOutlierClampDiffuseStrength,
+        0.0f,
+        1.0f);
+    cb->motionRelaxation = m_rtTemporalClampRelaxation;
+    cb->distanceNormParams = RtDistanceNormParams();
+    cb->distanceNormSigma = kRtDistanceNormSigma;
+    cb->useViewZ = useViewZ ? 1u : 0u;
+    cb->useMotionConf = useMotionConf ? 1u : 0u;
+    cb->debugView = writeDebug ? m_debugView : 0u;
+
+    cb->pad0[0] = 0u;
+    cb->pad0[1] = 0u;
+
+    return alloc.gpu;
+}
+
+bool Renderer::RunRtOutlierClamp(
+    CommandList& cl,
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height,
+    bool specSignal,
+    ID3D12Resource* inputResource,
+    ID3D12Resource* outputResource,
+    bool useViewZ,
+    bool useMotionConf,
+    bool writeDebug)
+{
+    if (!device ||
+        !inputResource ||
+        !outputResource ||
+        !m_rtAovNormal ||
+        !m_rtAovDepth ||
+        !m_rtAovSurfaceId ||
+        !m_rtAovReady ||
+        !m_rtAovSurfaceIdReady)
+    {
+        return false;
+    }
+
+    if (writeDebug && (!m_rtOutput || !m_rtOutputReady))
+    {
+        return false;
+    }
+
+    if (useViewZ &&
+        (!m_rtAovViewZRecons ||
+            !m_rtAovViewZReconsConf ||
+            !m_rtAovViewZReconsReady ||
+            !m_rtAovViewZReconsConfReady))
+    {
+        return false;
+    }
+
+    if (useMotionConf &&
+        (!m_rtAovMotionConf ||
+            !m_rtAovMotionConfReady))
+    {
+        return false;
+    }
+
+    auto* cmdList = cl.Get();
+
+    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+
+    CmdBeginEvent(
+        cmdList,
+        specSignal ? "RT Spec Outlier Clamp" : "RT Diffuse Outlier Clamp");
+
+    cl.Transition(inputResource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovSurfaceId.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    if (useViewZ)
+    {
+        cl.Transition(m_rtAovViewZRecons.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        cl.Transition(m_rtAovViewZReconsConf.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    if (useMotionConf)
+    {
+        cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    cl.Transition(outputResource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    if (writeDebug)
+    {
+        cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    cl.FlushBarriers();
+
+    const bool okTables =
+        UpdateRtOutlierClampTables(
+            frameIndex,
+            device,
+            specSignal,
+            inputResource,
+            outputResource,
+            useViewZ,
+            useMotionConf,
+            writeDebug);
+
+    if (!okTables)
+    {
+        CmdEndEvent(cmdList);
+        return false;
+    }
+
+    const D3D12_GPU_VIRTUAL_ADDRESS cb =
+        UpdateRtOutlierClampConstants(
+            frameIndex,
+            width,
+            height,
+            specSignal,
+            useViewZ,
+            useMotionConf,
+            writeDebug);
+
+    auto& frame = m_rtFrames[frameIndex];
+
+    const D3D12_GPU_DESCRIPTOR_HANDLE srvTable =
+        specSignal
+        ? frame.outlierSpecSrvTable.gpu
+        : frame.outlierDiffuseSrvTable.gpu;
+
+    const D3D12_GPU_DESCRIPTOR_HANDLE uavTable =
+        specSignal
+        ? frame.outlierSpecUavTable.gpu
+        : frame.outlierDiffuseUavTable.gpu;
+
+    m_rtOutlierClampPass.Dispatch(
+        cl,
+        cb,
+        srvTable,
+        uavTable,
+        width,
+        height);
+
+    D3D12_RESOURCE_BARRIER barriers[2]{};
+    uint32_t barrierCount = 0;
+
+    barriers[barrierCount].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[barrierCount].UAV.pResource = outputResource;
+    ++barrierCount;
+
+    if (writeDebug)
+    {
+        barriers[barrierCount].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        barriers[barrierCount].UAV.pResource = m_rtOutput.Get();
+        ++barrierCount;
+    }
+
+    cmdList->ResourceBarrier(barrierCount, barriers);
+
+    CmdEndEvent(cmdList);
+    return true;
 }

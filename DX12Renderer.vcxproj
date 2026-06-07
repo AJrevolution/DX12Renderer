@@ -157,6 +157,7 @@
     <ClInclude Include="Source\Renderer\Passes\RtHistorySelectPass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtHitDistReconstructPass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtMotionDilatePass.h" />
+    <ClInclude Include="Source\Renderer\Passes\RtOutlierClampPass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtTemporalPass.h" />
     <ClInclude Include="Source\Renderer\Passes\ShadowPass.h" />
     <ClInclude Include="Source\Renderer\SceneData.h" />
@@ -201,6 +202,7 @@
     <ClCompile Include="Source\Renderer\Passes\RtHistorySelectPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtHitDistReconstructPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtMotionDilatePass.cpp" />
+    <ClCompile Include="Source\Renderer\Passes\RtOutlierClampPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtTemporalPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\ShadowPass.cpp" />
     <ClCompile Include="Source\RHI\CommandList\ResourceStateTracker.cpp" />
@@ -345,6 +347,8 @@ if "$(Configuration)"=="Debug" (
   dxc.exe -T lib_6_3 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Raytracing.cso" "$(ProjectDir)Assets\Shaders\HLSL\Raytracing.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\Raytracing.cso;%(Outputs)</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">dxc.exe -T lib_6_3 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Raytracing.cso" "$(ProjectDir)Assets\Shaders\HLSL\Raytracing.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\Raytracing.cso;%(Outputs)</Outputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
@@ -358,6 +362,8 @@ else (
  dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtDenoise_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtDenoise_CS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtDenoise_CS.cso;%(Outputs)</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtDenoise_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtDenoise_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtDenoise_CS.cso</Outputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
@@ -369,6 +375,8 @@ else (
  dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtTemporal_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtTemporal_CS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtTemporal_CS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtTemporal_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtTemporal_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtTemporal_CS.cso</Outputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
@@ -381,6 +389,8 @@ else (
 )
 </Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtAtrous_CS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtAtrous_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtAtrous_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtAtrous_CS.cso</Outputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
@@ -392,6 +402,8 @@ else (
  dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtHistorySelect_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtHistorySelect_CS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtHistorySelect_CS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtHistorySelect_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtHistorySelect_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtHistorySelect_CS.cso</Outputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
@@ -404,6 +416,8 @@ else (
 )
 </Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtCombine_CS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtCombine_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtCombine_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtCombine_CS.cso</Outputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
@@ -415,6 +429,8 @@ else (
  dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtMotionDilate_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtMotionDilate_CS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtMotionDilate_CS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtMotionDilate_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtMotionDilate_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtMotionDilate_CS.cso</Outputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
@@ -428,6 +444,8 @@ if "$(Configuration)"=="Debug" (
  dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtHitDistReconstruct_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtHitDistReconstruct_CS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtHitDistReconstruct_CS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtHitDistReconstruct_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtHitDistReconstruct_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtHitDistReconstruct_CS.cso</Outputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
@@ -441,6 +459,21 @@ if /I "$(Configuration)"=="Debug" (
     dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtDiffuseDemodulate_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtDiffuseDemodulate_CS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtDiffuseDemodulate_CS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtDiffuseDemodulate_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtDiffuseDemodulate_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtDiffuseDemodulate_CS.cso</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="Assets\Shaders\HLSL\RtOutlierClamp_CS.hlsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if "$(Configuration)"=="Debug" (
+ dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtOutlierClamp_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtOutlierClamp_CS.hlsl"
+) else (
+ dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtOutlierClamp_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtOutlierClamp_CS.hlsl"
+)</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtOutlierClamp_CS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtOutlierClamp_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtOutlierClamp_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtOutlierClamp_CS.cso</Outputs>
     </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

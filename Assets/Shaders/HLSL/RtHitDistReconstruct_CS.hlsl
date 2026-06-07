@@ -350,3 +350,4 @@ void main(uint3 dtid : SV_DispatchThreadID)
 
     WriteDebug(pixel, outViewZ, outConf, currRough);
 }
+

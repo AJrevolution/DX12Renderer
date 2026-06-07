@@ -28,6 +28,7 @@
 #include "Source/Renderer/Passes/RtMotionDilatePass.h"
 #include "Source/Renderer/Passes/RtHitDistReconstructPass.h"
 #include "Source/Renderer/Passes/RtDiffuseDemodulatePass.h"
+#include "Source/Renderer/Passes/RtOutlierClampPass.h"
 
 class Renderer
 {
@@ -95,6 +96,16 @@ private:
 
         DirectX::XMFLOAT4 currCameraPos{};
         DirectX::XMFLOAT4 prevCameraPos{};
+
+        uint32_t enableRobustMoments = 1;
+        float momentLuminanceMax = 250.0f;
+        float momentVarianceMax = 250.0f * 250.0f;
+        float historyClampStrength = 0.5f;
+
+        float temporalNeighborhoodSigmaK = 4.0f;
+        float temporalClampMinWeight = 1.0f;
+        float temporalClampRelaxation = 0.5f;
+        float padRobust0 = 0.0f;
     };
     static_assert((sizeof(RtTemporalConstants) % 16) == 0, "RtTemporalConstants must be 16-byte aligned.");
 
@@ -143,6 +154,9 @@ private:
 
         DirectX::XMFLOAT3 distanceNormParams{ 1.0f, 0.0f, 1.0f };
         float distanceNormSigma = 0.08f;
+
+        float atrousContributionMaxLuminance = 250.0f;
+        float padSafety[3] = {};
     };
     static_assert((sizeof(RtAtrousConstants) % 16) == 0, "RtAtrousConstants must be 16-byte aligned.");
 
@@ -186,6 +200,36 @@ private:
     };
     static_assert((sizeof(RtMotionDilateConstants) % 16) == 0, "RtMotionDilateConstants must be 16-byte aligned.");
     
+    struct RtOutlierClampConstants
+    {
+        DirectX::XMFLOAT2 invResolution{};
+        uint32_t radius = 1;
+        uint32_t signalKind = 0;
+
+        float depthSigma = 0.02f;
+        float normalSigma = 0.25f;
+        float roughnessSigma = 0.20f;
+        float padGuide0 = 0.0f;
+
+        float sigmaK = 4.0f;
+        float maxLuminance = 250.0f;
+        float minNeighborhoodWeight = 1.0f;
+        float minClampLuminance = 0.0f;
+
+        float surfaceIdRequired = 1.0f;
+        float clampStrength = 1.0f;
+        float motionRelaxation = 0.5f;
+        uint32_t debugView = 0;
+
+        DirectX::XMFLOAT3 distanceNormParams{ 1.0f, 0.0f, 1.0f };
+        float distanceNormSigma = 0.08f;
+
+        uint32_t useViewZ = 0;
+        uint32_t useMotionConf = 0;
+        uint32_t pad0[2] = {};
+    };
+    static_assert((sizeof(RtOutlierClampConstants) % 16) == 0, "RtOutlierClampConstants must be 16-byte aligned.");
+
     enum class RtSignal : uint32_t
     {
         Diffuse,
@@ -486,6 +530,8 @@ private:
         bool wantsProducerDebug = false;
         bool wantsSpatialDebug = false;
 
+        bool wantsOutlierClampDebug = false;
+
         RtDebugOwner owner = RtDebugOwner::None;
 
         bool DisablesPostStack() const
@@ -539,6 +585,11 @@ private:
     static DirectX::XMFLOAT3 RtDistanceNormParams()
     {
         return DirectX::XMFLOAT3(1.0f, 0.0f, 1.0f);
+    }
+
+    static bool IsOutlierClampDebug(uint32_t dv)
+    {
+        return dv == 81 || dv == 82 || dv == 83 || dv == 86;
     }
 
     std::vector<DrawItem> m_draws;
@@ -673,7 +724,8 @@ private:
         float motionConfMin,
         float motionConfPower,
         float viewZSigmaScale,
-        bool surfaceIdHistoryValid);
+        bool surfaceIdHistoryValid,
+        float historyClampStrength);
 
     D3D12_GPU_DESCRIPTOR_HANDLE RtSvgfPingUavGpuAt(uint32_t i) const;
 
@@ -860,6 +912,38 @@ private:
         CommandList& cl,
         uint32_t writeIndex);
 
+    bool UpdateRtOutlierClampTables(
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        bool specSignal,
+        ID3D12Resource* inputResource,
+        ID3D12Resource* outputResource,
+        bool useViewZ,
+        bool useMotionConf,
+        bool writeDebug);
+
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtOutlierClampConstants(
+        uint32_t frameIndex,
+        uint32_t width,
+        uint32_t height,
+        bool specSignal,
+        bool useViewZ,
+        bool useMotionConf,
+        bool writeDebug);
+
+    bool RunRtOutlierClamp(
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height,
+        bool specSignal,
+        ID3D12Resource* inputResource,
+        ID3D12Resource* outputResource,
+        bool useViewZ,
+        bool useMotionConf,
+        bool writeDebug);
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -975,6 +1059,16 @@ private:
     // The RT post stack must stay disabled, but the demodulate pass still runs explicitly.
     //   69 = demodulated diffuse lighting visualization
     //   70 = demodulation instability mask
+    // 
+    // Outlier clamp / compute-owned producer views:
+    //   81 = diffuse outlier clamp factor
+    //   82 = specular outlier clamp factor
+    //   83 = invalid/NaN/Inf sanitized mask
+    //   86 = outlier neighborhood valid-weight heatmap
+    //
+    // Temporal robustness / temporal-owned views:
+    //   84 = temporal history color clamp amount
+    //   85 = moment variance clamp mask
     // 
     // Future rule:
     //   Do not use broad contiguous checks such as 32..47.
@@ -1156,6 +1250,16 @@ private:
         DescriptorAllocator::Allocation diffuseDemodUavTable{}; // kRtDiffuseDemodUavCount UAVs
         uint32_t diffuseDemodSrvCount = 0;
         uint32_t diffuseDemodUavCount = 0;
+
+        DescriptorAllocator::Allocation outlierDiffuseSrvTable{}; // kRtOutlierClampSrvCount SRVs
+        DescriptorAllocator::Allocation outlierDiffuseUavTable{}; // kRtOutlierClampUavCount UAVs
+        uint32_t outlierDiffuseSrvCount = 0;
+        uint32_t outlierDiffuseUavCount = 0;
+
+        DescriptorAllocator::Allocation outlierSpecSrvTable{}; // kRtOutlierClampSrvCount SRVs
+        DescriptorAllocator::Allocation outlierSpecUavTable{}; // kRtOutlierClampUavCount UAVs
+        uint32_t outlierSpecSrvCount = 0;
+        uint32_t outlierSpecUavCount = 0;
     };
     
     std::vector<FrameRaytracingResources> m_rtFrames;
@@ -1415,6 +1519,8 @@ private:
     static constexpr float kRtViewZRoughCutoff = 0.35f;
     static constexpr float kRtViewZConfMin = 0.5f;
     static constexpr float kRtDistanceNormSigma = 0.08f;
+    static constexpr uint32_t kRtOutlierClampSrvCount = 7;
+    static constexpr uint32_t kRtOutlierClampUavCount = 2;
 
     RtDiffuseDemodulatePass m_rtDiffuseDemodulatePass;
 
@@ -1448,6 +1554,32 @@ private:
 
     std::array<ComPtr<ID3D12Resource>, 2> m_rtHistorySurfaceId{};
     bool m_rtSurfaceIdHistoryValid = false;
+
+    RtOutlierClampPass m_rtOutlierClampPass;
+
+    ComPtr<ID3D12Resource> m_rtDiffuseRobustInput;
+    bool m_rtDiffuseRobustInputReady = false;
+
+    ComPtr<ID3D12Resource> m_rtSpecRobustInput;
+    bool m_rtSpecRobustInputReady = false;
+
+    bool m_rtEnableOutlierClamp = true;
+    bool m_rtEnableRobustMoments = true;
+
+    float m_rtOutlierClampMaxLuminance = 250.0f;
+    float m_rtOutlierClampDiffuseSigmaK = 4.0f;
+    float m_rtOutlierClampSpecSigmaK = 6.0f;
+
+    float m_rtTemporalHistoryClampStrengthDiffuse = 0.5f;
+    float m_rtTemporalHistoryClampStrengthSpec = 0.75f;
+    float m_rtTemporalNeighborhoodSigmaK = 4.0f;
+    float m_rtTemporalClampMinWeight = 1.0f;
+    float m_rtTemporalClampRelaxation = 0.5f;
+
+    float m_rtAtrousContributionMaxLuminance = 250.0f;
+
+    float m_rtOutlierClampDiffuseStrength = 1.0f;
+    float m_rtOutlierClampSpecStrength = 0.5f;
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };
