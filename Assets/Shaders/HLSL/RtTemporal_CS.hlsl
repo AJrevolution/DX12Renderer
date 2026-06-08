@@ -28,6 +28,10 @@
 //   77 = SurfaceId invalid mask
 //   84 = temporal history color clamp amount
 //   85 = temporal moment variance clamp mask
+//   87 = temporal signal confidence
+//   88 = temporal anti-lag responsiveness amount
+//   89 = confidence-shaped history length
+//   90 = temporal luminance delta confidence
 
 
 Texture2D<float4> g_CurrAccum : register(t0);
@@ -105,6 +109,21 @@ cbuffer RtTemporalConstants : register(b0)
     float TemporalClampMinWeight;
     float TemporalClampRelaxation;
     float _padRobust0;
+    
+    uint EnableSignalConfidence;
+    float SignalDeltaSigma;
+    float ConfidencePower;
+    float MinSignalConfidence;
+
+    float AntiLagStrength;
+    float VarianceConfidenceScale;
+    float HistoryLengthConfidencePower;
+    float ResponsiveAlphaBoost;
+
+    float MaxStableHistory;
+    float MinStableHistoryForClamp;
+    float ConfidenceDebugScale;
+    float _padShape0;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -366,6 +385,51 @@ TemporalNeighborhoodStats BuildTemporalStats(uint2 pixel, uint width, uint heigh
     return s;
 }
 
+struct SignalConfidenceResult
+{
+    float confidence;
+    float colorConfidence;
+};
+
+SignalConfidenceResult ComputeSignalConfidence(
+    float currLum,
+    float prevLum,
+    float prevVariance,
+    float guideScore,
+    float motionConf,
+    float surfaceIdMatch,
+    float viewZWeight,
+    float historyClampAmount,
+    float momentClampMask)
+{
+    SignalConfidenceResult r;
+
+    float lumDelta = abs(currLum - prevLum);
+    float varianceSigma = sqrt(max(prevVariance, 0.0f));
+
+    float denom =
+        max(1e-4f, SignalDeltaSigma * (1.0f + VarianceConfidenceScale * varianceSigma));
+
+    float colorConf = exp(-lumDelta / denom);
+
+    float c =
+        colorConf *
+        saturate(guideScore) *
+        saturate(motionConf) *
+        saturate(surfaceIdMatch) *
+        saturate(viewZWeight);
+
+    // Robustness feedback from 10.4.
+    c *= 1.0f - saturate(historyClampAmount);
+    c *= lerp(1.0f, 0.5f, saturate(momentClampMask));
+
+    c = pow(saturate(c), max(1e-4f, ConfidencePower));
+
+    r.confidence = max(MinSignalConfidence, c);
+    r.colorConfidence = colorConf;
+    return r;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID)
 {
@@ -420,6 +484,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
     
     uint currSurfaceId = g_CurrSurfaceId[pixel];
+    
+    float signalConfidence = validReuse ? 1.0f : 0.0f;
+    float signalColorConfidence = 0.0f;
+    float antiLagAlphaMultiplier = 1.0f;
+    float shapedHistoryLenDebug = 1.0f;
 
     if (TemporalEnabled != 0 && HistoryValid != 0 && currDepth < 0.9999f)
     {
@@ -641,7 +710,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
     NeighborhoodMinMax(pixel, currMin, currMax);
     float3 prevClamped = clamp(prevColor, currMin, currMax);
     
-    if (EnableRobustMoments != 0u && validReuse)
+    if (EnableRobustMoments != 0u &&
+        validReuse &&
+        prevLen >= MinStableHistoryForClamp)
     {
         TemporalNeighborhoodStats stats = BuildTemporalStats(pixel, width, height);
 
@@ -674,6 +745,40 @@ void main(uint3 dtid : SV_DispatchThreadID)
         }
     }
     
+    float prevVarianceForConfidence = 0.0f;
+
+    if (validReuse)
+    {
+        prevVarianceForConfidence =
+        max(prevMoments.y - prevMoments.x * prevMoments.x, 0.0f);
+    }
+
+    if (EnableSignalConfidence != 0u && validReuse)
+    {
+        float currLumForConfidence = SafeLuminance(currColor);
+        float prevLumForConfidence = SafeLuminance(prevClamped);
+
+        SignalConfidenceResult conf =
+            ComputeSignalConfidence(
+              currLumForConfidence,
+              prevLumForConfidence,
+              prevVarianceForConfidence,
+              bestCandidateBaseScore,
+              motionConfW,
+              bestSurfaceIdMatch,
+              bestCandidateViewZWeight,
+              historyClampAmount,
+              momentClampMask);
+
+        signalConfidence = conf.confidence;
+        signalColorConfidence = conf.colorConfidence;
+    }
+    else if (!validReuse)
+    {
+        signalConfidence = 0.0f;
+        signalColorConfidence = 0.0f;
+    }
+    
     if (validReuse)
     {
         float prevVar = max(prevMoments.y - prevMoments.x * prevMoments.x, 0.0f);
@@ -686,6 +791,26 @@ void main(uint3 dtid : SV_DispatchThreadID)
     {
         float inc = effectiveScore * lerp(1.0f, 0.25f, varNorm);
         newLen = min(prevLen + inc, 255.0f);
+    }
+
+    if (EnableSignalConfidence != 0u)
+    {
+        if (validReuse)
+        {
+            float confidenceLenScale =
+                pow(saturate(signalConfidence), max(1e-4f, HistoryLengthConfidencePower));
+
+            float shapedLen =
+                min(MaxStableHistory, (prevLen + 1.0f) * confidenceLenScale);
+
+            newLen = max(1.0f, shapedLen);
+        }
+        else
+        {
+            newLen = 1.0f;
+        }
+
+        shapedHistoryLenDebug = newLen;
     }
 
     float alphaUsed = 0.0f;
@@ -729,6 +854,31 @@ void main(uint3 dtid : SV_DispatchThreadID)
         if (EnableVarianceBoost != 0)
         {
             alphaUsed = saturate(alphaUsed * (1.0f + VarianceAlphaBoost * varNorm));
+        }
+        
+        if (EnableSignalConfidence != 0u && validReuse)
+        {
+            float baseAlpha = saturate(alphaUsed);
+
+            // alphaUsed is history weight because final blend is:
+            // history = lerp(currColor, prevClamped, alphaUsed)
+            // Low confidence should therefore reduce history weight.
+            float responsiveAlpha =
+                saturate(baseAlpha / (1.0f + ResponsiveAlphaBoost * (1.0f - signalConfidence)));
+
+            float stableAlpha =
+                lerp(responsiveAlpha, baseAlpha, signalConfidence);
+
+            float shapedAlpha =
+            lerp(
+                stableAlpha,
+                responsiveAlpha,
+                saturate(AntiLagStrength * (1.0f - signalConfidence)));
+
+            antiLagAlphaMultiplier =
+                shapedAlpha / max(baseAlpha, 1e-4f);
+
+            alphaUsed = shapedAlpha;
         }
 
         history = lerp(currColor, prevClamped, alphaUsed);
@@ -860,6 +1010,22 @@ void main(uint3 dtid : SV_DispatchThreadID)
     {
         display = momentClampMask.xxx;
     }
+    else if (DebugView == 87)
+    {
+        display = saturate(signalConfidence * ConfidenceDebugScale).xxx;
+    }
+    else if (DebugView == 88)
+    {
+        display = saturate(1.0f - antiLagAlphaMultiplier).xxx;
+    }
+    else if (DebugView == 89)
+    {
+        display = saturate(shapedHistoryLenDebug / max(1.0f, MaxStableHistory)).xxx;
+    }
+    else if (DebugView == 90)
+    {
+        display = saturate(signalColorConfidence).xxx;
+    }
     
     g_HistoryOut[pixel] = float4(history, newLen);
     g_MomentsOut[pixel] = moments;
@@ -876,7 +1042,11 @@ void main(uint3 dtid : SV_DispatchThreadID)
         DebugView == 76 ||
         DebugView == 77 ||
         DebugView == 84 ||
-        DebugView == 85;
+        DebugView == 85 ||
+        DebugView == 87 ||
+        DebugView == 88 ||
+        DebugView == 89 ||
+        DebugView == 90;
 
     if (isTemporalDebug)
     {

@@ -38,7 +38,11 @@ namespace
             dv == 76 ||
             dv == 77 ||
             dv == 84 ||
-            dv == 85;
+            dv == 85 ||
+            dv == 87 ||
+            dv == 88 ||
+            dv == 89 ||
+            dv == 90;
     }
 
     static bool IsSvgfDebug(uint32_t dv)
@@ -48,7 +52,10 @@ namespace
             (dv == 44) ||
             dv == 60 ||
             dv == 73 ||
-            dv == 78;
+            dv == 78 ||
+            dv == 93 ||
+            dv == 94 ||
+            dv == 95;
     }
 
     static bool IsHistorySelectDebug(uint32_t dv)
@@ -56,7 +63,9 @@ namespace
         return
             (dv >= 29 && dv <= 31) ||
             (dv >= 37 && dv <= 42) ||
-            dv == 59;
+            dv == 59 ||
+            dv == 91 ||
+            dv == 92;
     }
 }
 
@@ -3633,7 +3642,10 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     float motionConfPower,
     float viewZSigmaScale,
     bool surfaceIdHistoryValid,
-    float historyClampStrength)
+    float historyClampStrength,
+    float signalDeltaSigma,
+    float confidencePower,
+    float antiLagStrength)
 {
     auto alloc = m_upload.Allocate(
         frameIndex,
@@ -3703,6 +3715,21 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
         m_prevRtCameraPos.z,
         0.0f
     };
+
+    cb->enableSignalConfidence = m_rtEnableSignalConfidence ? 1u : 0u;
+    cb->signalDeltaSigma = std::max(1e-4f, signalDeltaSigma);
+    cb->confidencePower = std::max(1e-4f, confidencePower);
+    cb->minSignalConfidence = std::clamp(m_rtMinSignalConfidence, 0.0f, 1.0f);
+
+    cb->antiLagStrength = std::clamp(antiLagStrength, 0.0f, 1.0f);
+    cb->varianceConfidenceScale = std::max(0.0f, m_rtVarianceConfidenceScale);
+    cb->historyLengthConfidencePower = std::max(1e-4f, m_rtHistoryLengthConfidencePower);
+    cb->responsiveAlphaBoost = std::max(0.0f, m_rtResponsiveAlphaBoost);
+
+    cb->maxStableHistory = std::clamp(m_rtMaxStableHistory, 1.0f, 255.0f);
+    cb->minStableHistoryForClamp = std::max(1.0f, m_rtMinStableHistoryForClamp);
+    cb->confidenceDebugScale = std::max(1e-4f, m_rtConfidenceDebugScale);
+    cb->padShape0 = 0.0f;
 
 
     return alloc.gpu;
@@ -3882,6 +3909,32 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtAtrousConstants(
     cb->distanceNormParams = RtDistanceNormParams();
     cb->distanceNormSigma = kRtDistanceNormSigma;
     cb->atrousContributionMaxLuminance = std::max(1e-3f, m_rtAtrousContributionMaxLuminance);
+
+    const bool specSignal = motionConfPower > 0.0f;
+    cb->enableAdaptiveAtrous = m_rtEnableAdaptiveAtrous ? 1u : 0u;
+
+    cb->adaptiveVarianceScale =
+        std::max(
+            0.0f,
+            specSignal
+            ? m_rtAdaptiveVarianceScaleSpec
+            : m_rtAdaptiveVarianceScaleDiffuse);
+
+    cb->adaptiveHistoryMin = std::max(0.0f, m_rtAdaptiveHistoryMin);
+    cb->adaptiveHistoryMax =
+        std::max(cb->adaptiveHistoryMin + 1e-4f, m_rtAdaptiveHistoryMax);
+
+    cb->diffuseBlurBoost = std::max(0.0f, m_rtDiffuseBlurBoost);
+    cb->specBlurRoughnessBoost = std::max(0.0f, m_rtSpecBlurRoughnessBoost);
+    cb->specGlossyBlurLimit = std::clamp(m_rtSpecGlossyBlurLimit, 1e-4f, 1.0f);
+    cb->wideIterationConfidenceMin = std::clamp(m_rtWideIterationConfidenceMin, 0.0f, 1.0f);
+
+    cb->adaptiveSigmaLMin = std::max(1e-4f, m_rtAdaptiveSigmaLMin);
+    cb->adaptiveSigmaLMax =
+        std::max(cb->adaptiveSigmaLMin, m_rtAdaptiveSigmaLMax);
+
+    cb->adaptiveNormalRelaxation = std::max(0.0f, m_rtAdaptiveNormalRelaxation);
+    cb->padAtrousShape0 = 0.0f;
 
     return alloc.gpu;
 }
@@ -4154,6 +4207,27 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtHistorySelectConstants(uint32_t fram
     cb->pad0[0] = 0u;
     cb->pad0[1] = 0u;
     cb->pad0[2] = 0u;
+
+    cb->enableSpecHistoryShaping = m_rtEnableSpecHistoryShaping ? 1u : 0u;
+    cb->specResponsiveRoughnessCutoff =
+        std::clamp(m_rtSpecResponsiveRoughnessCutoff, 1e-4f, 1.0f);
+
+    cb->specResponsiveVarianceScale =
+        std::max(0.0f, m_rtSpecResponsiveVarianceScale);
+
+    cb->specResponsiveMotionScale =
+        std::max(0.0f, m_rtSpecResponsiveMotionScale);
+
+    cb->specStableMinHistory =
+        std::max(1.0f, m_rtSpecStableMinHistory);
+
+    cb->specResponsiveBias =
+        std::clamp(m_rtSpecResponsiveBias, 0.0f, 1.0f);
+
+    cb->specHistoryBlendPower =
+        std::max(1e-4f, m_rtSpecHistoryBlendPower);
+
+    cb->padSpecShape0 = 0.0f;
 
     return alloc.gpu;
 }
@@ -5169,7 +5243,10 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
         debugView == 78;
     r.wantsSpecAtrousOutputDebug =
         debugView == 60 ||
-        debugView == 73;
+        debugView == 73 ||
+        debugView == 93 ||
+        debugView == 94 ||
+        debugView == 95;
 
     r.wantsHistorySelectDebug = IsHistorySelectDebug(debugView);
 
@@ -5730,7 +5807,10 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalMotionConfPowerDiffuse,
                     0.0f,
                     m_rtSurfaceIdHistoryValid,
-                    m_rtTemporalHistoryClampStrengthDiffuse);
+                    m_rtTemporalHistoryClampStrengthDiffuse,
+                    m_rtSignalDeltaSigmaDiffuse,
+                    m_rtConfidencePowerDiffuse,
+                    m_rtAntiLagStrengthDiffuse);
 
             m_rtTemporalPass.Dispatch(
                 cl,
@@ -5795,7 +5875,10 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalMotionConfPowerSpec,
                     specTemporalViewZSigmaScale,
                     m_rtSurfaceIdHistoryValid,
-                    m_rtTemporalHistoryClampStrengthSpec);
+                    m_rtTemporalHistoryClampStrengthSpec,
+                    m_rtSignalDeltaSigmaSpec,
+                    m_rtConfidencePowerSpec,
+                    m_rtAntiLagStrengthSpec);
 
             m_rtTemporalPass.Dispatch(
                 cl,
@@ -5861,7 +5944,10 @@ void Renderer::RunRtDenoiser(
                     m_rtTemporalMotionConfPowerSpec,
                     specTemporalViewZSigmaScale,
                     m_rtSurfaceIdHistoryValid,
-                    m_rtTemporalHistoryClampStrengthSpec);
+                    m_rtTemporalHistoryClampStrengthSpec,
+                    m_rtSignalDeltaSigmaSpec,
+                    m_rtConfidencePowerSpec,
+                    m_rtAntiLagStrengthSpec);
 
             m_rtTemporalPass.Dispatch(
                 cl,

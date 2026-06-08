@@ -8,6 +8,9 @@
 //   60 = spec A-Trous shaped motion confidence
 //   73 = spec A-Trous ViewZ shaped weight
 //   78 = surface-id edge stop factor
+//   93 = adaptive blur strength
+//   94 = wide-iteration suppression mask; only lights on spec A-Trous iteration >= 2
+//   95 = variance/history instability
 
 Texture2D<float4> g_Signal : register(t0);
 Texture2D<float4> g_Normal : register(t1);
@@ -56,6 +59,21 @@ cbuffer RtAtrousConstants : register(b0)
     
     float AtrousContributionMaxLuminance;
     float3 _padSafety0;
+    
+    uint EnableAdaptiveAtrous;
+    float AdaptiveVarianceScale;
+    float AdaptiveHistoryMin;
+    float AdaptiveHistoryMax;
+
+    float DiffuseBlurBoost;
+    float SpecBlurRoughnessBoost;
+    float SpecGlossyBlurLimit;
+    float WideIterationConfidenceMin;
+
+    float AdaptiveSigmaLMin;
+    float AdaptiveSigmaLMax;
+    float AdaptiveNormalRelaxation;
+    float _padAtrousShape0;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -186,26 +204,64 @@ void main(uint3 dtid : SV_DispatchThreadID)
     
     uint surfaceId0 = g_SurfaceId[pixel];
     
-    float l0 = 0.0f;
+    float variance = 0.0f;
     float sigmaL = 1.0f;
+    float l0 = SafeLuminance(c0);
 
     if (UseMoments != 0)
     {
         float2 m0 = g_Moments[pixel];
 
-        float m1 = IsFiniteScalar(m0.x) ? max(m0.x, 0.0f) : SafeLuminance(c0);
+        float m1 = IsFiniteScalar(m0.x) ? max(m0.x, 0.0f) : l0;
         float m2 = IsFiniteScalar(m0.y) ? m0.y : (m1 * m1);
 
         m2 = max(m2, m1 * m1);
 
-        float variance = max(m2 - m1 * m1, 0.0f);
+        variance = max(m2 - m1 * m1, 0.0f);
         variance = min(
             variance,
             AtrousContributionMaxLuminance * AtrousContributionMaxLuminance);
 
         sigmaL = max(1e-4f, VarianceScale * sqrt(variance));
-        l0 = SafeLuminance(c0);
     }
+    
+    const bool isSpecPath = MotionConfPower > 0.0f;
+
+    float history01 =
+        saturate(
+            (len0 - AdaptiveHistoryMin) /
+            max(1e-4f, AdaptiveHistoryMax - AdaptiveHistoryMin));
+
+    float variance01 =
+        saturate(sqrt(max(0.0f, variance)) * AdaptiveVarianceScale);
+
+    float unstable =
+        saturate(max(variance01, 1.0f - history01));
+
+    float signalBlurBoost = DiffuseBlurBoost;
+
+    if (isSpecPath)
+    {
+        float glossy =
+            saturate(
+                (SpecGlossyBlurLimit - rough0) /
+                max(1e-4f, SpecGlossyBlurLimit));
+
+        signalBlurBoost =
+            lerp(SpecBlurRoughnessBoost, 0.5f, glossy);
+    }
+
+    float adaptiveSigmaL =
+        (EnableAdaptiveAtrous != 0u)
+            ? lerp(AdaptiveSigmaLMin, AdaptiveSigmaLMax, unstable) * signalBlurBoost
+            : 1.0f;
+
+    bool wideSuppressed =
+        EnableAdaptiveAtrous != 0u &&
+        isSpecPath &&
+        IterationIndex >= 2u &&
+        history01 < WideIterationConfidenceMin &&
+        rough0 < SpecGlossyBlurLimit;
     
     if (DebugView == 28)
     {
@@ -229,6 +285,40 @@ void main(uint3 dtid : SV_DispatchThreadID)
     if (DebugView == 60)
     {
         g_Output[pixel] = float4(motionConfW.xxx, 1.0f);
+        return;
+    }
+    
+    if (DebugView == 93)
+    {
+        float v = (EnableAdaptiveAtrous != 0u)
+            ? saturate(adaptiveSigmaL / max(1e-4f, AdaptiveSigmaLMax))
+            : 0.0f;
+
+        g_Output[pixel] = float4(v.xxx, 1.0f);
+        return;
+    }
+
+    if (DebugView == 94)
+    {
+        g_Output[pixel] =
+        float4((wideSuppressed ? 1.0f : 0.0f).xxx, 1.0f);
+        return;
+    }
+
+    if (DebugView == 95)
+    {
+        g_Output[pixel] =
+        float4(unstable.xxx, 1.0f);
+        return;
+    }
+    
+    if (wideSuppressed && DebugView != 73 && DebugView != 78)
+    {
+        if (FinalOutputSrgb != 0)
+            g_Output[pixel] = float4(LinearToSRGB(c0), len0);
+        else
+            g_Output[pixel] = float4(c0, len0);
+
         return;
     }
     
@@ -288,8 +378,15 @@ void main(uint3 dtid : SV_DispatchThreadID)
                 viewZConf1,
                 roughMin);
             
+            float normalRelax =
+            (EnableAdaptiveAtrous != 0u)
+                ? (AdaptiveNormalRelaxation * unstable)
+                : 0.0f;
+
+            float normalSigmaEff =
+                SigmaNormal * (1.0f + normalRelax);
             float basePow = lerp(128.0f, 32.0f, roughMin);
-            float normalScale = clamp(0.25f / max(1e-4f, SigmaNormal), 0.5f, 2.0f);
+            float normalScale = clamp(0.25f / max(1e-4f, normalSigmaEff), 0.5f, 2.0f);
             float normalPow = basePow * normalScale;
             float wn = pow(saturate(dot(n0, n)), normalPow);
 
@@ -299,9 +396,10 @@ void main(uint3 dtid : SV_DispatchThreadID)
             if (UseMoments != 0)
             {
                 float l = SafeLuminance(c);
-                float sigmaLUsed = max(1e-4f, sigmaL * lerp(0.5f, 1.0f, roughMin));
-                wl = exp(-abs(l - l0) / sigmaLUsed);
+                float sigmaLUsed =
+                    max(1e-4f, sigmaL * adaptiveSigmaL * lerp(0.5f, 1.0f, roughMin));
 
+                wl = exp(-abs(l - l0) / sigmaLUsed);
             }
             bool isCenterTap = (offset.x == 0 && offset.y == 0);
 

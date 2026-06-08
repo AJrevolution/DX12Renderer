@@ -106,6 +106,21 @@ private:
         float temporalClampMinWeight = 1.0f;
         float temporalClampRelaxation = 0.5f;
         float padRobust0 = 0.0f;
+
+        uint32_t enableSignalConfidence = 1;
+        float signalDeltaSigma = 1.5f;
+        float confidencePower = 1.0f;
+        float minSignalConfidence = 0.05f;
+
+        float antiLagStrength = 0.35f;
+        float varianceConfidenceScale = 2.0f;
+        float historyLengthConfidencePower = 0.75f;
+        float responsiveAlphaBoost = 2.0f;
+
+        float maxStableHistory = 255.0f;
+        float minStableHistoryForClamp = 2.0f;
+        float confidenceDebugScale = 1.0f;
+        float padShape0 = 0.0f;
     };
     static_assert((sizeof(RtTemporalConstants) % 16) == 0, "RtTemporalConstants must be 16-byte aligned.");
 
@@ -157,6 +172,21 @@ private:
 
         float atrousContributionMaxLuminance = 250.0f;
         float padSafety[3] = {};
+
+        uint32_t enableAdaptiveAtrous = 1;
+        float adaptiveVarianceScale = 1.0f;
+        float adaptiveHistoryMin = 1.0f;
+        float adaptiveHistoryMax = 16.0f;
+
+        float diffuseBlurBoost = 1.0f;
+        float specBlurRoughnessBoost = 0.75f;
+        float specGlossyBlurLimit = 0.35f;
+        float wideIterationConfidenceMin = 0.35f;
+
+        float adaptiveSigmaLMin = 0.5f;
+        float adaptiveSigmaLMax = 2.0f;
+        float adaptiveNormalRelaxation = 0.25f;
+        float padAtrousShape0 = 0.0f;
     };
     static_assert((sizeof(RtAtrousConstants) % 16) == 0, "RtAtrousConstants must be 16-byte aligned.");
 
@@ -181,6 +211,16 @@ private:
         float motionConfPower = 2.0f;
         uint32_t debugView = 0;
         uint32_t  pad0[3] = {};
+
+        uint32_t enableSpecHistoryShaping = 1;
+        float specResponsiveRoughnessCutoff = 0.35f;
+        float specResponsiveVarianceScale = 2.0f;
+        float specResponsiveMotionScale = 1.0f;
+
+        float specStableMinHistory = 8.0f;
+        float specResponsiveBias = 0.0f;
+        float specHistoryBlendPower = 1.0f;
+        float padSpecShape0 = 0.0f;
     };
     static_assert((sizeof(RtHistorySelectConstants) % 16) == 0, "RtHistorySelectConstants must be 16-byte aligned.");
 
@@ -326,6 +366,34 @@ private:
     };
     static_assert((sizeof(RtCombineConstants) % 16) == 0, "RtCombineConstants must be 16-byte aligned.");
 
+    // Denoiser shaping contract:
+    //
+    // SurfaceId:
+    //   Hard identity gate. Never overridden by confidence.
+    //
+    // ViewZ:
+    //   Normalized distance guide. Used only as a similarity/shaping weight.
+    //
+    // Motion confidence:
+    //   Reprojection confidence from motion dilation. Low confidence accelerates temporal response.
+    //
+    // Robust moments:
+    //   Bounded luminance moments from 10.4. Used for variance-aware alpha and A-Trous shaping.
+    //
+    // History length:
+    //   Stored in signal alpha. Represents usable accumulated frames after confidence shaping.
+    //
+    // Signal confidence:
+    //   Derived per temporal pass from guide match, motion confidence, luminance delta,
+    //   variance, robust clamp state, and history validity.
+    //   0 = reset / highly responsive.
+    //   1 = stable reuse.
+    //
+    // Spatial blur strength:
+    //   Derived in A-Trous from moments, roughness, motion confidence, and history length.
+    //   Low history / high variance => more diffuse blur.
+    //   Glossy specular => stricter, smaller blur unless confidence is very low.
+    
     // -------------------------------------------------------------------------
     // RT denoiser data contracts
     // -------------------------------------------------------------------------
@@ -725,7 +793,10 @@ private:
         float motionConfPower,
         float viewZSigmaScale,
         bool surfaceIdHistoryValid,
-        float historyClampStrength);
+        float historyClampStrength,
+        float signalDeltaSigma,
+        float confidencePower,
+        float antiLagStrength);
 
     D3D12_GPU_DESCRIPTOR_HANDLE RtSvgfPingUavGpuAt(uint32_t i) const;
 
@@ -1069,6 +1140,21 @@ private:
     // Temporal robustness / temporal-owned views:
     //   84 = temporal history color clamp amount
     //   85 = moment variance clamp mask
+    // 
+    // Temporal shaping / temporal-owned views:
+    //   87 = temporal signal confidence
+    //   88 = temporal anti-lag responsiveness amount
+    //   89 = confidence-shaped history length
+    //   90 = temporal luminance delta confidence
+    //
+    // Spec history shaping / history-select-owned views:
+    //   91 = spec responsive selection weight
+    //   92 = spec stable history confidence
+    //
+    // A-Trous shaping / A-Trous-owned views:
+    //   93 = adaptive blur strength
+    //   94 = wide-iteration suppression mask; black when spec A-Trous (m_rtAtrousIterationsSpec + prev) runs fewer than 3 iterations
+    //   95 = variance/history instability
     // 
     // Future rule:
     //   Do not use broad contiguous checks such as 32..47.
@@ -1580,6 +1666,54 @@ private:
 
     float m_rtOutlierClampDiffuseStrength = 1.0f;
     float m_rtOutlierClampSpecStrength = 0.5f;
+
+    bool m_rtEnableSignalConfidence = true;
+
+    float m_rtSignalDeltaSigmaDiffuse = 1.5f;
+    float m_rtSignalDeltaSigmaSpec = 2.5f;
+
+    float m_rtConfidencePowerDiffuse = 1.0f;
+    float m_rtConfidencePowerSpec = 1.5f;
+
+    float m_rtMinSignalConfidence = 0.05f;
+
+    float m_rtAntiLagStrengthDiffuse = 0.35f;
+    float m_rtAntiLagStrengthSpec = 0.55f;
+
+    float m_rtVarianceConfidenceScale = 2.0f;
+    float m_rtHistoryLengthConfidencePower = 0.75f;
+    float m_rtResponsiveAlphaBoost = 2.0f;
+
+    float m_rtMaxStableHistory = 255.0f;
+    float m_rtMinStableHistoryForClamp = 2.0f;
+    float m_rtConfidenceDebugScale = 1.0f;
+
+    bool m_rtEnableSpecHistoryShaping = true;
+
+    float m_rtSpecResponsiveRoughnessCutoff = 0.35f;
+    float m_rtSpecResponsiveVarianceScale = 2.0f;
+    float m_rtSpecResponsiveMotionScale = 1.0f;
+
+    float m_rtSpecStableMinHistory = 8.0f;
+    float m_rtSpecResponsiveBias = 0.0f;
+    float m_rtSpecHistoryBlendPower = 1.0f;
+
+    bool m_rtEnableAdaptiveAtrous = true;
+
+    float m_rtAdaptiveVarianceScaleDiffuse = 1.0f;
+    float m_rtAdaptiveVarianceScaleSpec = 1.5f;
+
+    float m_rtAdaptiveHistoryMin = 1.0f;
+    float m_rtAdaptiveHistoryMax = 16.0f;
+
+    float m_rtDiffuseBlurBoost = 1.0f;
+    float m_rtSpecBlurRoughnessBoost = 0.75f;
+    float m_rtSpecGlossyBlurLimit = 0.35f;
+    float m_rtWideIterationConfidenceMin = 0.35f;
+
+    float m_rtAdaptiveSigmaLMin = 0.5f;
+    float m_rtAdaptiveSigmaLMax = 2.0f;
+    float m_rtAdaptiveNormalRelaxation = 0.25f;
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

@@ -12,6 +12,8 @@
 //   41 = responsive history length
 //   42 = selected history length
 //   59 = selected spec variance
+//   91 = spec responsive weight after 10.5 shaping
+//   92 = spec stable history confidence
 //
 // Do not add broad contiguous debug ranges.
 
@@ -39,6 +41,16 @@ cbuffer RtHistorySelectConstants : register(b0)
     float MotionConfPower;
     uint DebugView;
     uint3 _pad0;
+    
+    uint EnableSpecHistoryShaping;
+    float SpecResponsiveRoughnessCutoff;
+    float SpecResponsiveVarianceScale;
+    float SpecResponsiveMotionScale;
+
+    float SpecStableMinHistory;
+    float SpecResponsiveBias;
+    float SpecHistoryBlendPower;
+    float _padSpecShape0;
 };
 
 [numthreads(8, 8, 1)]
@@ -64,7 +76,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float2 respMoments = g_RespMoments[pixel];
 
     float4 guide = g_GuideNormal[pixel];
-    float roughness = guide.a;
+    float roughness = saturate(guide.a);
     float depth = g_GuideDepth[pixel];
     
     float motionConfRaw = saturate(g_MotionConf[pixel]);
@@ -98,7 +110,44 @@ void main(uint3 dtid : SV_DispatchThreadID)
     float motionTrustInfluence = saturate(MotionTrustInfluence);
     float tMotion = lerp(tBase, 1.0f, motionTrustInfluence * (1.0f - motionConfW));
 
+    float tPreShape = tMotion;
     float t = tMotion;
+    float stableHistoryConfidence =
+    saturate(stableLen / max(1e-4f, SpecStableMinHistory));
+
+    if (EnableSpecHistoryShaping != 0u)
+    {
+        float stableVariance =
+            max(stableMoments.y - stableMoments.x * stableMoments.x, 0.0f);
+
+        float lowHistory =
+            saturate(1.0f - stableLen / max(1e-4f, SpecStableMinHistory));
+
+        float highVariance =
+            saturate(stableVariance * SpecResponsiveVarianceScale);
+
+        float glossy =
+            saturate(
+                (SpecResponsiveRoughnessCutoff - roughness) /
+                max(1e-4f, SpecResponsiveRoughnessCutoff));
+
+        float shapedT =
+            SpecResponsiveBias +
+            lowHistory +
+            highVariance +
+            glossy * SpecResponsiveMotionScale * (1.0f - motionConfRaw);
+
+        shapedT =
+            saturate(pow(saturate(shapedT), max(1e-4f, SpecHistoryBlendPower)));
+
+        // Preserve existing selector policy as the floor.
+        t = max(tMotion, shapedT);
+
+        stableHistoryConfidence =
+            saturate(stableLen / max(1e-4f, SpecStableMinHistory)) *
+                (1.0f - highVariance) *
+                motionConfRaw;
+    }
 
     // Hard gate: below spec motion-confidence threshold, use responsive.
     if (motionConfRaw < saturate(MotionConfMin))
@@ -134,7 +183,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     }
     else if (DebugView == 39)
     {
-        display = t.xxx;
+        display = tPreShape.xxx;
     }
     else if (DebugView == 40)
     {
@@ -152,6 +201,14 @@ void main(uint3 dtid : SV_DispatchThreadID)
     {
         float selectedVariance = max(selectedMoments.y - selectedMoments.x * selectedMoments.x, 0.0f);
         display = saturate(selectedVariance * 16.0f).xxx;
+    }
+    else if (DebugView == 91)
+    {
+        display = t.xxx;
+    }
+    else if (DebugView == 92)
+    {
+        display = saturate(stableHistoryConfidence).xxx;
     }
     
     g_Output[pixel] = float4(LinearToSRGB(display), 1.0f);
