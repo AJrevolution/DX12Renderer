@@ -1,5 +1,6 @@
 #include "Common.hlsli"
 #include "PBR.hlsli"
+#include "RtSampling.hlsli"
 
 #define RT_MAX_MATERIALS 8
 #define RT_TEXTURES_PER_MATERIAL 3
@@ -67,6 +68,35 @@ cbuffer RtRayGenConstants : register(b1)
     
     uint RtHasPrevMotion;
     uint3 _RtRayGenPad0;
+    
+    // RT environment sampling contract:
+    //
+    // This is a DXR integrator feature only.
+    // It must not modify the denoiser stack, temporal histories, raster IBL,
+    // BRDF model, or any post-filter shaping.
+    //
+    // The alias table stores final solid-angle PDFs per cubemap texel.
+    // SampleEnvironment() and PdfEnvironment() must use matching cubemap
+    // face/UV mapping and the same solid-angle convention.
+    uint RtEnvSamplingMode;
+    uint RtUseEnvImportanceSampling;
+    uint RtUseEnvMIS;
+    uint RtEnvAliasCount;
+
+    uint RtEnvFaceSize;
+    uint RtEnvAliasFallback;
+    uint RtSamplingDebugView;
+    uint RtUseEnvNeeForFinal;
+
+    float RtEnvIntensity;
+    float RtEnvPdfEpsilon;
+    float RtEnvDeltaRoughnessCutoff;
+    float RtEnvMISPower;
+    
+    uint RtEnvNeeFireflyGuard;
+    uint RtEnvAliasVersion;
+    float RtEnvNeeMaxRadiance;
+    float _padRtSampling1;
 };
 
 static const uint RT_RAY_PRIMARY_DIFFUSE = 0u;
@@ -78,12 +108,23 @@ static const float RT_VIEWZ_VIS_MAX = 25.0f;
 static const uint RT_SURFACE_ID_INVALID = 0xFFFFFFFFu;
 static const float RT_ALBEDO_STABLE_MIN = 0.03f;
 static const float RT_ALBEDO_STABLE_MAX = 0.97f;
+static const uint RT_ENV_SAMPLING_BRDF_ONLY = 0u;
+static const uint RT_ENV_SAMPLING_ENV_ONLY = 1u;
+static const uint RT_ENV_SAMPLING_MIS_ONE_SAMPLE = 2u;
+static const uint RT_ENV_SAMPLING_MIS_TWO_SAMPLE = 3u;
 
 struct RayPayload
 {
     float3 color; // returned radiance / signal
     uint rayType; // 0 = primary, 1 = shadow, 2 = indirect, 3 = primary specular
+
+    // Shadow rays:
+    //   1 = occluded, 0 = visible.
+    //
+    // Radiance rays:
+    //   1 = hit geometry, 0 = missed into environment.
     uint occluded;
+
     uint rng;
 };
 
@@ -118,9 +159,11 @@ Texture2D<float4>                   g_RtMaterialTextures[RT_TEXTURE_COUNT] : reg
 Texture2D<float4> g_BRDFLut : register(t30);
 Texture2D<float4> g_IBLDiffuse : register(t31);
 Texture2D<float4> g_IBLSpecular : register(t32);
-//t1..t5 geometry + instance
-//t6..t29 8 materials × 3 textures
-//t30..t32 IBLresources
+StructuredBuffer<RtEnvAliasEntry> g_EnvAlias : register(t33);
+// t1..t5   geometry + instance data
+// t6..t29  8 materials × 3 textures
+// t30..t32 IBL resources
+// t33      RT environment alias table
 SamplerState                        g_LinearWrap : register(s0);
 SamplerState                        g_LinearClamp : register(s1);
 
@@ -308,6 +351,39 @@ float Rand01(inout uint s)
     return (Lcg(s) & 0x00FFFFFFu) / 16777216.0f;
 }
 
+struct RtEnvRandoms
+{
+    float2 uEnvSelect;
+    float2 uEnvTexel;
+    float uTechnique;
+};
+
+uint InitRtEnvRng(uint2 pixel, uint lobeId, uint bounceId)
+{
+    uint seed = InitRng(pixel, RtSampleIndex, RtResetId);
+
+    seed ^= FrameIndex * 0xA511E9B3u;
+    seed ^= lobeId * 0x9E3779B9u;
+    seed ^= bounceId * 0x63D83595u;
+    seed ^= 0xD1B54A35u;
+
+    return HashUint(seed);
+}
+
+RtEnvRandoms MakeRtEnvRandoms(uint lobeId, uint bounceId)
+{
+    uint2 pixel = DispatchRaysIndex().xy;
+
+    uint s = InitRtEnvRng(pixel, lobeId, bounceId);
+
+    RtEnvRandoms r;
+    r.uEnvSelect = float2(Rand01(s), Rand01(s));
+    r.uEnvTexel = float2(Rand01(s), Rand01(s));
+    r.uTechnique = Rand01(s);
+
+    return r;
+}
+
 float3 SampleCosineHemisphere(float2 u)
 {
     float r = sqrt(u.x);
@@ -422,6 +498,182 @@ PbrSplit EvalDirectPbrSplit(
     return r;
 }
 
+PbrSplit EvalEnvBrdfSplit(
+    float3 base,
+    float metallic,
+    float roughness,
+    float3 N,
+    float3 V,
+    float3 L)
+{
+    PbrSplit r;
+    r.diffuse = 0.0f.xxx;
+    r.spec = 0.0f.xxx;
+
+    float NdotL = saturate(dot(N, L));
+    float NdotV = saturate(dot(N, V));
+
+    if (NdotL <= 1e-4f || NdotV <= 1e-4f)
+        return r;
+
+    float3 H = SafeNormalize(V + L);
+    float NdotH = saturate(dot(N, H));
+    float VdotH = saturate(dot(V, H));
+
+    if (NdotH <= 1e-4f || VdotH <= 1e-4f)
+        return r;
+
+    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
+    float3 F = F_Schlick(VdotH, F0);
+    float D = D_GGX(NdotH, roughness);
+    float G = G_Smith(NdotV, NdotL, roughness);
+
+    // BRDF only. Caller multiplies by Li and NdotL.
+    r.spec = (D * G * F) / max(1e-4f, 4.0f * NdotV * NdotL);
+
+    float3 kd = (1.0f - F) * (1.0f - metallic);
+    r.diffuse = kd * base / kPi;
+
+    return r;
+}
+
+float PdfDiffuseBrdf(float3 N, float3 L)
+{
+    float NdotL = saturate(dot(N, L));
+    return NdotL / kPi;
+}
+
+float PdfSpecularGGXBrdf(
+    float roughness,
+    float3 N,
+    float3 V,
+    float3 L)
+{
+    float NdotL = saturate(dot(N, L));
+    float NdotV = saturate(dot(N, V));
+
+    if (NdotL <= 1e-4f || NdotV <= 1e-4f)
+        return 0.0f;
+
+    float3 H = SafeNormalize(V + L);
+    float NdotH = saturate(dot(N, H));
+    float VdotH = saturate(dot(V, H));
+
+    if (NdotH <= 1e-4f || VdotH <= 1e-4f)
+        return 0.0f;
+
+    float D = D_GGX(NdotH, roughness);
+
+    // Half-vector GGX PDF converted to reflected-direction PDF.
+    return (D * NdotH) / max(1e-4f, 4.0f * VdotH);
+}
+
+bool EnvSamplingReady()
+{
+    return
+        RtUseEnvImportanceSampling != 0u &&
+        RtEnvAliasCount != 0u &&
+        RtEnvFaceSize != 0u;
+}
+
+uint EffectiveEnvSamplingMode()
+{
+    // Keep one-sample MIS mapped to the validated reference estimator for now.
+    // A true one-sample estimator should be added only after the two-sample
+    // reference path matches energy.
+    if (RtEnvSamplingMode == RT_ENV_SAMPLING_MIS_ONE_SAMPLE)
+        return RT_ENV_SAMPLING_MIS_TWO_SAMPLE;
+
+    return RtEnvSamplingMode;
+}
+
+bool EnvNeeEnabled()
+{
+    if (!EnvSamplingReady())
+        return false;
+
+    // Do not replace smooth raster-style IBL with a noisy uniform fallback sample.
+    // Keep fallback only for table/debug validation.
+    if (RtEnvAliasFallback != 0u)
+        return false;
+
+    uint mode = EffectiveEnvSamplingMode();
+
+    return
+        mode == RT_ENV_SAMPLING_ENV_ONLY ||
+        mode == RT_ENV_SAMPLING_MIS_TWO_SAMPLE;
+}
+
+bool IsRtEnvEstimatorDebugView(uint dv)
+{
+    return
+        dv == 98u ||
+        dv == 99u ||
+        dv == 100u ||
+        dv == 101u ||
+        dv == 102u;
+}
+
+bool EnvBrdfEnvironmentContributionEnabled(bool isSpecular, float roughness)
+{
+    if (!EnvSamplingReady())
+        return true;
+
+    if (RtUseEnvNeeForFinal == 0u)
+        return true;
+
+    uint mode = EffectiveEnvSamplingMode();
+
+    if (mode == RT_ENV_SAMPLING_ENV_ONLY)
+        return false;
+
+    return true;
+}
+
+bool EnvNeeDebugReady()
+{
+    return
+        EnvSamplingReady() &&
+        RtEnvAliasFallback == 0u;
+}
+
+bool EnvBrdfEnvironmentMisEnabled(
+    bool isSpecular,
+    float roughness,
+    uint samplingDebugView)
+{
+    if (!EnvSamplingReady())
+        return false;
+
+    if (RtEnvAliasFallback != 0u)
+        return false;
+
+    if (RtUseEnvMIS == 0u && samplingDebugView != 101u)
+        return false;
+
+    const bool useEnvHitMisForFinal =
+        RtUseEnvNeeForFinal != 0u;
+
+    const bool useEnvHitMisForDebug =
+        samplingDebugView == 101u;
+
+    if (!useEnvHitMisForFinal && !useEnvHitMisForDebug)
+        return false;
+
+    uint mode = EffectiveEnvSamplingMode();
+
+    if (mode != RT_ENV_SAMPLING_MIS_TWO_SAMPLE &&
+        !useEnvHitMisForDebug)
+    {
+        return false;
+    }
+
+    if (isSpecular && roughness < RtEnvDeltaRoughnessCutoff)
+        return false;
+
+    return true;
+}
+
 float TraceShadowVisibility(float3 worldPos, float3 geomNormal, float3 L)
 {
     RayPayload shadowPayload;
@@ -452,12 +704,166 @@ float TraceShadowVisibility(float3 worldPos, float3 geomNormal, float3 L)
     return (shadowPayload.occluded != 0) ? 0.0f : 1.0f;
 }
 
+bool TraceEnvironmentVisibility(float3 worldPos, float3 geomNormal, float3 wi)
+{
+    RayPayload shadowPayload;
+    shadowPayload.color = 0.0f.xxx;
+    shadowPayload.rayType = RT_RAY_SHADOW;
+    shadowPayload.occluded = 0u;
+    shadowPayload.rng = 0u;
+
+    float visibilityBias =
+        max(0.001f, 0.01f * (1.0f - saturate(dot(geomNormal, wi))));
+
+    RayDesc shadowRay;
+    shadowRay.Origin = worldPos + geomNormal * visibilityBias;
+    shadowRay.Direction = wi;
+    shadowRay.TMin = 0.0f;
+    shadowRay.TMax = 1.0e30f;
+
+    TraceRay(
+        g_Scene,
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+        RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+        0xFF,
+        0,
+        1,
+        0,
+        shadowRay,
+        shadowPayload);
+
+    return shadowPayload.occluded == 0u;
+}
+
 float2 DirToLatLongUV(float3 d)
 {
     d = SafeNormalize(d);
     float u = atan2(d.z, d.x) / (2.0f * kPi) + 0.5f;
     float v = asin(clamp(d.y, -1.0f, 1.0f)) / kPi + 0.5f;
     return float2(u, 1.0f - v);
+}
+
+float3 LookupEnvironmentRadiance(float3 dir)
+{
+    if (HasIBL == 0)
+        return 0.0f.xxx;
+
+    // Current DXR environment lookup path.
+    //
+    // If a true CPU mip-0 environment texture is added later, this function is
+    // the only place that should swap to that texture. SampleEnvironment() and
+    // PdfEnvironment() still use cubemap alias/PDF mapping.
+    float2 uv = DirToLatLongUV(dir);
+    float3 Li = g_IBLSpecular.SampleLevel(g_LinearClamp, uv, 0.0f).rgb;
+
+    return RtEnvIntensity * max(Li, 0.0f.xxx);
+}
+
+bool IsFiniteScalarRt(float v)
+{
+    return !isnan(v) && !isinf(v);
+}
+
+bool IsFinite3Rt(float3 v)
+{
+    return
+        IsFiniteScalarRt(v.x) &&
+        IsFiniteScalarRt(v.y) &&
+        IsFiniteScalarRt(v.z);
+}
+
+EnvSample SampleEnvironment(float2 uSelect, float2 uTexel)
+{
+    EnvSample s;
+    s.wi = 0.0f.xxx;
+    s.Li = 0.0f.xxx;
+    s.pdf = 0.0f;
+    s.index = 0u;
+    s.valid = false;
+
+    if (RtUseEnvImportanceSampling == 0u ||
+        RtEnvAliasCount == 0u ||
+        RtEnvFaceSize == 0u)
+    {
+        return s;
+    }
+
+    float aliasCountF = float(RtEnvAliasCount);
+
+    // Avoid u == 1 mapping outside the table.
+    float ux = min(saturate(uSelect.x), 0.99999994f);
+    float uf = ux * aliasCountF;
+
+    uint idx = min(uint(uf), RtEnvAliasCount - 1u);
+    float aliasXi = min(saturate(uSelect.y), 0.99999994f);
+
+    RtEnvAliasEntry e = g_EnvAlias[idx];
+
+    uint chosen = (aliasXi < e.q) ? idx : e.alias;
+    chosen = min(chosen, RtEnvAliasCount - 1u);
+
+    RtEnvAliasEntry c = g_EnvAlias[chosen];
+
+    uint faceSize2 = RtEnvFaceSize * RtEnvFaceSize;
+    if (faceSize2 == 0u)
+        return s;
+
+    uint face = chosen / faceSize2;
+    uint rem = chosen - face * faceSize2;
+
+    uint y = rem / RtEnvFaceSize;
+    uint x = rem - y * RtEnvFaceSize;
+
+    float2 texelXi = saturate(uTexel);
+
+    float2 cubeUv =
+        (float2(float(x), float(y)) + texelXi) /
+        float(RtEnvFaceSize);
+
+    float3 wi = CubeFaceUVToDirection(face, cubeUv);
+    float3 Li = LookupEnvironmentRadiance(wi);
+
+    s.wi = wi;
+    s.Li = Li;
+    s.pdf = c.pdf;
+    s.index = chosen;
+    s.valid =
+        IsFinite3Rt(Li) &&
+        all(Li >= 0.0f.xxx) &&
+        c.pdf > RtEnvPdfEpsilon;
+
+    return s;
+}
+
+float PdfEnvironment(float3 wi)
+{
+    if (RtUseEnvImportanceSampling == 0u ||
+        RtEnvAliasCount == 0u ||
+        RtEnvFaceSize == 0u)
+    {
+        return 0.0f;
+    }
+
+    float2 cubeUv;
+    uint face = DirectionToCubeFaceUV(SafeNormalize(wi), cubeUv);
+
+    uint x = min(
+        uint(cubeUv.x * float(RtEnvFaceSize)),
+        RtEnvFaceSize - 1u);
+
+    uint y = min(
+        uint(cubeUv.y * float(RtEnvFaceSize)),
+        RtEnvFaceSize - 1u);
+
+    uint idx =
+        face * RtEnvFaceSize * RtEnvFaceSize +
+        y * RtEnvFaceSize +
+        x;
+
+    if (idx >= RtEnvAliasCount)
+        return 0.0f;
+
+    return max(0.0f, g_EnvAlias[idx].pdf);
 }
 
 float3 EvalIBLDiffuse(float3 N)
@@ -569,6 +975,47 @@ float3 SurfaceIdToColor(uint id)
     return lerp(0.12f.xxx, 1.0f.xxx, float3(r, g, b));
 }
 
+bool IsRtSamplingDebugView(uint dv)
+{
+    return
+        dv == 96u ||
+        dv == 97u ||
+        dv == 98u ||
+        dv == 99u ||
+        dv == 100u ||
+        dv == 101u ||
+        dv == 102u ||
+        dv == 103u;
+}
+
+float RtDebugLuminance(float3 c)
+{
+    return dot(max(c, 0.0f.xxx), float3(0.2126f, 0.7152f, 0.0722f));
+}
+
+float3 RtHeat(float v)
+{
+    v = saturate(v);
+
+    // Simple blue/cyan/yellow/red-style ramp without relying on external helpers.
+    return saturate(float3(
+        smoothstep(0.35f, 1.00f, v),
+        smoothstep(0.10f, 0.80f, v) * (1.0f - smoothstep(0.85f, 1.00f, v)),
+        1.0f - smoothstep(0.00f, 0.65f, v)));
+}
+
+float3 RtSamplingFallbackMask()
+{
+    bool invalid =
+        RtUseEnvImportanceSampling == 0u ||
+        RtEnvAliasCount == 0u ||
+        RtEnvFaceSize == 0u ||
+        RtEnvAliasFallback != 0u;
+
+    return invalid ? float3(1.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f);
+}
+
+
 // RT IBL parity target:
 // - same latlong UV mapping convention as raster
 // - same BRDF LUT usage
@@ -581,9 +1028,13 @@ void RayGen()
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 dim = DispatchRaysDimensions().xy;
     
+    uint samplingDebugView = RtSamplingDebugView;
+    bool isRtSamplingDebug = IsRtSamplingDebugView(samplingDebugView);
+
     bool isRtShadingDebug =
         (DebugView != 0 && DebugView <= 17) ||
-        DebugView == 27;
+        DebugView == 27 ||
+        isRtSamplingDebug;
 
     bool isMotionDebug =
         DebugView == 51 ||
@@ -617,6 +1068,52 @@ void RayGen()
     g_AovDiffuseAlbedo[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
     
     uint rng = InitRng(pixel, RtSampleIndex, RtResetId);
+    if (samplingDebugView == 96u)
+    {
+        // Alias/PDF heatmap. Horizontal pixel coordinate scans the alias table.
+        if (RtEnvAliasCount == 0u)
+        {
+            g_Output[pixel] = float4(1.0f, 0.0f, 1.0f, 1.0f);
+            return;
+        }
+
+        uint idx = min(
+            uint((float(pixel.x) / max(1.0f, float(dim.x))) * float(RtEnvAliasCount)),
+            RtEnvAliasCount - 1u);
+
+        RtEnvAliasEntry e = g_EnvAlias[idx];
+
+        float pdfVis = saturate(log2(1.0f + e.pdf) / 8.0f);
+        float qVis = saturate(e.q);
+
+        g_Output[pixel] = float4(RtHeat(pdfVis).rg, qVis, 1.0f);
+        return;
+    }
+
+    if (samplingDebugView == 97u)
+    {
+        // Sampled env direction/pdf.
+        RtEnvRandoms envRand = MakeRtEnvRandoms(97u, 0u);
+        EnvSample env = SampleEnvironment(envRand.uEnvSelect, envRand.uEnvTexel);
+
+        if (!env.valid)
+        {
+            g_Output[pixel] = float4(1.0f, 0.0f, 1.0f, 1.0f);
+            return;
+        }
+
+        float pdfVis = saturate(log2(1.0f + env.pdf) / 8.0f);
+        float3 dirVis = env.wi * 0.5f + 0.5f;
+
+        g_Output[pixel] = float4(lerp(dirVis, RtHeat(pdfVis), 0.35f), 1.0f);
+        return;
+    }
+
+    if (samplingDebugView == 103u)
+    {
+        g_Output[pixel] = float4(RtSamplingFallbackMask(), 1.0f);
+        return;
+    }
 
     // Keep camera jitter shared, but decorrelate the two primary signal traces.
     // Otherwise diffuse/spec indirect sampling can walk the same RNG sequence.
@@ -875,9 +1372,9 @@ void RayGen()
 [shader("miss")]
 void Miss(inout RayPayload payload)
 {
+    payload.occluded = 0u;
     if (payload.rayType == RT_RAY_SHADOW)
     {
-        payload.occluded = 0u;
         return;
     }
     
@@ -890,8 +1387,27 @@ void Miss(inout RayPayload payload)
         return;
     }
     
-    
+    float3 envRadiance = LookupEnvironmentRadiance(WorldRayDirection());
     float3 sky = EvalSky(WorldRayDirection());
+    
+    if (payload.rayType == RT_RAY_INDIRECT)
+    {
+        uint samplingDebugView = RtSamplingDebugView;
+
+        const bool useEnvRadianceForIndirectMiss =
+            EnvSamplingReady() &&
+            RtEnvAliasFallback == 0u &&
+            (
+                RtUseEnvNeeForFinal != 0u ||
+                samplingDebugView == 101u
+            );
+
+        payload.color =
+            useEnvRadianceForIndirectMiss
+                ? envRadiance
+                : sky;
+        return;
+    }
     
     if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE)
     {
@@ -926,10 +1442,13 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     
     if (payload.rayType == RT_RAY_SHADOW)
     {
-        payload.occluded = 1;
+        payload.occluded = 1u;
         return;
     }
     
+    // For radiance rays, occluded is reused as a geometry-hit flag.
+    payload.occluded = 1u;
+
     const uint instanceID = InstanceID();
     const uint prim = PrimitiveIndex();
 
@@ -972,6 +1491,11 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     
     float3 diffuseAlbedo = base * (1.0f - metallic);
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
+    
+    float pSpec = clamp(Max3(F0), 0.05f, 0.95f);
+    float pSpecSafe = saturate(pSpec);
+    float pDiffuseSafe = saturate(1.0f - pSpecSafe);
+    
     float NdotV = saturate(dot(worldNormal, V));
     float3 R = reflect(-V, worldNormal);
     float3 Rrough = SafeNormalize(lerp(R, worldNormal, roughness * roughness));
@@ -1017,17 +1541,122 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     if (payload.rayType == RT_RAY_INDIRECT)
     {
         payload.color = EvalDirectAtSurface(
-            base,
-            metallic,
-            roughness,
-            worldNormal,
-            V,
-            L,
-            1.0f);
+        base,
+        metallic,
+        roughness,
+        worldNormal,
+        V,
+        L,
+        1.0f);
 
         return;
     }
+
+    float3 envNeeDiffuse = 0.0f.xxx;
+    float3 envNeeSpec = 0.0f.xxx;
     
+    uint samplingDebugView = RtSamplingDebugView;
+
+    bool useEnvNeeForFinal =
+        RtUseEnvNeeForFinal != 0u &&
+        EnvNeeEnabled();
+
+    bool useEnvNeeForDebug =
+        IsRtEnvEstimatorDebugView(samplingDebugView) &&
+        EnvNeeDebugReady();
+
+    bool shouldComputeEnvNee =
+        useEnvNeeForFinal ||
+        useEnvNeeForDebug;
+
+    if (shouldComputeEnvNee)
+    {
+        RtEnvRandoms envRand = MakeRtEnvRandoms(
+            payload.rayType,
+            0u);
+
+        EnvSample env = SampleEnvironment(
+            envRand.uEnvSelect,
+            envRand.uEnvTexel);
+
+        if (env.valid)
+        {
+            float NdotEnv = saturate(dot(worldNormal, env.wi));
+            float GdotEnv = dot(geomNormal, env.wi);
+
+            if (NdotEnv > 1e-4f && GdotEnv > 0.0f)
+            {
+                bool visible = TraceEnvironmentVisibility(
+                    worldPos,
+                    geomNormal,
+                    env.wi);
+
+                if (visible)
+                {
+                    bool allowSpecEnvNee =
+                        roughness >= RtEnvDeltaRoughnessCutoff;
+                    
+                    PbrSplit envBrdf = EvalEnvBrdfSplit(
+                        base,
+                        metallic,
+                        roughness,
+                        worldNormal,
+                        V,
+                        env.wi);
+
+                    float pdfDiffuse =
+                    pDiffuseSafe *
+                    PdfDiffuseBrdf(
+                        worldNormal,
+                        env.wi);
+
+                    float pdfSpec = allowSpecEnvNee
+                    ? pSpecSafe *
+                        PdfSpecularGGXBrdf(
+                            roughness,
+                            worldNormal,
+                            V,
+                            env.wi)
+                    : 0.0f;
+
+                    float wDiffuse = RtUseEnvMIS != 0u
+                    ? PowerHeuristicN(env.pdf, pdfDiffuse, RtEnvMISPower)
+                    : 1.0f;
+
+                    float wSpec = RtUseEnvMIS != 0u && allowSpecEnvNee
+                    ? PowerHeuristicN(env.pdf, pdfSpec, RtEnvMISPower)
+                    : 1.0f;
+
+                    float invPdf = 1.0f / max(RtEnvPdfEpsilon, env.pdf);
+
+                    envNeeDiffuse =
+                        env.Li *
+                        envBrdf.diffuse *
+                        NdotEnv *
+                        wDiffuse *
+                        invPdf;
+
+                    if (allowSpecEnvNee)
+                    {
+                        envNeeSpec =
+                        env.Li *
+                        envBrdf.spec *
+                        NdotEnv *
+                        wSpec *
+                        invPdf;
+                    }
+
+                    if (RtEnvNeeFireflyGuard != 0u)
+                    {
+                        float maxNee = max(1e-4f, RtEnvNeeMaxRadiance);
+                        envNeeDiffuse = min(envNeeDiffuse, maxNee.xxx);
+                        envNeeSpec = min(envNeeSpec, maxNee.xxx);
+                    }
+                }
+            }
+        }
+    }
+
     float shadowVisibility = TraceShadowVisibility(worldPos, geomNormal, L);
 
     if (DebugView == 1)
@@ -1076,13 +1705,14 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         payload.color = float3(frac(surface.uv), 0.0f);
         return;
     }
+    
 
     float3 indirectDiffuse = 0.0f.xxx;
     float3 indirectSpec = 0.0f.xxx;
     float3 lobeVis = 0.0f.xxx;
 
     bool allowIndirect =
-        (RtEnableIndirect != 0) &&
+        ((RtEnableIndirect != 0) || samplingDebugView == 101u) &&
         (
             (RtAccumulate != 0 && DebugView == 0) ||
             DebugView == 9 ||
@@ -1090,17 +1720,18 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
             DebugView == 11 ||
             DebugView == 48 ||
             DebugView == 49 ||
-            DebugView == 50
+            DebugView == 50 ||
+            samplingDebugView == 101u
         );
 
     if (allowIndirect)
     {
         //float3 diffuseAlbedo = base * (1.0f - metallic);
         //float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
-        float pSpec = clamp(Max3(F0), 0.05f, 0.95f);
+        //float pSpec = clamp(Max3(F0), 0.05f, 0.95f);
 
         float xi = Rand01(payload.rng);
-        bool chooseSpec = (xi < pSpec);
+        bool chooseSpec = (xi < pSpecSafe);
 
         // DebugView 11: red = diffuse lobe, blue = specular lobe.
         lobeVis = chooseSpec ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f);
@@ -1151,6 +1782,36 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
                     r,
                     bounce);
 
+                bool brdfRayMissedEnvironment = (bounce.occluded == 0u);
+
+                float envMisWeight = 1.0f;
+
+                if (brdfRayMissedEnvironment)
+                {
+                    if (!EnvBrdfEnvironmentContributionEnabled(true, roughness))
+                    {
+                        bounce.color = 0.0f.xxx;
+                    }
+                    else if (EnvBrdfEnvironmentMisEnabled(true, roughness, samplingDebugView))
+                    {
+                        float pdfBrdf =
+                        pSpecSafe *
+                        PdfSpecularGGXBrdf(
+                            roughness,
+                            worldNormal,
+                            V,
+                            wi);
+
+                        float pdfEnv = PdfEnvironment(wi);
+
+                        envMisWeight =
+                            PowerHeuristicN(
+                                pdfBrdf,
+                                pdfEnv,
+                                RtEnvMISPower);
+                    }
+                }
+
                 float G = G_Smith(NdotV, NdotL, roughness);
                 float3 F = F_Schlick(VdotH, F0);
 
@@ -1162,7 +1823,11 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
                 specWeight = min(specWeight, float3(10.0f, 10.0f, 10.0f));
                 float3 bounceRadiance = min(bounce.color, float3(20.0f, 20.0f, 20.0f));
 
-                indirectSpec = bounceRadiance * specWeight / pSpec;
+                indirectSpec =
+                    bounceRadiance *
+                    specWeight *
+                    envMisWeight /
+                    max(1e-4f, pSpecSafe);
                 payload.rng = bounce.rng;
             }
         }
@@ -1190,8 +1855,39 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
                     r,
                     bounce);
 
+                bool brdfRayMissedEnvironment = (bounce.occluded == 0u);
+
+                float envMisWeight = 1.0f;
+
+                if (brdfRayMissedEnvironment)
+                {
+                    if (!EnvBrdfEnvironmentContributionEnabled(false, roughness))
+                    {
+                        bounce.color = 0.0f.xxx;
+                    }
+                    else if (EnvBrdfEnvironmentMisEnabled(false, roughness, samplingDebugView))
+                    {
+                        float pdfBrdf =
+                            pDiffuseSafe *
+                            PdfDiffuseBrdf(
+                                worldNormal,
+                                wi);
+
+                        float pdfEnv = PdfEnvironment(wi);
+
+                        envMisWeight =
+                            PowerHeuristicN(
+                                pdfBrdf,
+                                pdfEnv,
+                                RtEnvMISPower);
+                    }
+                }
+
                 indirectDiffuse =
-                    bounce.color * diffuseAlbedo / max(1e-4f, 1.0f - pSpec);
+                    bounce.color *
+                    diffuseAlbedo *
+                    envMisWeight /
+                    max(1e-4f, pDiffuseSafe);
 
                 payload.rng = bounce.rng;
             }
@@ -1245,6 +1941,105 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         return;
     }
     
+    if (IsRtEnvEstimatorDebugView(samplingDebugView))
+    {
+        RtEnvRandoms envRandDbg = MakeRtEnvRandoms(98u, 0u);
+        EnvSample envDbg = SampleEnvironment(
+            envRandDbg.uEnvSelect,
+            envRandDbg.uEnvTexel);
+
+        float3 dbg = 0.0f.xxx;
+
+        if (samplingDebugView == 98u)
+        {
+            // MIS weight heatmap for the env NEE sample.
+            if (envDbg.valid)
+            {
+                bool allowSpecEnvNee =
+                    roughness >= RtEnvDeltaRoughnessCutoff;
+
+                float pdfDiffuse =
+                    pDiffuseSafe *
+                    PdfDiffuseBrdf(
+                        worldNormal,
+                        envDbg.wi);
+
+                float pdfSpec = allowSpecEnvNee
+                    ? pSpecSafe *
+                        PdfSpecularGGXBrdf(
+                            roughness,
+                            worldNormal,
+                            V,
+                            envDbg.wi)
+                    : 0.0f;
+
+                float wDiffuse = RtUseEnvMIS != 0u
+                    ? PowerHeuristicN(envDbg.pdf, pdfDiffuse, RtEnvMISPower)
+                    : 1.0f;
+
+                float wSpec = RtUseEnvMIS != 0u && allowSpecEnvNee
+                    ? PowerHeuristicN(envDbg.pdf, pdfSpec, RtEnvMISPower)
+                    : 0.0f;
+
+                dbg = float3(wDiffuse, wSpec, 0.0f);
+            }
+
+            payload.color = dbg;
+            return;
+        }
+
+        if (samplingDebugView == 99u)
+        {
+            // Env visibility mask.
+            if (envDbg.valid)
+            {
+                float NoL = saturate(dot(worldNormal, envDbg.wi));
+                bool visible =
+                NoL > 1e-4f &&
+                dot(geomNormal, envDbg.wi) > 0.0f &&
+                TraceEnvironmentVisibility(worldPos, geomNormal, envDbg.wi);
+
+                dbg = visible ? 1.0f.xxx : 0.0f.xxx;
+            }
+
+            payload.color = dbg;
+            return;
+        }
+
+        if (samplingDebugView == 100u)
+        {
+        // Direct env NEE luminance.
+            float lum = RtDebugLuminance(envNeeDiffuse + envNeeSpec);
+            payload.color = RtHeat(saturate(lum * 0.1f));
+            return;
+        }
+
+        if (samplingDebugView == 101u)
+        {
+        // BRDF env-hit luminance approximation.
+            float lum = RtDebugLuminance(indirectDiffuse + indirectSpec);
+            payload.color = RtHeat(saturate(lum * 0.1f));
+            return;
+        }
+
+        if (samplingDebugView == 102u)
+        {
+        // Technique selection / mode.
+        // R = BRDF-only, G = env-only, B = MIS reference.
+            uint mode = EffectiveEnvSamplingMode();
+
+            if (mode == RT_ENV_SAMPLING_BRDF_ONLY)
+                dbg = float3(1.0f, 0.0f, 0.0f);
+            else if (mode == RT_ENV_SAMPLING_ENV_ONLY)
+                dbg = float3(0.0f, 1.0f, 0.0f);
+            else
+                dbg = float3(0.0f, 0.25f + 0.75f * envRandDbg.uTechnique, 1.0f);
+
+            payload.color = dbg;
+            return;
+        }
+    }
+    
     PbrSplit directSplit = EvalDirectPbrSplit(
         base,
         metallic,
@@ -1256,15 +2051,23 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
     float3 ambient = base * 0.03f;
     
+    float3 envDiffuseTerm = useEnvNeeForFinal
+        ? envNeeDiffuse
+        : iblDiffuse;
+
+    float3 envSpecTerm = useEnvNeeForFinal
+        ? envNeeSpec
+        : iblSpecular;
+
     float3 sampleDiffuse =
         ambient +
         directSplit.diffuse * shadowVisibility +
-        iblDiffuse +
+        envDiffuseTerm +
         RtIndirectScale * indirectDiffuse;
 
     float3 sampleSpec =
         directSplit.spec * shadowVisibility +
-        iblSpecular +
+        envSpecTerm +
         RtIndirectScale * indirectSpec;
 
     if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE)

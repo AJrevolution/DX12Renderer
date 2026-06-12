@@ -153,6 +153,12 @@
     <ClInclude Include="Source\Renderer\Passes\RtOutlierClampPass.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Renderer\RtEnvironmentImportance.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Renderer\RtEnvironmentMapCpu.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -269,11 +275,18 @@
     <ClCompile Include="Source\Renderer\Passes\RtOutlierClampPass.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Renderer\RtEnvironmentImportance.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Renderer\RtEnvironmentMapCpu.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
     <None Include="Assets\Shaders\HLSL\Common.hlsli" />
     <None Include="Assets\Shaders\HLSL\PBR.hlsli" />
+    <None Include="Assets\Shaders\HLSL\RtSampling.hlsli" />
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="Assets\Shaders\HLSL\Triangle_VS.hlsl">

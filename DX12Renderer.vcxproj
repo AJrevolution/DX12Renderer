@@ -160,6 +160,8 @@
     <ClInclude Include="Source\Renderer\Passes\RtOutlierClampPass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtTemporalPass.h" />
     <ClInclude Include="Source\Renderer\Passes\ShadowPass.h" />
+    <ClInclude Include="Source\Renderer\RtEnvironmentImportance.h" />
+    <ClInclude Include="Source\Renderer\RtEnvironmentMapCpu.h" />
     <ClInclude Include="Source\Renderer\SceneData.h" />
     <ClInclude Include="Source\Renderer\SceneResources.h" />
     <ClInclude Include="Source\RHI\CommandList\ResourceStateTracker.h" />
@@ -205,6 +207,8 @@
     <ClCompile Include="Source\Renderer\Passes\RtOutlierClampPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtTemporalPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\ShadowPass.cpp" />
+    <ClCompile Include="Source\Renderer\RtEnvironmentImportance.cpp" />
+    <ClCompile Include="Source\Renderer\RtEnvironmentMapCpu.cpp" />
     <ClCompile Include="Source\RHI\CommandList\ResourceStateTracker.cpp" />
     <ClCompile Include="Source\RHI\Memory\DescriptorAllocator.cpp" />
     <ClCompile Include="Device.cpp" />
@@ -231,6 +235,7 @@
   <ItemGroup>
     <None Include="Assets\Shaders\HLSL\Common.hlsli" />
     <None Include="Assets\Shaders\HLSL\PBR.hlsli" />
+    <None Include="Assets\Shaders\HLSL\RtSampling.hlsli" />
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>

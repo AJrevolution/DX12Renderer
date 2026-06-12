@@ -6,10 +6,17 @@ namespace
 {
     static constexpr uint32_t kMaxRtMaterials = 8;
     static constexpr uint32_t kRtGeometrySrvCount = 5;          // t1..t5
-    static constexpr uint32_t kRtTexturesPerMaterial = 3;       // base, normal, orm
-    static constexpr uint32_t kRtIblSrvCount = 3;               // BRDF LUT, IBL diffuse, IBL specular
+    static constexpr uint32_t kRtTexturesPerMaterial = 3;       // t6..t29, base/normal/orm per material
+    static constexpr uint32_t kRtIblSrvCount = 3;               // t30..t32, BRDF LUT, IBL diffuse, IBL specular
+    static constexpr uint32_t kRtSamplingSrvCount = 1;          // t33, RT env alias table
+
     static constexpr uint32_t kRtSrvTableCount =
-        kRtGeometrySrvCount + (kRtTexturesPerMaterial * kMaxRtMaterials) + kRtIblSrvCount;
+        kRtGeometrySrvCount +
+        (kRtTexturesPerMaterial * kMaxRtMaterials) +
+        kRtIblSrvCount +
+        kRtSamplingSrvCount;
+
+    static_assert(kRtSrvTableCount == 33, "DXR SRV table must cover t1..t33.");
 }
 
 static std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path)
@@ -41,7 +48,11 @@ void RaytracingPipeline::BuildRootSignature(ID3D12Device* device)
     // u8 = aovDiffuseAlbedo
 
     CD3DX12_DESCRIPTOR_RANGE srvTable;
-    srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kRtSrvTableCount, 1, 0); // t1..t5 + t6.. material textures
+    srvTable.Init(
+        D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+        kRtSrvTableCount,
+        1,
+        0); // t1..t33: geometry, instance data, material textures, IBL, RT env alias table
 
     CD3DX12_ROOT_PARAMETER params[5]{};
     params[0].InitAsDescriptorTable(1, &uavTable); // u0..u8 RT UAV table

@@ -426,6 +426,7 @@ void Renderer::RenderFrame(
     const bool wantsDiffuseDemodDebug = rtDebug.wantsDiffuseDemodDebug;
     const bool wantsRtInspectionDebug = rtDebug.wantsRtInspectionDebug;
     const bool wantsOutlierClampDebug = rtDebug.wantsOutlierClampDebug;
+    const bool wantsRtSamplingDebug = rtDebug.wantsRtSamplingDebug;
 
     RtPostMode rtPostMode = ResolveRtPostMode(rtDebug);
 
@@ -435,6 +436,7 @@ void Renderer::RenderFrame(
         !wantsViewZReconstructDebug &&
         !wantsDiffuseDemodDebug &&
         !wantsOutlierClampDebug &&
+        !wantsRtSamplingDebug &&
         ((m_debugView == 0) || wantsRtInspectionDebug) &&
         (
             m_rtTemporal ||
@@ -443,7 +445,8 @@ void Renderer::RenderFrame(
             wantsMotionDebug ||
             wantsViewZDebug ||
             wantsSurfaceIdDebug ||
-            wantsDiffuseAlbedoDebug
+            wantsDiffuseAlbedoDebug ||
+            wantsRtSamplingDebug
         );
 
     bool drawListStructuralChanged =
@@ -511,10 +514,24 @@ void Renderer::RenderFrame(
     const bool accumulationModeChanged =
         (allowRtAccumulation != m_rtAccumulatingLastFrame);
 
+    const bool envIntegratorChanged =
+        (m_rtEnvSamplingMode != m_prevRtEnvSamplingMode) ||
+        (m_rtUseEnvImportanceSampling != m_prevRtUseEnvImportanceSampling) ||
+        (m_rtUseEnvMIS != m_prevRtUseEnvMIS) ||
+        (std::fabs(m_rtEnvMISPower - m_prevRtEnvMISPower) > 1e-6f) ||
+        (std::fabs(m_rtEnvIntensity - m_prevRtEnvIntensity) > 1e-6f) ||
+        (std::fabs(m_rtEnvPdfEpsilon - m_prevRtEnvPdfEpsilon) > 1e-9f) ||
+        (m_rtUseEnvNeeForFinal != m_prevRtUseEnvNeeForFinal) ||
+        (m_rtEnvNeeFireflyGuard != m_prevRtEnvNeeFireflyGuard) ||
+        (std::fabs(m_rtEnvNeeMaxRadiance - m_prevRtEnvNeeMaxRadiance) > 1e-6f) ||
+        (m_rtEnvAliasVersion != m_prevRtEnvAliasVersion) ||
+        (std::fabs(m_rtEnvDeltaRoughnessCutoff - m_prevRtEnvDeltaRoughnessCutoff) > 1e-6f);
+
     const bool integratorChanged =
         !m_rtHistoryValid ||
         (m_rtEnableIndirect != m_prevRtEnableIndirect) ||
-        (std::fabs(m_rtIndirectScale - m_prevRtIndirectScale) > 1e-6f);
+        (std::fabs(m_rtIndirectScale - m_prevRtIndirectScale) > 1e-6f) ||
+        envIntegratorChanged;
 
     const bool rtHasBrdfLut = m_brdfLutTex.IsValid();
     const bool rtHasIbl = m_iblDiffuseTex.IsValid() && m_iblSpecularTex.IsValid();
@@ -604,7 +621,8 @@ void Renderer::RenderFrame(
     if (wantsMotionDilateDebug ||
         wantsViewZReconstructDebug ||
         wantsDiffuseDemodDebug ||
-        wantsOutlierClampDebug)
+        wantsOutlierClampDebug ||
+        wantsRtSamplingDebug)
     {
         // Debug 54 is produced by RtMotionDilatePass.
         // DXR still runs to author raw motion/depth/normal guides, but it must not
@@ -666,6 +684,10 @@ void Renderer::RenderFrame(
     m_prevRtTemporalMotionConfPowerSpec = m_rtTemporalMotionConfPowerSpec;
     m_prevRtViewZReconsAlpha = m_rtViewZReconsAlpha;
     m_prevRtViewZSigmaScale = m_rtViewZSigmaScale;
+    m_prevRtUseEnvNeeForFinal = m_rtUseEnvNeeForFinal;
+    m_prevRtEnvNeeFireflyGuard = m_rtEnvNeeFireflyGuard;
+    m_prevRtEnvNeeMaxRadiance = m_rtEnvNeeMaxRadiance;
+    m_prevRtEnvAliasVersion = m_rtEnvAliasVersion;
 
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
@@ -674,6 +696,14 @@ void Renderer::RenderFrame(
     }
     m_prevRtEnableIndirect = m_rtEnableIndirect;
     m_prevRtIndirectScale = m_rtIndirectScale;
+
+    m_prevRtEnvSamplingMode = m_rtEnvSamplingMode;
+    m_prevRtUseEnvImportanceSampling = m_rtUseEnvImportanceSampling;
+    m_prevRtUseEnvMIS = m_rtUseEnvMIS;
+    m_prevRtEnvMISPower = m_rtEnvMISPower;
+    m_prevRtEnvIntensity = m_rtEnvIntensity;
+    m_prevRtEnvPdfEpsilon = m_rtEnvPdfEpsilon;
+    m_prevRtEnvDeltaRoughnessCutoff = m_rtEnvDeltaRoughnessCutoff;
 
     m_rtHistoryValid = true;
 
@@ -687,8 +717,10 @@ void Renderer::RenderFrame(
     if (canRunDxr)
     {
         CmdBeginEvent(cmdList, "DXR");
+
         EnsureRtOutputSize(width, height);
         EnsureRtInstanceData(frameIndex);
+        EnsureRtEnvironmentAlias(device, cl);
         UpdateRtGeometryTable(frameIndex);
 
         const bool canReuseAccumulatedOutput =
@@ -1290,11 +1322,14 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
             DebugOutput("Warning: ibl_brdf_lut.png missing. PBR will look incorrect.");
         }
 
-        if (std::filesystem::exists(content / L"Textures" / L"lilienstein_2kblurred.png"))
+        const std::filesystem::path iblDiffusePath =
+            content / L"Textures" / L"lilienstein_2kblurred.png";
+
+        if (std::filesystem::exists(iblDiffusePath))
         {
             m_iblDiffuseTex.LoadFromFile_DirectXTex(
                 device, cl, m_upload, frameIndex,
-                content / L"Textures" / L"lilienstein_2kblurred.png",
+                iblDiffusePath,
                 false,
                 L"Tex: IBL Diffuse");
         }
@@ -1303,17 +1338,30 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
             DebugOutput("Warning: lilienstein_2kblurred.png missing. Using null scene slot.");
         }
 
-        if (std::filesystem::exists(content / L"Textures" / L"lilienstein_2k.png"))
+        const std::filesystem::path envRadiancePath =
+            content / L"Textures" / L"lilienstein_2k.png";
+
+        if (std::filesystem::exists(envRadiancePath))
         {
             m_iblSpecularTex.LoadFromFile_DirectXTex(
                 device, cl, m_upload, frameIndex,
-                content / L"Textures" / L"lilienstein_2k.png",
+                envRadiancePath,
                 false,
                 L"Tex: IBL Specular");
+
+            if (m_dxrAvailable && m_device5)
+            {
+                LoadRtEnvironmentCpuRadiance(envRadiancePath);
+            }
         }
         else
         {
             DebugOutput("Warning: lilienstein_2k.png missing. Using null scene slot.");
+
+            if (m_dxrAvailable && m_device5)
+            {
+                ClearRtEnvironmentCpuRadiance();
+            }
         }
 
         // Material handles the table allocation and SRV placement
@@ -2030,11 +2078,10 @@ void Renderer::UpdateRtGeometryTable(uint32_t frameIndex)
 {
     auto& frame = m_rtFrames[frameIndex];
 
-    //static constexpr uint32_t kRtTableDescriptorCount =
-    //    kRtGeometrySrvCount + (kRtTexturesPerMaterial * kMaxRtMaterials);
-
-    if (!frame.geometryTable.IsValid())
-        frame.geometryTable = m_srvHeap.Allocate(kRtSrvTableCount);
+    EnsureRtDescriptorTable(
+        frame.geometryTable,
+        frame.geometryTableCount,
+        kRtSrvTableCount);
 
     auto HandleAt = [&](uint32_t i)
     {
@@ -2122,12 +2169,21 @@ void Renderer::UpdateRtGeometryTable(uint32_t frameIndex)
     
     // Clear every non-geometry slot to deterministic nulls first.
     // This covers:
-    // - t6.. material textures
-    // - t30..t32 IBL textures
+    // - material textures
+    // - IBL textures
+    // - RT sampling structured buffers
     for (uint32_t slot = kRtGeometrySrvCount; slot < kRtSrvTableCount; ++slot)
     {
-        CreateNullTexture2DSRV(m_device5.Get(), HandleAt(slot), DXGI_FORMAT_R8G8B8A8_UNORM);
+        if (slot == kRtSrv_EnvAlias)
+            continue;
+
+        CreateNullTexture2DSRV(
+            m_device5.Get(),
+            HandleAt(slot),
+            DXGI_FORMAT_R8G8B8A8_UNORM);
     }
+
+    WriteNullRtEnvAliasSrv(HandleAt(kRtSrv_EnvAlias));
 
     auto WriteMaterial = [&](uint32_t materialId, const Texture* base, const Texture* normal, const Texture* orm)
     {
@@ -2185,6 +2241,8 @@ void Renderer::UpdateRtGeometryTable(uint32_t frameIndex)
 
     if (m_iblSpecularTex.IsValid())
         WriteRtTextureSrv(m_device5.Get(), HandleAt(kRtSrv_IblSpec), m_iblSpecularTex);
+
+    WriteRtEnvAliasSrv(HandleAt(kRtSrv_EnvAlias));
 
     m_rtMaterialCount = 4;
 }
@@ -4345,6 +4403,55 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex)
     cb->pad0[1] = 0u;
     cb->pad0[2] = 0u;
 
+    const bool envAliasUsable =
+        m_rtEnvAliasReady &&
+        m_rtEnvAliasBuffer &&
+        m_rtEnvAliasCount > 0 &&
+        m_rtEnvFaceSize > 0;
+
+    cb->sampling.envSamplingMode =
+        static_cast<uint32_t>(m_rtEnvSamplingMode);
+
+    cb->sampling.useEnvImportanceSampling =
+        (m_rtUseEnvImportanceSampling && envAliasUsable) ? 1u : 0u;
+
+    cb->sampling.useEnvMIS =
+        (m_rtUseEnvMIS && envAliasUsable) ? 1u : 0u;
+
+    cb->sampling.envAliasCount =
+        envAliasUsable ? m_rtEnvAliasCount : 0u;
+
+    cb->sampling.envFaceSize =
+        envAliasUsable ? m_rtEnvFaceSize : 0u;
+
+    cb->sampling.envAliasFallback =
+        (!envAliasUsable || m_rtEnvAliasFallback) ? 1u : 0u;
+
+    cb->sampling.samplingDebugView = m_debugView;
+
+    cb->sampling.useEnvNeeForFinal =
+        (m_rtUseEnvNeeForFinal &&
+            envAliasUsable &&
+            !m_rtEnvAliasFallback)
+        ? 1u
+        : 0u;
+
+    cb->sampling.envIntensity = m_rtEnvIntensity;
+    cb->sampling.envPdfEpsilon = m_rtEnvPdfEpsilon;
+    cb->sampling.envDeltaRoughnessCutoff = m_rtEnvDeltaRoughnessCutoff;
+    cb->sampling.envMISPower = m_rtEnvMISPower;
+
+    cb->sampling.envNeeFireflyGuard =
+        m_rtEnvNeeFireflyGuard ? 1u : 0u;
+
+    cb->sampling.envAliasVersion =
+        m_rtEnvAliasVersion;
+
+    cb->sampling.envNeeMaxRadiance =
+        std::max(1e-4f, m_rtEnvNeeMaxRadiance);
+
+    cb->sampling.pad1 = 0.0f;
+
     return alloc.gpu;
 }
 
@@ -5259,7 +5366,7 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
     r.wantsDiffuseAlbedoDebug = IsDiffuseAlbedoDebug(debugView);
     r.wantsDiffuseDemodDebug = IsDiffuseDemodulateDebug(debugView);
     r.wantsOutlierClampDebug = IsOutlierClampDebug(debugView);
-
+    r.wantsRtSamplingDebug = IsRtSamplingDebug(debugView);
     r.wantsSpatialDebug = r.wantsSvgfDebug;
 
     r.wantsRtPostDebug =
@@ -5276,7 +5383,8 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
         r.wantsSurfaceIdDebug ||
         r.wantsDiffuseAlbedoDebug ||
         r.wantsDiffuseDemodDebug ||
-        r.wantsOutlierClampDebug;
+        r.wantsOutlierClampDebug ||
+        r.wantsRtSamplingDebug;
 
     r.wantsRtInspectionDebug =
         r.wantsRtPostDebug ||
@@ -5286,7 +5394,8 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
         r.wantsMotionDebug ||
         r.wantsViewZDebug ||
         r.wantsSurfaceIdDebug ||
-        r.wantsDiffuseAlbedoDebug)
+        r.wantsDiffuseAlbedoDebug ||
+        r.wantsRtSamplingDebug)
     {
         r.owner = RtDebugOwner::RayGen;
     }
@@ -6901,4 +7010,273 @@ bool Renderer::RunRtOutlierClamp(
 
     CmdEndEvent(cmdList);
     return true;
+}
+
+void Renderer::WriteNullRtEnvAliasSrv(D3D12_CPU_DESCRIPTOR_HANDLE dst) const
+{
+    ID3D12Device* device = m_device5.Get();
+    if (!device)
+        return;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = DXGI_FORMAT_UNKNOWN;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Buffer.FirstElement = 0;
+    srv.Buffer.NumElements = 1;
+    srv.Buffer.StructureByteStride = sizeof(RtEnvAliasEntry);
+    srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+    device->CreateShaderResourceView(nullptr, &srv, dst);
+}
+
+void Renderer::WriteRtEnvAliasSrv(D3D12_CPU_DESCRIPTOR_HANDLE dst) const
+{
+    if (!m_device5 ||
+        !m_rtEnvAliasReady ||
+        !m_rtEnvAliasBuffer ||
+        m_rtEnvAliasCount == 0)
+    {
+        WriteNullRtEnvAliasSrv(dst);
+        return;
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = DXGI_FORMAT_UNKNOWN;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Buffer.FirstElement = 0;
+    srv.Buffer.NumElements = m_rtEnvAliasCount;
+    srv.Buffer.StructureByteStride = sizeof(RtEnvAliasEntry);
+    srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+    m_device5->CreateShaderResourceView(
+        m_rtEnvAliasBuffer.Get(),
+        &srv,
+        dst);
+}
+
+bool Renderer::EnsureRtEnvironmentAlias(ID3D12Device* device, CommandList& cl)
+{
+    if (!device)
+        return false;
+
+    if (!m_rtEnvAliasDirty &&
+        m_rtEnvAliasReady &&
+        m_rtEnvAliasBuffer &&
+        m_rtEnvAliasCount > 0)
+    {
+        return true;
+    }
+
+    bool built = false;
+
+    if (m_rtEnvCpuRadianceReady &&
+        !m_rtEnvCpuRadiance.empty() &&
+        m_rtEnvCpuFaceSize > 0)
+    {
+        built = m_rtEnvImportance.BuildFromCubeFaces(
+            m_rtEnvCpuRadiance,
+            m_rtEnvCpuFaceSize);
+    }
+
+    if (!built)
+    {
+        const uint32_t fallbackFaceSize =
+            (m_rtEnvFaceSize > 0)
+            ? m_rtEnvFaceSize
+            : kRtEnvImportanceFallbackFaceSize;
+
+        built = m_rtEnvImportance.BuildUniformFallback(fallbackFaceSize);
+    }
+
+    std::string validateError;
+    if (!built || !m_rtEnvImportance.Validate(&validateError))
+    {
+        built = m_rtEnvImportance.BuildUniformFallback(
+            kRtEnvImportanceFallbackFaceSize);
+    }
+
+    validateError.clear();
+    if (!built || !m_rtEnvImportance.Validate(&validateError))
+    {
+        m_rtEnvAliasReady = false;
+        m_rtEnvAliasDirty = true;
+        m_rtEnvAliasCount = 0;
+        m_rtEnvFaceSize = 0;
+        m_rtEnvTotalWeight = 0.0f;
+        m_rtEnvAliasFallback = true;
+        return false;
+    }
+
+    const std::vector<RtEnvAliasEntry>& entries = m_rtEnvImportance.Entries();
+    if (entries.empty())
+    {
+        m_rtEnvAliasReady = false;
+        m_rtEnvAliasDirty = true;
+        m_rtEnvAliasCount = 0;
+        m_rtEnvFaceSize = 0;
+        m_rtEnvTotalWeight = 0.0f;
+        m_rtEnvAliasFallback = true;
+        return false;
+    }
+
+    const uint64_t byteSize =
+        static_cast<uint64_t>(entries.size()) *
+        static_cast<uint64_t>(sizeof(RtEnvAliasEntry));
+
+    ComPtr<ID3D12Resource> aliasBuffer;
+    ComPtr<ID3D12Resource> aliasUpload;
+
+    {
+        CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+        auto desc = CD3DX12_RESOURCE_DESC::Buffer(byteSize);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heapProps,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                nullptr,
+                IID_PPV_ARGS(&aliasBuffer)),
+            "Create RT environment alias buffer");
+
+        SetD3D12ObjectName(aliasBuffer.Get(), L"RT Environment Alias Buffer");
+        CommandList::SetGlobalState(aliasBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST);
+    }
+
+    {
+        CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_UPLOAD);
+        auto desc = CD3DX12_RESOURCE_DESC::Buffer(byteSize);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heapProps,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_GENERIC_READ,
+                nullptr,
+                IID_PPV_ARGS(&aliasUpload)),
+            "Create RT environment alias upload buffer");
+
+        SetD3D12ObjectName(aliasUpload.Get(), L"RT Environment Alias Upload");
+    }
+
+    void* mapped = nullptr;
+    D3D12_RANGE readRange{ 0, 0 };
+
+    ThrowIfFailed(
+        aliasUpload->Map(0, &readRange, &mapped),
+        "Map RT environment alias upload buffer");
+
+    std::memcpy(
+        mapped,
+        entries.data(),
+        static_cast<size_t>(byteSize));
+
+    D3D12_RANGE writtenRange{ 0, static_cast<SIZE_T>(byteSize) };
+    aliasUpload->Unmap(0, &writtenRange);
+
+    cl.Get()->CopyBufferRegion(
+        aliasBuffer.Get(),
+        0,
+        aliasUpload.Get(),
+        0,
+        byteSize);
+
+    cl.Transition(
+        aliasBuffer.Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.FlushBarriers();
+
+    m_rtEnvAliasBuffer = aliasBuffer;
+    m_rtEnvAliasUpload = aliasUpload;
+
+    m_rtEnvAliasCount = m_rtEnvImportance.AliasCount();
+    m_rtEnvFaceSize = m_rtEnvImportance.FaceSize();
+    m_rtEnvTotalWeight = m_rtEnvImportance.TotalWeight();
+    m_rtEnvAliasFallback = m_rtEnvImportance.IsFallback();
+
+    m_rtEnvAliasReady = true;
+    m_rtEnvAliasDirty = false;
+
+    return true;
+}
+
+bool Renderer::LoadRtEnvironmentCpuRadiance(const std::filesystem::path& path)
+{
+    ClearRtEnvironmentCpuRadiance();
+
+    if (path.empty() || !std::filesystem::exists(path))
+    {
+        DebugOutput("Warning: RT environment CPU radiance source missing. Using uniform alias fallback.");
+        return false;
+    }
+
+    std::vector<DirectX::XMFLOAT3> radiance;
+
+    if (!LoadLatLongEnvironmentAsCubeFaces(
+        path,
+        kRtEnvImportanceFaceSize,
+        radiance))
+    {
+        DebugOutput("Warning: failed to load RT environment CPU radiance. Using uniform alias fallback.");
+        return false;
+    }
+
+    const size_t expectedCount =
+        static_cast<size_t>(6u) *
+        static_cast<size_t>(kRtEnvImportanceFaceSize) *
+        static_cast<size_t>(kRtEnvImportanceFaceSize);
+
+    if (radiance.size() != expectedCount)
+    {
+        DebugOutput("Warning: RT environment CPU radiance size mismatch. Using uniform alias fallback.");
+        return false;
+    }
+
+    m_rtEnvCpuRadiance = std::move(radiance);
+    m_rtEnvCpuFaceSize = kRtEnvImportanceFaceSize;
+    m_rtEnvCpuRadianceReady = true;
+
+    m_rtEnvAliasDirty = true;
+    m_rtEnvAliasReady = false;
+    m_rtEnvAliasBuffer.Reset();
+    m_rtEnvAliasUpload.Reset();
+
+    m_rtEnvAliasCount = 0;
+    m_rtEnvFaceSize = 0;
+    m_rtEnvTotalWeight = 0.0f;
+    m_rtEnvAliasFallback = true;
+    ++m_rtEnvAliasVersion;
+
+    DebugOutput("RT environment CPU radiance loaded for importance sampling.");
+    return true;
+}
+
+void Renderer::ClearRtEnvironmentCpuRadiance()
+{
+    const bool hadEnvSource =
+        m_rtEnvCpuRadianceReady ||
+        m_rtEnvAliasReady ||
+        !m_rtEnvCpuRadiance.empty();
+
+    m_rtEnvCpuRadiance.clear();
+    m_rtEnvCpuFaceSize = 0;
+    m_rtEnvCpuRadianceReady = false;
+
+    m_rtEnvAliasDirty = true;
+    m_rtEnvAliasReady = false;
+    m_rtEnvAliasBuffer.Reset();
+    m_rtEnvAliasUpload.Reset();
+
+    m_rtEnvAliasCount = 0;
+    m_rtEnvFaceSize = 0;
+    m_rtEnvTotalWeight = 0.0f;
+    m_rtEnvAliasFallback = true;
+
+    if (hadEnvSource)
+        ++m_rtEnvAliasVersion;
 }

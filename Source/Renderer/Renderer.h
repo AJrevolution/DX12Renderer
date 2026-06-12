@@ -29,6 +29,8 @@
 #include "Source/Renderer/Passes/RtHitDistReconstructPass.h"
 #include "Source/Renderer/Passes/RtDiffuseDemodulatePass.h"
 #include "Source/Renderer/Passes/RtOutlierClampPass.h"
+#include "Source/Renderer/RtEnvironmentImportance.h"
+#include "Source/Renderer/RtEnvironmentMapCpu.h"
 
 class Renderer
 {
@@ -55,6 +57,15 @@ public:
 
 
 private:
+
+    enum class RtEnvSamplingMode : uint32_t
+    {
+        BrdfOnly = 0,
+        EnvOnly = 1,
+        MisOneSample = 2,
+        MisTwoSampleReference = 3
+    };
+
     struct RtTemporalConstants
     {
         DirectX::XMFLOAT4X4 currInvViewProj{};
@@ -124,6 +135,30 @@ private:
     };
     static_assert((sizeof(RtTemporalConstants) % 16) == 0, "RtTemporalConstants must be 16-byte aligned.");
 
+    struct RtSamplingConstants
+    {
+        uint32_t envSamplingMode = 3; // RtEnvSamplingMode::MisTwoSampleReference
+        uint32_t useEnvImportanceSampling = 1;
+        uint32_t useEnvMIS = 1;
+        uint32_t envAliasCount = 0;
+
+        uint32_t envFaceSize = 0;
+        uint32_t envAliasFallback = 1;
+        uint32_t samplingDebugView = 0;
+        uint32_t useEnvNeeForFinal = 0;
+
+        float envIntensity = 1.0f;
+        float envPdfEpsilon = 1e-6f;
+        float envDeltaRoughnessCutoff = 0.04f;
+        float envMISPower = 2.0f;
+
+        uint32_t envNeeFireflyGuard = 1;
+        uint32_t envAliasVersion = 0;
+        float envNeeMaxRadiance = 20.0f;
+        float pad1 = 0.0f;
+    };
+    static_assert((sizeof(RtSamplingConstants) % 16) == 0, "RtSamplingConstants must be 16-byte aligned.");
+
     struct RtRayGenConstants
     {
         DirectX::XMFLOAT4X4 prevViewProj{};
@@ -133,6 +168,8 @@ private:
 
         uint32_t hasPrevMotion = 0;
         uint32_t pad0[3] = {};
+
+        RtSamplingConstants sampling{};
     };
     static_assert((sizeof(RtRayGenConstants) % 16) == 0, "RtRayGenConstants must be 16-byte aligned.");
     
@@ -599,6 +636,7 @@ private:
         bool wantsSpatialDebug = false;
 
         bool wantsOutlierClampDebug = false;
+        bool wantsRtSamplingDebug = false;
 
         RtDebugOwner owner = RtDebugOwner::None;
 
@@ -658,6 +696,18 @@ private:
     static bool IsOutlierClampDebug(uint32_t dv)
     {
         return dv == 81 || dv == 82 || dv == 83 || dv == 86;
+    }
+
+    static bool IsRtSamplingDebug(uint32_t dv)
+    {
+        return dv == 96 ||
+            dv == 97 ||
+            dv == 98 ||
+            dv == 99 ||
+            dv == 100 ||
+            dv == 101 ||
+            dv == 102 ||
+            dv == 103;
     }
 
     std::vector<DrawItem> m_draws;
@@ -1015,6 +1065,13 @@ private:
         bool useMotionConf,
         bool writeDebug);
 
+    bool LoadRtEnvironmentCpuRadiance(const std::filesystem::path& path);
+    void ClearRtEnvironmentCpuRadiance();
+
+    bool EnsureRtEnvironmentAlias(ID3D12Device* device, CommandList& cl);
+    void WriteNullRtEnvAliasSrv(D3D12_CPU_DESCRIPTOR_HANDLE dst) const;
+    void WriteRtEnvAliasSrv(D3D12_CPU_DESCRIPTOR_HANDLE dst) const;
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -1156,6 +1213,18 @@ private:
     //   94 = wide-iteration suppression mask; black when spec A-Trous (m_rtAtrousIterationsSpec + prev) runs fewer than 3 iterations
     //   95 = variance/history instability
     // 
+    // RT environment sampling / RayGen-owned views:
+    // These are RT sampling / environment importance-sampling inspection views.
+    // The RT post stack must stay disabled.
+    //   96  = env alias/PDF heatmap; horizontal pixel coordinate scans the alias table
+    //   97  = sampled env direction/PDF visualization
+    //   98  = env NEE MIS weight heatmap
+    //   99  = env visibility mask
+    //   100 = direct env NEE luminance
+    //   101 = BRDF env-hit luminance approximation after env-hit MIS
+    //   102 = env sampling technique/mode; red = BRDF-only, green = env-only, blue = MIS reference
+    //   103 = env sampling fallback/readiness mask; magenta = invalid/fallback, green = ready
+    // 
     // Future rule:
     //   Do not use broad contiguous checks such as 32..47.
     //   Always route by the owning pass namespace.
@@ -1255,8 +1324,45 @@ private:
     bool     m_rtEnableIndirect = true;  // 1-bounce diffuse GI
     float    m_rtIndirectScale = 1.0f;   // tuning knob
 
+    // RT environment importance sampling.
+    // CPU builder owns the alias/PDF data; GPU resources are uploaded later.
+    RtEnvironmentImportance m_rtEnvImportance;
+
+    ComPtr<ID3D12Resource> m_rtEnvAliasBuffer;
+    ComPtr<ID3D12Resource> m_rtEnvAliasUpload;
+
+    bool m_rtEnvAliasReady = false;
+    bool m_rtEnvAliasDirty = true;
+
+    uint32_t m_rtEnvAliasCount = 0;
+    uint32_t m_rtEnvFaceSize = 0;
+    float m_rtEnvTotalWeight = 0.0f;
+    bool m_rtEnvAliasFallback = true;
+
+    // Start conservative for validation. After debug views/energy parity pass,
+    // this can move to MisOneSample.
+    RtEnvSamplingMode m_rtEnvSamplingMode = RtEnvSamplingMode::BrdfOnly;
+
+    bool m_rtUseEnvImportanceSampling = true;
+    bool m_rtUseEnvMIS = false;
+    float m_rtEnvMISPower = 2.0f;
+    float m_rtEnvIntensity = 1.0f;
+    float m_rtEnvPdfEpsilon = 1e-6f;
+    float m_rtEnvDeltaRoughnessCutoff = 0.04f;
+    bool m_rtUseEnvNeeForFinal = false;
+    bool m_prevRtUseEnvNeeForFinal = false;
+
     bool  m_prevRtEnableIndirect = true;
     float m_prevRtIndirectScale = 1.0f;
+
+    // Previous-frame copies for accumulation/history reset detection.
+    RtEnvSamplingMode m_prevRtEnvSamplingMode = RtEnvSamplingMode::MisTwoSampleReference;
+    bool m_prevRtUseEnvImportanceSampling = true;
+    bool m_prevRtUseEnvMIS = true;
+    float m_prevRtEnvMISPower = 2.0f;
+    float m_prevRtEnvIntensity = 1.0f;
+    float m_prevRtEnvPdfEpsilon = 1e-6f;
+    float m_prevRtEnvDeltaRoughnessCutoff = 0.04f;
 
     Mesh m_floor;
     Material m_floorMaterial;
@@ -1284,8 +1390,9 @@ private:
         ComPtr<ID3D12Resource> instanceDataUpload; // upload heap
         DescriptorAllocator::Allocation instanceDataSrv{}; 
 
-        // per-frame RT table: geometry + instance data + material textures
+        // per-frame RT table: geometry + instance data + material textures + RT IBL/sampling SRVs.
         DescriptorAllocator::Allocation geometryTable{};
+        uint32_t geometryTableCount = 0;
 
         DescriptorAllocator::Allocation temporalDiffuseSrvTable{};     // kRtTemporalSrvCount SRVs
         DescriptorAllocator::Allocation temporalDiffuseUavTable{};     // kRtTemporalUavCount UAVs
@@ -1407,16 +1514,31 @@ private:
     static constexpr uint32_t kRtMaterialGlossy = 3;
 
     static constexpr uint32_t kRtIblSrvCount = 3;
+    static constexpr uint32_t kRtSamplingSrvCount = 1;
+
+    static constexpr uint32_t kRtSrvTableCountWithoutSampling =
+        kRtGeometrySrvCount +
+        (kRtTexturesPerMaterial * kMaxRtMaterials) +
+        kRtIblSrvCount;
+
     static constexpr uint32_t kRtSrvTableCount =
-        kRtGeometrySrvCount + (kRtTexturesPerMaterial * kMaxRtMaterials) + kRtIblSrvCount;
+        kRtSrvTableCountWithoutSampling +
+        kRtSamplingSrvCount;
 
     static constexpr uint32_t kRtSrv_BrdfLut =
-        kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 0; // t30
-    static constexpr uint32_t kRtSrv_IblDiff =
-        kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 1; // t31
-    static constexpr uint32_t kRtSrv_IblSpec =
-        kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 2; // t32
+        kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 0; // slot 29, HLSL t30
 
+    static constexpr uint32_t kRtSrv_IblDiff =
+        kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 1; // slot 30, HLSL t31
+
+    static constexpr uint32_t kRtSrv_IblSpec =
+        kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 2; // slot 31, HLSL t32
+
+    static constexpr uint32_t kRtSrv_EnvAlias =
+        kRtSrvTableCountWithoutSampling; // slot 32, HLSL t33
+
+    static constexpr uint32_t kRtEnvImportanceFaceSize = 128;
+    static constexpr uint32_t kRtEnvImportanceFallbackFaceSize = 64;
 
 
     ComPtr<ID3D12Resource> m_rtAovNormal;
@@ -1607,6 +1729,7 @@ private:
     static constexpr float kRtDistanceNormSigma = 0.08f;
     static constexpr uint32_t kRtOutlierClampSrvCount = 7;
     static constexpr uint32_t kRtOutlierClampUavCount = 2;
+    static constexpr bool kRtEnvNeeFireflyGuardDefault = true;
 
     RtDiffuseDemodulatePass m_rtDiffuseDemodulatePass;
 
@@ -1714,6 +1837,19 @@ private:
     float m_rtAdaptiveSigmaLMin = 0.5f;
     float m_rtAdaptiveSigmaLMax = 2.0f;
     float m_rtAdaptiveNormalRelaxation = 0.25f;
+
+    std::vector<DirectX::XMFLOAT3> m_rtEnvCpuRadiance;
+    uint32_t m_rtEnvCpuFaceSize = 0;
+    bool m_rtEnvCpuRadianceReady = false;
+
+    bool m_rtEnvNeeFireflyGuard = kRtEnvNeeFireflyGuardDefault;
+    float m_rtEnvNeeMaxRadiance = 20.0f;
+
+    bool m_prevRtEnvNeeFireflyGuard = kRtEnvNeeFireflyGuardDefault;
+    float m_prevRtEnvNeeMaxRadiance = 20.0f;
+
+    uint32_t m_rtEnvAliasVersion = 0;
+    uint32_t m_prevRtEnvAliasVersion = 0;
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };
