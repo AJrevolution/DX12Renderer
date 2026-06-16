@@ -1,6 +1,7 @@
 #include "Common.hlsli"
 #include "PBR.hlsli"
 #include "RtSampling.hlsli"
+#include "RtReservoir.hlsli"
 
 #define RT_MAX_MATERIALS 8
 #define RT_TEXTURES_PER_MATERIAL 3
@@ -97,6 +98,16 @@ cbuffer RtRayGenConstants : register(b1)
     uint RtEnvAliasVersion;
     float RtEnvNeeMaxRadiance;
     float _padRtSampling1;
+    
+    uint RtEnableRestirEnvDi;
+    uint RtRestirInitialCandidateCount;
+    uint RtRestirDebugView;
+    uint RtRestirDispatchMode;
+
+    float RtRestirMaxM;
+    float RtRestirMaxAge;
+    float RtRestirMinTarget;
+    float RtRestirMaxWeight;
 };
 
 static const uint RT_RAY_PRIMARY_DIFFUSE = 0u;
@@ -148,6 +159,9 @@ RWTexture2D<float2>                 g_AovMotion : register(u5);         // prevU
 RWTexture2D<float>                  g_AovViewZRaw : register(u6);       // primary ray distance / ViewZ-compatible guide, -1 invalid
 RWTexture2D<uint>                   g_AovSurfaceId : register(u7);      // object/material id, 0xFFFFFFFF invalid
 RWTexture2D<float4>                 g_AovDiffuseAlbedo : register(u8);  // rgb=diffuse albedo, a=stable demod flag
+RWStructuredBuffer<RtRestirReservoir> g_RestirInitialReservoir : register(u9);
+RWTexture2D<float4>                 g_RestirResolvedDiffuse : register(u10);
+RWTexture2D<float4>                 g_RestirResolvedSpec : register(u11);
 StructuredBuffer<VertexRT>          g_QuadVerts : register(t1);
 ByteAddressBuffer                   g_QuadIndices : register(t2);
 StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);
@@ -160,10 +174,12 @@ Texture2D<float4> g_BRDFLut : register(t30);
 Texture2D<float4> g_IBLDiffuse : register(t31);
 Texture2D<float4> g_IBLSpecular : register(t32);
 StructuredBuffer<RtEnvAliasEntry> g_EnvAlias : register(t33);
+StructuredBuffer<RtRestirReservoir> g_RestirResolveReservoir : register(t34);
 // t1..t5   geometry + instance data
 // t6..t29  8 materials × 3 textures
 // t30..t32 IBL resources
 // t33      RT environment alias table
+// t34      selected ReSTIR reservoir for DXR resolve
 SamplerState                        g_LinearWrap : register(s0);
 SamplerState                        g_LinearClamp : register(s1);
 
@@ -1015,6 +1031,51 @@ float3 RtSamplingFallbackMask()
     return invalid ? float3(1.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f);
 }
 
+bool IsRtRestirInitialDebugView(uint dv)
+{
+    return
+        dv == 104u ||
+        dv == 105u;
+}
+
+bool IsRtRestirResolveDebugView(uint dv)
+{
+    return
+        dv == 110u ||
+        dv == 111u ||
+        dv == 112u ||
+        dv == 113u ||
+        dv == 114u;
+}
+
+bool IsRtRestirTemporalDebugView(uint dv)
+{
+    return dv == 106u || dv == 107u;
+}
+
+bool IsRtRestirSpatialDebugView(uint dv)
+{
+    return dv == 108u || dv == 109u;
+}
+
+bool IsRtRestirDebugView(uint dv)
+{
+    return
+        IsRtRestirInitialDebugView(dv) ||
+        IsRtRestirTemporalDebugView(dv) ||
+        IsRtRestirSpatialDebugView(dv) ||
+        IsRtRestirResolveDebugView(dv);
+}
+
+bool RestirInitialEnabled()
+{
+    return
+        RtRestirDispatchMode == 0u &&
+        (
+            RtEnableRestirEnvDi != 0u ||
+            IsRtRestirInitialDebugView(RtRestirDebugView)
+        );
+}
 
 // RT IBL parity target:
 // - same latlong UV mapping convention as raster
@@ -1027,6 +1088,18 @@ void RayGen()
 {
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 dim = DispatchRaysDimensions().xy;
+    
+    uint pixelIndex = pixel.y * dim.x + pixel.x;
+
+    bool restirInitialEnabled = RestirInitialEnabled();
+    bool isRtRestirInitialDebug = IsRtRestirInitialDebugView(RtRestirDebugView);
+
+    if (restirInitialEnabled)
+    {
+        RtRestirReservoir empty;
+        ReservoirClear(empty);
+        g_RestirInitialReservoir[pixelIndex] = empty;
+    }
     
     uint samplingDebugView = RtSamplingDebugView;
     bool isRtSamplingDebug = IsRtSamplingDebugView(samplingDebugView);
@@ -1055,13 +1128,22 @@ void RayGen()
         DebugView == 67 ||
         DebugView == 68;
     
+    bool isRtRestirResolveDispatch =
+        RtRestirDispatchMode == 1u;
+
+    bool isRtRestirDebug =
+        IsRtRestirDebugView(RtRestirDebugView);
+    
     bool bypassAccum = 
         (RtAccumulate == 0) ||
         isRtShadingDebug ||
         isMotionDebug ||
         isViewZDebug ||
         isSurfaceIdDebug ||
-        isDiffuseAlbedoDebug;
+        isDiffuseAlbedoDebug ||
+        isRtRestirInitialDebug ||
+        isRtRestirResolveDispatch ||
+        isRtRestirDebug;
     
     g_AovViewZRaw[pixel] = RT_VIEWZ_INVALID;
     g_AovSurfaceId[pixel] = RT_SURFACE_ID_INVALID;
@@ -1137,15 +1219,14 @@ void RayGen()
     RayDesc ray;
     ray.Origin = nearP.xyz;
     ray.Direction = SafeNormalize(farP.xyz - nearP.xyz);
-    ray.TMin = 0.001;
-    ray.TMax = 10000.0;
+    ray.TMin = 0.001f;
+    ray.TMax = 10000.0f;
 
     float3 oldDiff =
         (!bypassAccum && RtSampleIndex != 0) ? g_AccumDiff[pixel].rgb : 0.0f.xxx;
 
     float3 oldSpec =
         (!bypassAccum && RtSampleIndex != 0) ? g_AccumSpec[pixel].rgb : 0.0f.xxx;
-     
 
     RayPayload diffPayload;
     diffPayload.color = 0.0f.xxx;
@@ -1153,7 +1234,64 @@ void RayGen()
     diffPayload.occluded = 0u;
     diffPayload.rng = diffRng;
 
-    TraceRay(g_Scene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFF, 0, 1, 0, ray, diffPayload);
+    TraceRay(
+        g_Scene,
+        RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+        0xFF,
+        0,
+        1,
+        0,
+        ray,
+        diffPayload);
+
+    // ReSTIR resolve mode is authored by closest-hit / miss directly into
+    // g_RestirResolvedDiffuse, g_RestirResolvedSpec, and optional debug output.
+    // Do not let normal RayGen beauty/accumulation overwrite it.
+    if (RtRestirDispatchMode == 1u)
+    {
+        return;
+    }
+
+    // 104/105 must run after the primary trace because closest-hit writes
+    // g_RestirInitialReservoir.
+    if (isRtRestirInitialDebug)
+    {
+        RtRestirReservoir rr = g_RestirInitialReservoir[pixelIndex];
+
+        if (RtRestirDebugView == 104u)
+        {
+            if (!ReservoirValid(rr))
+            {
+                g_Output[pixel] = float4(0.0f, 0.0f, 0.05f, 1.0f);
+                return;
+            }
+
+            float targetLum = ReservoirTarget(rr);
+
+            float v = saturate(log2(1.0f + targetLum * 10.0f) / 10.0f);
+
+            g_Output[pixel] = float4(RtHeat(v), 1.0f);
+            return;
+        }
+
+        if (RtRestirDebugView == 105u)
+        {
+            if (!ReservoirValid(rr))
+            {
+                g_Output[pixel] = float4(0.0f, 0.0f, 0.05f, 1.0f);
+                return;
+            }
+
+            float sourcePdf = ReservoirSourcePdf(rr);
+
+            // Stronger scale for bring-up. The original log2(1 + pdf) / 8
+            // can look nearly all blue if pdf values are small.
+            float v = saturate(log2(1.0f + sourcePdf * 1000.0f) / 12.0f);
+
+            g_Output[pixel] = float4(RtHeat(v), 1.0f);
+            return;
+        }
+    }
 
     // AOV debug views are produced by the diffuse primary trace.
     if (DebugView == 12)
@@ -1373,6 +1511,32 @@ void RayGen()
 void Miss(inout RayPayload payload)
 {
     payload.occluded = 0u;
+    
+    if (RtRestirDispatchMode == 1u &&
+    payload.rayType == RT_RAY_PRIMARY_DIFFUSE)
+    {
+        uint2 pixel = DispatchRaysIndex().xy;
+
+        g_RestirResolvedDiffuse[pixel] = float4(0.0f.xxx, 1.0f);
+        g_RestirResolvedSpec[pixel] = float4(0.0f.xxx, 1.0f);
+
+        if (RtRestirDebugView == 110u ||
+            RtRestirDebugView == 111u ||
+            RtRestirDebugView == 112u ||
+            RtRestirDebugView == 113u)
+        {
+            g_Output[pixel] = float4(0.0f.xxx, 1.0f);
+        }
+        else if (RtRestirDebugView == 114u)
+        {
+            // B = no current surface / primary miss.
+            g_Output[pixel] = float4(0.0f, 0.0f, 1.0f, 1.0f);
+        }
+
+        payload.color = 0.0f.xxx;
+        return;
+    }
+    
     if (payload.rayType == RT_RAY_SHADOW)
     {
         return;
@@ -1463,6 +1627,9 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         geomNormal = -geomNormal;
 
     RTInstanceData data = g_InstanceData[instanceID];
+    
+    
+    uint currentSurfaceId = MakeSurfaceId(data.objectId, data.materialId);
 
     float3 T = SafeNormalize(surface.worldTangent - geomNormal * dot(surface.worldTangent, geomNormal));
     float3 B = SafeNormalize(cross(geomNormal, T)) * surface.tangentSign;
@@ -1524,7 +1691,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         g_AovNormal[pixel] = float4(geomNormal * 0.5f + 0.5f, roughness);
         g_AovDepth[pixel] = depth01;
         g_AovMotion[pixel] = prevUV;
-        g_AovSurfaceId[pixel] = MakeSurfaceId(data.objectId, data.materialId);
+        g_AovSurfaceId[pixel] = currentSurfaceId;
         
         // Linear primary visible-surface distance in world units.
         // Current implementation stores RayT along the primary camera ray.
@@ -1536,6 +1703,203 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         float stableAlbedo = DiffuseAlbedoStable(diffuseAlbedo) ? 1.0f : 0.0f;
 
         g_AovDiffuseAlbedo[pixel] = float4(diffuseAlbedo, stableAlbedo);
+    }
+    
+    if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE &&
+    RestirInitialEnabled())
+    {
+        uint2 pixel = DispatchRaysIndex().xy;
+        uint2 dim = DispatchRaysDimensions().xy;
+        uint pixelIndex = pixel.y * dim.x + pixel.x;
+
+        RtRestirReservoir r;
+        ReservoirClear(r);
+
+        uint rrng = InitRtEnvRng(pixel, 107u, payload.rayType);
+
+        uint candidateCount = max(1u, RtRestirInitialCandidateCount);
+
+    [loop]
+        for (uint i = 0u; i < candidateCount; ++i)
+        {
+            RtEnvRandoms envRand = MakeRtEnvRandoms(107u, i);
+
+            EnvSample env = SampleEnvironment(
+                envRand.uEnvSelect,
+                envRand.uEnvTexel);
+
+            if (!env.valid)
+                continue;            
+
+            float NoL = saturate(dot(worldNormal, env.wi));
+            if (NoL <= 1e-4f || dot(geomNormal, env.wi) <= 0.0f)
+                continue;          
+
+            PbrSplit brdf = EvalEnvBrdfSplit(
+                base,
+                metallic,
+                roughness,
+                worldNormal,
+                V,
+                env.wi);
+
+            float3 unoccluded =
+                env.Li *
+                (brdf.diffuse + brdf.spec) *
+                NoL;
+
+            float targetLum = RtDebugLuminance(unoccluded);
+
+            if (targetLum <= RtRestirMinTarget)
+                continue;
+            
+            RtRestirReservoir candidate =
+                MakeRestirCandidate(
+                    env.wi,
+                    env.Li,
+                    env.pdf,
+                    targetLum,
+                    env.index,
+                    currentSurfaceId);          
+
+            float candidateWeight =
+                ReservoirCandidateWeight(
+                    targetLum,
+                    env.pdf);
+
+            ReservoirUpdate(
+                r,
+                candidate,
+                candidateWeight,
+                rrng);
+        }
+
+        ReservoirFinalize(
+            r,
+            RtRestirMaxM,
+            RtRestirMaxWeight);
+
+        g_RestirInitialReservoir[pixelIndex] = r;
+    }
+    
+    if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE &&
+    RtRestirDispatchMode == 1u)
+    {
+        uint2 pixel = DispatchRaysIndex().xy;
+        uint2 dim = DispatchRaysDimensions().xy;
+        uint pixelIndex = pixel.y * dim.x + pixel.x;
+
+        RtRestirReservoir rr = g_RestirResolveReservoir[pixelIndex];
+
+        float3 outDiffuse = 0.0f.xxx;
+        float3 outSpec = 0.0f.xxx;
+
+        float debugW = 0.0f;
+        float debugVisibility = 0.0f;
+        float debugDiffuseLum = 0.0f;
+        float debugSpecLum = 0.0f;
+
+        float3 invalidReason = 0.0f.xxx;
+
+        if (!ReservoirValid(rr))
+        {
+            invalidReason.r = 1.0f;
+        }
+        else if (rr.surfaceId != currentSurfaceId)
+        {
+            invalidReason.g = 1.0f;
+        }
+        else
+        {
+            float3 wi = SafeNormalize(rr.sampleDir_pdf.xyz);
+            float3 Li = max(rr.sampleLi_target.xyz, 0.0f.xxx);
+
+            float NoL = saturate(dot(worldNormal, wi));
+
+            bool frontFacing =
+            NoL > 1e-4f &&
+            dot(geomNormal, wi) > 0.0f;
+
+            bool visible = false;
+
+            if (frontFacing)
+            {
+                visible = TraceEnvironmentVisibility(
+                worldPos,
+                geomNormal,
+                wi);
+            }
+
+            if (!frontFacing || !visible)
+            {
+                invalidReason.b = 1.0f;
+            }
+
+            debugVisibility = visible ? 1.0f : 0.0f;
+
+            if (visible)
+            {
+                PbrSplit brdf = EvalEnvBrdfSplit(
+                base,
+                metallic,
+                roughness,
+                worldNormal,
+                V,
+                wi);
+
+                float W =
+                min(
+                    RtRestirMaxWeight,
+                    max(0.0f, rr.weightSum_M_W.z));
+
+                debugW = W;
+
+                outDiffuse =
+                Li *
+                brdf.diffuse *
+                NoL *
+                W;
+
+                outSpec =
+                Li *
+                brdf.spec *
+                NoL *
+                W;
+
+                debugDiffuseLum = RtDebugLuminance(outDiffuse);
+                debugSpecLum = RtDebugLuminance(outSpec);
+            }
+        }
+
+        g_RestirResolvedDiffuse[pixel] = float4(outDiffuse, 1.0f);
+        g_RestirResolvedSpec[pixel] = float4(outSpec, 1.0f);
+
+        if (RtRestirDebugView == 110u)
+        {
+            float v = saturate(debugW / max(1.0f, RtRestirMaxWeight));
+            g_Output[pixel] = float4(RtHeat(v), 1.0f);
+        }
+        else if (RtRestirDebugView == 111u)
+        {
+            g_Output[pixel] = float4(debugVisibility.xxx, 1.0f);
+        }
+        else if (RtRestirDebugView == 112u)
+        {
+            float v = saturate(log2(1.0f + debugDiffuseLum) / 8.0f);
+            g_Output[pixel] = float4(RtHeat(v), 1.0f);
+        }
+        else if (RtRestirDebugView == 113u)
+        {
+            float v = saturate(log2(1.0f + debugSpecLum) / 8.0f);
+            g_Output[pixel] = float4(RtHeat(v), 1.0f);
+        }
+        else if (RtRestirDebugView == 114u)
+        {
+            g_Output[pixel] = float4(saturate(invalidReason), 1.0f);
+        }
+
+        payload.color = 0.0f.xxx;
+        return;
     }
     
     if (payload.rayType == RT_RAY_INDIRECT)

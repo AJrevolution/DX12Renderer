@@ -9,14 +9,16 @@ namespace
     static constexpr uint32_t kRtTexturesPerMaterial = 3;       // t6..t29, base/normal/orm per material
     static constexpr uint32_t kRtIblSrvCount = 3;               // t30..t32, BRDF LUT, IBL diffuse, IBL specular
     static constexpr uint32_t kRtSamplingSrvCount = 1;          // t33, RT env alias table
+    static constexpr uint32_t kRtRestirResolveSrvCount = 1;      // t34, ReSTIR resolve reservoir
 
     static constexpr uint32_t kRtSrvTableCount =
         kRtGeometrySrvCount +
         (kRtTexturesPerMaterial * kMaxRtMaterials) +
         kRtIblSrvCount +
-        kRtSamplingSrvCount;
+        kRtSamplingSrvCount +
+        kRtRestirResolveSrvCount;
 
-    static_assert(kRtSrvTableCount == 33, "DXR SRV table must cover t1..t33.");
+    static_assert(kRtSrvTableCount == 34, "DXR SRV table must cover t1..t34.");
 }
 
 static std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path)
@@ -36,7 +38,7 @@ void RaytracingPipeline::Initialize(ID3D12Device5* device, const std::filesystem
 void RaytracingPipeline::BuildRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE uavTable;
-    uavTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 9, 0, 0); 
+    uavTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 12, 0, 0); 
     // u0 = rtOutput
     // u1 = rtAccumDiffuse
     // u2 = rtAccumSpec
@@ -46,16 +48,19 @@ void RaytracingPipeline::BuildRootSignature(ID3D12Device* device)
     // u6 = aovPrimaryHitDistance
     // u7 = aovSurfaceId
     // u8 = aovDiffuseAlbedo
+    // u9  = ReSTIR initial reservoir
+    // u10 = ReSTIR resolved diffuse
+    // u11 = ReSTIR resolved spec
 
     CD3DX12_DESCRIPTOR_RANGE srvTable;
     srvTable.Init(
         D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
         kRtSrvTableCount,
         1,
-        0); // t1..t33: geometry, instance data, material textures, IBL, RT env alias table
+        0); // t1..t34: geometry, instance data, material textures, IBL, env alias, ReSTIR resolve reservoir
 
     CD3DX12_ROOT_PARAMETER params[5]{};
-    params[0].InitAsDescriptorTable(1, &uavTable); // u0..u8 RT UAV table
+    params[0].InitAsDescriptorTable(1, &uavTable); // u0..u11 RT UAV table
     params[1].InitAsShaderResourceView(0);         // t0 TLAS
     params[2].InitAsConstantBufferView(0);         // b0 frame
     params[3].InitAsDescriptorTable(1, &srvTable); // t1..expanded RT table

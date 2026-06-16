@@ -31,6 +31,9 @@
 #include "Source/Renderer/Passes/RtOutlierClampPass.h"
 #include "Source/Renderer/RtEnvironmentImportance.h"
 #include "Source/Renderer/RtEnvironmentMapCpu.h"
+#include "Source/Renderer/Passes/RtRestirTemporalPass.h"
+#include "Source/Renderer/Passes/RtRestirSpatialPass.h"
+#include "Source/Renderer/Passes/RtRestirApplyPass.h"
 
 class Renderer
 {
@@ -137,9 +140,9 @@ private:
 
     struct RtSamplingConstants
     {
-        uint32_t envSamplingMode = 3; // RtEnvSamplingMode::MisTwoSampleReference
+        uint32_t envSamplingMode = 0; // BrdfOnly
         uint32_t useEnvImportanceSampling = 1;
-        uint32_t useEnvMIS = 1;
+        uint32_t useEnvMIS = 0;
         uint32_t envAliasCount = 0;
 
         uint32_t envFaceSize = 0;
@@ -159,6 +162,20 @@ private:
     };
     static_assert((sizeof(RtSamplingConstants) % 16) == 0, "RtSamplingConstants must be 16-byte aligned.");
 
+    struct RtRestirConstants
+    {
+        uint32_t enableRestirEnvDi = 0;
+        uint32_t restirInitialCandidateCount = 1;
+        uint32_t restirDebugView = 0;
+        uint32_t restirDispatchMode = 0; // 0 = normal trace, 1 = resolve
+
+        float restirMaxM = 32.0f;
+        float restirMaxAge = 32.0f;
+        float restirMinTarget = 1e-5f;
+        float restirMaxWeight = 64.0f;
+    };
+    static_assert((sizeof(RtRestirConstants) % 16) == 0, "RtRestirConstants must be 16-byte aligned.");
+
     struct RtRayGenConstants
     {
         DirectX::XMFLOAT4X4 prevViewProj{};
@@ -170,9 +187,63 @@ private:
         uint32_t pad0[3] = {};
 
         RtSamplingConstants sampling{};
+        RtRestirConstants restir{};
     };
     static_assert((sizeof(RtRayGenConstants) % 16) == 0, "RtRayGenConstants must be 16-byte aligned.");
+
+    struct RtRestirTemporalConstants
+    {
+        DirectX::XMFLOAT2 invResolution{};
+        uint32_t temporalEnabled = 1;
+        uint32_t historyValid = 0;
+
+        uint32_t surfaceIdHistoryValid = 0;
+        uint32_t viewZHistoryValid = 0;
+        uint32_t debugView = 0;
+        uint32_t frameIndex = 0;
+
+        float depthSigma = 0.02f;
+        float normalSigma = 0.25f;
+        float roughnessSigma = 0.20f;
+        float viewZSigma = 0.08f;
+
+        float reprojectMinWeight = 0.25f;
+        float maxM = 32.0f;
+        float maxAge = 32.0f;
+        float maxWeight = 64.0f;
+    };
+    static_assert((sizeof(RtRestirTemporalConstants) % 16) == 0, "RtRestirTemporalConstants must be 16-byte aligned.");
     
+    struct RtRestirSpatialConstants
+    {
+        DirectX::XMFLOAT2 invResolution{};
+        uint32_t sampleCount = 4;
+        uint32_t radius = 8;
+
+        float normalSigma = 0.25f;
+        float depthSigma = 0.02f;
+        float roughnessSigma = 0.20f;
+        float viewZSigma = 0.08f;
+
+        float maxM = 32.0f;
+        float maxWeight = 64.0f;
+        uint32_t frameIndex = 0;
+        uint32_t debugView = 0;
+
+        DirectX::XMFLOAT3 distanceNormParams{ 1.0f, 0.0f, 1.0f };
+        float distanceNormSigma = 0.08f;
+    };
+    static_assert((sizeof(RtRestirSpatialConstants) % 16) == 0, "RtRestirSpatialConstants must be 16-byte aligned.");
+
+    struct RtRestirApplyConstants
+    {
+        float diffuseScale = 0.25f;
+        float specularScale = 0.25f;
+        uint32_t mode = 1;  // 0 = disabled, 1 = validation additive
+        uint32_t flags = 0;
+    };
+    static_assert((sizeof(RtRestirApplyConstants) % 16) == 0, "RtRestirApplyConstants must be 16-byte aligned.");
+
     struct RtAtrousConstants
     {
         DirectX::XMFLOAT2 invResolution{};
@@ -402,6 +473,18 @@ private:
         uint32_t pad0[3] = {};
     };
     static_assert((sizeof(RtCombineConstants) % 16) == 0, "RtCombineConstants must be 16-byte aligned.");
+
+    struct RtRestirReservoir
+    {
+        DirectX::XMFLOAT4 sampleDir_pdf{};
+        DirectX::XMFLOAT4 sampleLi_target{};
+        DirectX::XMFLOAT4 weightSum_M_W{};
+        uint32_t sampleIndex = 0;
+        uint32_t flags = 0;
+        uint32_t age = 0;
+        uint32_t surfaceId = 0xFFFFFFFFu;
+    };
+    static_assert(sizeof(RtRestirReservoir) == 64, "RtRestirReservoir must match HLSL layout.");
 
     // Denoiser shaping contract:
     //
@@ -638,6 +721,12 @@ private:
         bool wantsOutlierClampDebug = false;
         bool wantsRtSamplingDebug = false;
 
+        bool wantsRtRestirDebug = false;
+        bool wantsRtRestirRayGenDebug = false;
+        bool wantsRtRestirTemporalDebug = false;
+        bool wantsRtRestirSpatialDebug = false;
+        bool wantsRtRestirResolveDebug = false;
+
         RtDebugOwner owner = RtDebugOwner::None;
 
         bool DisablesPostStack() const
@@ -710,6 +799,41 @@ private:
             dv == 103;
     }
 
+    static bool IsRtRestirRayGenDebug(uint32_t dv)
+    {
+        return dv == 104 ||
+            dv == 105;
+    }
+
+    static bool IsRtRestirTemporalDebug(uint32_t dv)
+    {
+        return dv == 106 ||
+            dv == 107;
+    }
+
+    static bool IsRtRestirSpatialDebug(uint32_t dv)
+    {
+        return dv == 108 ||
+            dv == 109;
+    }
+
+    static bool IsRtRestirResolveDebug(uint32_t dv)
+    {
+        return dv == 110 ||
+            dv == 111 ||
+            dv == 112 ||
+            dv == 113 ||
+            dv == 114;
+    }
+
+    static bool IsRtRestirDebug(uint32_t dv)
+    {
+        return IsRtRestirRayGenDebug(dv) ||
+            IsRtRestirTemporalDebug(dv) ||
+            IsRtRestirSpatialDebug(dv) ||
+            IsRtRestirResolveDebug(dv);
+    }
+
     std::vector<DrawItem> m_draws;
 
     void BuildDrawList(float time);
@@ -760,7 +884,7 @@ private:
 
     void EnsureRtOutputSize(uint32_t width, uint32_t height);
     void EnsureRtInstanceData(uint32_t frameIndex);
-    void UpdateRtGeometryTable(uint32_t frameIndex);
+    void UpdateRtGeometryTable(uint32_t frameIndex, ID3D12Resource* restirResolveReservoir = nullptr);
 
     void WriteRtTextureSrv(
         ID3D12Device* device,
@@ -950,7 +1074,7 @@ private:
         float motionConfPower,
         ID3D12Resource* surfaceIdResource);
 
-    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRayGenConstants(uint32_t frameIndex);
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRayGenConstants(uint32_t frameIndex, uint32_t restirDispatchMode = 0);
     void CommitRtMotionWorlds();
 
     bool UpdateRtMotionDilateTables(
@@ -1071,6 +1195,100 @@ private:
     bool EnsureRtEnvironmentAlias(ID3D12Device* device, CommandList& cl);
     void WriteNullRtEnvAliasSrv(D3D12_CPU_DESCRIPTOR_HANDLE dst) const;
     void WriteRtEnvAliasSrv(D3D12_CPU_DESCRIPTOR_HANDLE dst) const;
+
+    void EnsureRtRestirResources(uint32_t width, uint32_t height);
+    void ResetRtRestirResources();
+    void ResetRtRestirHistory();
+
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRestirTemporalConstants(
+        uint32_t frameIndex,
+        uint32_t width,
+        uint32_t height,
+        bool temporalHistoryValid,
+        bool surfaceIdHistoryValid,
+        bool viewZHistoryValid);
+
+    bool UpdateRtRestirTemporalTables(
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        ID3D12Resource* prevTemporalReservoir,
+        ID3D12Resource* outTemporalReservoir,
+        ID3D12Resource* currPrevUvResource,
+        ID3D12Resource* currViewZResource,
+        ID3D12Resource* prevViewZResource,
+        ID3D12Resource* prevNormalResource,
+        ID3D12Resource* prevDepthResource,
+        ID3D12Resource* prevSurfaceIdResource,
+        uint32_t width,
+        uint32_t height);
+
+    bool RunRtRestirTemporal(
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height,
+        const RtDenoiserGuides& guides,
+        bool ranViewZReconstruct,
+        bool ranMotionDilate,
+        const RtDebugRouting& rtDebug);
+
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRestirSpatialConstants(
+        uint32_t frameIndex,
+        uint32_t width,
+        uint32_t height);
+
+    bool UpdateRtRestirSpatialTables(
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        ID3D12Resource* temporalReservoir,
+        ID3D12Resource* currNormalResource,
+        ID3D12Resource* currDepthResource,
+        ID3D12Resource* currSurfaceIdResource,
+        ID3D12Resource* currViewZResource,
+        ID3D12Resource* outSpatialReservoir,
+        uint32_t width,
+        uint32_t height);
+
+    bool RunRtRestirSpatial(
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height,
+        const RtDenoiserGuides& guides,
+        bool ranViewZReconstruct,
+        bool ranRestirTemporal,
+        const RtDebugRouting& rtDebug);
+
+    bool RunRtRestirResolve(
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height,
+        float sceneTime,
+        const RtDebugRouting& rtDebug);
+
+    bool UpdateRtRestirApplyTables(
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        ID3D12Resource* baseDiffuse,
+        ID3D12Resource* baseSpec,
+        ID3D12Resource* restirDiffuse,
+        ID3D12Resource* restirSpec,
+        ID3D12Resource* outDiffuse,
+        ID3D12Resource* outSpec);
+
+    bool RunRtRestirApplyBeauty(
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height,
+        const RtDebugRouting& rtDebug);
+
+    D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRestirApplyConstants(uint32_t frameIndex);
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -1225,6 +1443,40 @@ private:
     //   102 = env sampling technique/mode; red = BRDF-only, green = env-only, blue = MIS reference
     //   103 = env sampling fallback/readiness mask; magenta = invalid/fallback, green = ready
     // 
+    // ReSTIR Env DI / Phase 10.7 views:
+    // These inspect the ReSTIR environment direct-light reservoir pipeline.
+    // ReSTIR is environment-direct only here: no RTXDI, no GI, no many-light path.
+    //
+    // Initial reservoir / RayGen-owned views:
+    // These are produced during the primary DXR dispatch. ClosestHit writes
+    // g_RestirInitialReservoir, then RayGen visualizes it.
+    // The RT post stack must stay disabled.
+    //   104 = initial ReSTIR reservoir target luminance heatmap
+    //   105 = initial ReSTIR reservoir selected source PDF heatmap
+    //
+    // Temporal reservoir / compute-owned views:
+    // These are produced by RtRestirTemporalPass and write directly to m_rtOutput.
+    // The RT post stack must stay disabled, but ReSTIR temporal history must still advance.
+    //   106 = temporal previous-frame reservoir reuse accepted mask; white = previous reused
+    //   107 = temporal reservoir M / confidence; RG = M heat, B = confidence
+    //
+    // Spatial reservoir / compute-owned views:
+    // These are produced by RtRestirSpatialPass and write directly to m_rtOutput.
+    // The RT post stack must stay disabled.
+    //   108 = spatial accepted neighbor reuse count heatmap
+    //   109 = selected spatial neighbor distance heatmap
+    //
+    // ReSTIR resolve / DXR-owned views:
+    // These are produced by the ReSTIR DXR resolve dispatch.
+    // Resolve consumes the selected reservoir, traces visibility, and writes
+    // g_RestirResolvedDiffuse / g_RestirResolvedSpec.
+    // Initial reservoir generation must not run during resolve dispatch.
+    //   110 = resolved reservoir final W heatmap
+    //   111 = resolved visibility mask; white = selected env direction visible
+    //   112 = resolved diffuse luminance heatmap
+    //   113 = resolved specular luminance heatmap
+    //   114 = resolve invalid reason mask; R = invalid reservoir, G = SurfaceId mismatch, B = geometric reject / visibility reject / primary miss
+    // 
     // Future rule:
     //   Do not use broad contiguous checks such as 32..47.
     //   Always route by the owning pass namespace.
@@ -1253,6 +1505,11 @@ private:
     bool m_rtAccumulate = false;         // validation / progressive mode
     bool m_rtSvgf = true;
     bool  m_rtDenoise = true;
+
+    bool m_rtEnableRestirEnvDi = false;
+    bool m_rtRestirUseTemporal = true;
+    bool m_rtRestirUseSpatial = true;
+    bool m_rtRestirResolveToBeauty = false;
 
     // RT post-stack mode.
     // Full is the production path.
@@ -1453,6 +1710,21 @@ private:
         DescriptorAllocator::Allocation outlierSpecUavTable{}; // kRtOutlierClampUavCount UAVs
         uint32_t outlierSpecSrvCount = 0;
         uint32_t outlierSpecUavCount = 0;
+
+        DescriptorAllocator::Allocation restirTemporalSrvTable{};
+        DescriptorAllocator::Allocation restirTemporalUavTable{};
+        uint32_t restirTemporalSrvCount = 0;
+        uint32_t restirTemporalUavCount = 0;
+
+        DescriptorAllocator::Allocation restirSpatialSrvTable{};
+        DescriptorAllocator::Allocation restirSpatialUavTable{};
+        uint32_t restirSpatialSrvCount = 0;
+        uint32_t restirSpatialUavCount = 0;
+
+        DescriptorAllocator::Allocation restirApplySrvTable{};
+        DescriptorAllocator::Allocation restirApplyUavTable{};
+        uint32_t restirApplySrvCount = 0;
+        uint32_t restirApplyUavCount = 0;
     };
     
     std::vector<FrameRaytracingResources> m_rtFrames;
@@ -1472,6 +1744,9 @@ private:
     // u6 = m_rtAovViewZRaw  R16_FLOAT visible-surface RayT, -1 invalid
     // u7 = m_rtAovSurfaceId    R32_UINT object/material id, 0xFFFFFFFF invalid
     // u8 = m_rtAovDiffuseAlbedo R16G16B16A16_FLOAT rgb=diffuse albedo, a=stable demod flag
+    // u9  = m_rtRestirInitialReservoir StructuredBuffer/RWStructuredBuffer<RtRestirReservoir>
+    // u10 = m_rtRestirResolvedDiffuse  R16G16B16A16_FLOAT
+    // u11 = m_rtRestirResolvedSpec     R16G16B16A16_FLOAT
     DescriptorAllocator::Allocation m_rtOutputUav{};
     uint32_t m_rtOutputWidth = 0;
     uint32_t m_rtOutputHeight = 0;
@@ -1515,6 +1790,7 @@ private:
 
     static constexpr uint32_t kRtIblSrvCount = 3;
     static constexpr uint32_t kRtSamplingSrvCount = 1;
+    static constexpr uint32_t kRtRestirResolveSrvCount = 1;
 
     static constexpr uint32_t kRtSrvTableCountWithoutSampling =
         kRtGeometrySrvCount +
@@ -1523,7 +1799,8 @@ private:
 
     static constexpr uint32_t kRtSrvTableCount =
         kRtSrvTableCountWithoutSampling +
-        kRtSamplingSrvCount;
+        kRtSamplingSrvCount +
+        kRtRestirResolveSrvCount;
 
     static constexpr uint32_t kRtSrv_BrdfLut =
         kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 0; // slot 29, HLSL t30
@@ -1536,6 +1813,9 @@ private:
 
     static constexpr uint32_t kRtSrv_EnvAlias =
         kRtSrvTableCountWithoutSampling; // slot 32, HLSL t33
+
+    static constexpr uint32_t kRtSrv_RestirResolve =
+        kRtSrv_EnvAlias + 1; // slot 33, HLSL t34
 
     static constexpr uint32_t kRtEnvImportanceFaceSize = 128;
     static constexpr uint32_t kRtEnvImportanceFallbackFaceSize = 64;
@@ -1710,7 +1990,7 @@ private:
     uint32_t m_rtAtrousIterationsSpec = 1;
     uint32_t m_prevRtAtrousIterationsSpec = 1;
 
-    static constexpr uint32_t kRtUavTableCount = 9;
+    static constexpr uint32_t kRtUavTableCount = 12;
     static constexpr uint32_t kRtHistorySelectSrvCount = 7;
     static constexpr uint32_t kRtHistorySelectUavCount = 3;
     static constexpr uint32_t kRtSvgfSrvCount = 8;
@@ -1730,6 +2010,12 @@ private:
     static constexpr uint32_t kRtOutlierClampSrvCount = 7;
     static constexpr uint32_t kRtOutlierClampUavCount = 2;
     static constexpr bool kRtEnvNeeFireflyGuardDefault = true;
+    static constexpr uint32_t kRtRestirTemporalSrvCount = 11;
+    static constexpr uint32_t kRtRestirTemporalUavCount = 2;
+    static constexpr uint32_t kRtRestirSpatialSrvCount = 5;
+    static constexpr uint32_t kRtRestirSpatialUavCount = 2;
+    static constexpr uint32_t kRtRestirApplySrvCount = 4;
+    static constexpr uint32_t kRtRestirApplyUavCount = 2;
 
     RtDiffuseDemodulatePass m_rtDiffuseDemodulatePass;
 
@@ -1850,6 +2136,94 @@ private:
 
     uint32_t m_rtEnvAliasVersion = 0;
     uint32_t m_prevRtEnvAliasVersion = 0;
+
+    // -------------------------------------------------------------------------
+    // ReSTIR environment direct-light resources/state
+    // -------------------------------------------------------------------------
+    // Reservoir pipeline:
+    //   DXR primary pass -> initial environment-light reservoir
+    //   compute          -> temporal reservoir reuse
+    //   compute          -> spatial reservoir reuse
+    //   DXR resolve      -> visibility-tested diffuse/specular contribution
+    //   compute/apply    -> optional validation apply into the RT signal buffers
+    //
+    // This path samples environment direct lighting only. It does not own GI,
+    // many-light sampling, material-light sampling, or recursive reuse.
+    //
+    // m_rtRestirHistoryValid tracks reservoir history only. It is intentionally
+    // separate from raw RT accumulation history and SVGF signal history.
+    ComPtr<ID3D12Resource> m_rtRestirInitialReservoir;
+    ComPtr<ID3D12Resource> m_rtRestirTemporalReservoir[2];
+    ComPtr<ID3D12Resource> m_rtRestirSpatialReservoir;
+
+    ComPtr<ID3D12Resource> m_rtRestirResolvedDiffuse;
+    ComPtr<ID3D12Resource> m_rtRestirResolvedSpec;
+    ComPtr<ID3D12Resource> m_rtRestirAppliedDiffuse;
+    ComPtr<ID3D12Resource> m_rtRestirAppliedSpec;
+
+    bool m_rtRestirResourcesReady = false;
+    bool m_rtRestirHistoryValid = false;
+
+    bool m_rtRestirTemporalValidThisFrame = false;
+    bool m_rtRestirSpatialValidThisFrame = false;
+    bool m_rtRestirResolvedValidThisFrame = false;
+    bool m_rtRestirAppliedReady = false;
+
+    uint32_t m_rtRestirHistoryReadIndex = 0;
+    uint32_t m_rtRestirHistoryWriteIndex = 1;
+
+
+    // Validation-only post-denoise ReSTIR apply scale.
+    // This is not a physical ReSTIR weight; production integration should apply
+    // the resolved direct term before temporal/A-trous filtering.
+    float m_rtRestirApplyDiffuseScale = 0.25f;
+    float m_rtRestirApplySpecularScale = 0.25f;
+    uint32_t m_rtRestirApplyMode = 1; // validation additive
+
+    // ReSTIR validation defaults.
+    // CandidateCount = 16 gives denser initial reservoirs for inspection at
+    // extra cost. ReSTIR is opt-in, so this does not affect default rendering.
+    //
+    // Temporal reuse is intentionally conservative. Longer reservoir age can
+    // ghost on animated or rotating geometry unless reuse confidence is high.
+    uint32_t m_rtRestirInitialCandidateCount = 16;
+    uint32_t m_rtRestirSpatialSamples = 4;
+    uint32_t m_rtRestirSpatialRadius = 8;
+
+    float m_rtRestirNormalSigma = 0.1f;
+    float m_rtRestirDepthSigma = 0.02f;
+    float m_rtRestirViewZSigma = 0.25f; 
+    float m_rtRestirRoughnessSigma = 0.20f;
+
+    float m_rtRestirMaxM = 32.0f;
+    float m_rtRestirMaxAge = 2.0f; 
+    float m_rtRestirMinTarget = 1e-5f;
+    float m_rtRestirMaxWeight = 64.0f;
+    float m_rtRestirTemporalMinConfidence = 0.65f; 
+
+    //These let RenderFrame() detect when ReSTIR settings changed and clear reservoir history without unnecessarily destroying resources
+    bool m_prevRtEnableRestirEnvDi = false;
+    bool m_prevRtRestirUseTemporal = true;
+    bool m_prevRtRestirUseSpatial = true;
+
+    uint32_t m_prevRtRestirInitialCandidateCount = 16;
+    uint32_t m_prevRtRestirSpatialSamples = 4;
+    uint32_t m_prevRtRestirSpatialRadius = 8;
+
+    float m_prevRtRestirNormalSigma = 0.1f;
+    float m_prevRtRestirDepthSigma = 0.02f;
+    float m_prevRtRestirViewZSigma = 0.25f;
+    float m_prevRtRestirRoughnessSigma = 0.20f;
+
+    float m_prevRtRestirMaxM = 32.0f;
+    float m_prevRtRestirMaxAge = 2.0f;
+    float m_prevRtRestirMinTarget = 1e-5f;
+    float m_prevRtRestirMaxWeight = 64.0f;
+    float m_prevRtRestirTemporalMinConfidence = 0.65f;
+
+    RtRestirTemporalPass m_rtRestirTemporalPass;
+    RtRestirSpatialPass m_rtRestirSpatialPass;
+    RtRestirApplyPass m_rtRestirApplyPass; //validation additive apply, not final production integration
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

@@ -159,6 +159,15 @@
     <ClInclude Include="Source\Renderer\RtEnvironmentMapCpu.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\RtRestirTemporalPass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\RtRestirSpatialPass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\RtRestirApplyPass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -281,12 +290,22 @@
     <ClCompile Include="Source\Renderer\RtEnvironmentMapCpu.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\RtRestirTemporalPass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\RtRestirSpatialPass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\RtRestirApplyPass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
     <None Include="Assets\Shaders\HLSL\Common.hlsli" />
     <None Include="Assets\Shaders\HLSL\PBR.hlsli" />
     <None Include="Assets\Shaders\HLSL\RtSampling.hlsli" />
+    <None Include="Assets\Shaders\HLSL\RtReservoir.hlsli" />
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="Assets\Shaders\HLSL\Triangle_VS.hlsl">
@@ -312,5 +331,8 @@
     <CustomBuild Include="Assets\Shaders\HLSL\RtHitDistReconstruct_CS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\RtDiffuseDemodulate_CS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\RtOutlierClamp_CS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\RtRestirSpatial_CS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\RtRestirTemporal_CS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\RtRestirApply_CS.hlsl" />
   </ItemGroup>
 </Project>

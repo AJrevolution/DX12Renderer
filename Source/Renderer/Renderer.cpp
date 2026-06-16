@@ -427,6 +427,7 @@ void Renderer::RenderFrame(
     const bool wantsRtInspectionDebug = rtDebug.wantsRtInspectionDebug;
     const bool wantsOutlierClampDebug = rtDebug.wantsOutlierClampDebug;
     const bool wantsRtSamplingDebug = rtDebug.wantsRtSamplingDebug;
+    const bool wantsRtRestirDebug = rtDebug.wantsRtRestirDebug;
 
     RtPostMode rtPostMode = ResolveRtPostMode(rtDebug);
 
@@ -436,7 +437,8 @@ void Renderer::RenderFrame(
         !wantsViewZReconstructDebug &&
         !wantsDiffuseDemodDebug &&
         !wantsOutlierClampDebug &&
-        !wantsRtSamplingDebug &&
+        !wantsRtSamplingDebug &&      
+        !wantsRtRestirDebug &&
         ((m_debugView == 0) || wantsRtInspectionDebug) &&
         (
             m_rtTemporal ||
@@ -574,6 +576,23 @@ void Renderer::RenderFrame(
         (m_rtTemporalEnableVarianceBoost != m_prevRtTemporalEnableVarianceBoost) ||
             viewZPolicyChanged;
 
+    const bool restirHistorySettingsChanged =
+        (m_rtEnableRestirEnvDi != m_prevRtEnableRestirEnvDi) ||
+        (m_rtRestirUseTemporal != m_prevRtRestirUseTemporal) ||
+        (m_rtRestirUseSpatial != m_prevRtRestirUseSpatial) ||
+        (m_rtRestirInitialCandidateCount != m_prevRtRestirInitialCandidateCount) ||
+        (m_rtRestirSpatialSamples != m_prevRtRestirSpatialSamples) ||
+        (m_rtRestirSpatialRadius != m_prevRtRestirSpatialRadius) ||
+        (std::fabs(m_rtRestirNormalSigma - m_prevRtRestirNormalSigma) > 1e-6f) ||
+        (std::fabs(m_rtRestirDepthSigma - m_prevRtRestirDepthSigma) > 1e-6f) ||
+        (std::fabs(m_rtRestirViewZSigma - m_prevRtRestirViewZSigma) > 1e-6f) ||
+        (std::fabs(m_rtRestirRoughnessSigma - m_prevRtRestirRoughnessSigma) > 1e-6f) ||
+        (std::fabs(m_rtRestirMaxM - m_prevRtRestirMaxM) > 1e-6f) ||
+        (std::fabs(m_rtRestirMaxAge - m_prevRtRestirMaxAge) > 1e-6f) ||
+        (std::fabs(m_rtRestirMinTarget - m_prevRtRestirMinTarget) > 1e-9f) ||
+        (std::fabs(m_rtRestirMaxWeight - m_prevRtRestirMaxWeight) > 1e-6f) ||
+        (std::fabs(m_rtRestirTemporalMinConfidence - m_prevRtRestirTemporalMinConfidence) > 1e-6f);
+
     const bool resetRawAccumulation =
         cameraChanged ||
         drawListChanged ||
@@ -614,6 +633,14 @@ void Renderer::RenderFrame(
         m_rtViewZHistoryValid = false;
     }
 
+    if (resetTemporalHistory ||
+        restirHistorySettingsChanged ||
+        viewZReconsSettingsChanged ||
+        viewZPolicyChanged)
+    {
+        ResetRtRestirHistory();
+    }
+
     // This must always be assigned before DXR dispatch and before post-stack gating.
     // RayGen receives this through PerFrameConstants::rtAccumulate.
     m_rtAccumulateThisFrame = allowRtAccumulation;
@@ -622,7 +649,8 @@ void Renderer::RenderFrame(
         wantsViewZReconstructDebug ||
         wantsDiffuseDemodDebug ||
         wantsOutlierClampDebug ||
-        wantsRtSamplingDebug)
+        wantsRtSamplingDebug ||
+        wantsRtRestirDebug)
     {
         // Debug 54 is produced by RtMotionDilatePass.
         // DXR still runs to author raw motion/depth/normal guides, but it must not
@@ -632,11 +660,18 @@ void Renderer::RenderFrame(
         m_rtDispatchSampleIndex = 0;
     }
 
-    // While validating the producer, the post stack is intentionally disabled.
-    // Keep temporal history invalid so stale temporal/spec history cannot affect
-    // the first frame after this gate is later reopened.
-    if (rtPostMode == RtPostMode::Disabled ||
-        rtPostMode == RtPostMode::RawCombineOnly)
+    // ReSTIR temporal/spatial/resolve debug views still need guide histories to
+    // advance even when the normal RT post stack is disabled. Debug display
+    // ownership must not invalidate the histories required to validate reuse.
+    const bool restirNeedsPersistentGuideHistory =
+        m_rtEnableRestirEnvDi ||
+        rtDebug.wantsRtRestirTemporalDebug ||
+        rtDebug.wantsRtRestirSpatialDebug ||
+        rtDebug.wantsRtRestirResolveDebug;
+
+    if ((rtPostMode == RtPostMode::Disabled ||
+        rtPostMode == RtPostMode::RawCombineOnly) &&
+        !restirNeedsPersistentGuideHistory)
     {
         m_rtTemporalHistoryValid = false;
         m_rtSurfaceIdHistoryValid = false;
@@ -705,6 +740,25 @@ void Renderer::RenderFrame(
     m_prevRtEnvPdfEpsilon = m_rtEnvPdfEpsilon;
     m_prevRtEnvDeltaRoughnessCutoff = m_rtEnvDeltaRoughnessCutoff;
 
+    m_prevRtEnableRestirEnvDi = m_rtEnableRestirEnvDi;
+    m_prevRtRestirUseTemporal = m_rtRestirUseTemporal;
+    m_prevRtRestirUseSpatial = m_rtRestirUseSpatial;
+
+    m_prevRtRestirInitialCandidateCount = m_rtRestirInitialCandidateCount;
+    m_prevRtRestirSpatialSamples = m_rtRestirSpatialSamples;
+    m_prevRtRestirSpatialRadius = m_rtRestirSpatialRadius;
+
+    m_prevRtRestirNormalSigma = m_rtRestirNormalSigma;
+    m_prevRtRestirDepthSigma = m_rtRestirDepthSigma;
+    m_prevRtRestirViewZSigma = m_rtRestirViewZSigma;
+    m_prevRtRestirRoughnessSigma = m_rtRestirRoughnessSigma;
+
+    m_prevRtRestirMaxM = m_rtRestirMaxM;
+    m_prevRtRestirMaxAge = m_rtRestirMaxAge;
+    m_prevRtRestirMinTarget = m_rtRestirMinTarget;
+    m_prevRtRestirMaxWeight = m_rtRestirMaxWeight;
+    m_prevRtRestirTemporalMinConfidence = m_rtRestirTemporalMinConfidence;
+
     m_rtHistoryValid = true;
 
     bool renderedWithDxr = false;
@@ -718,17 +772,29 @@ void Renderer::RenderFrame(
     {
         CmdBeginEvent(cmdList, "DXR");
 
+        //reset per-frame execution results
+        m_rtRestirTemporalValidThisFrame = false;
+        m_rtRestirSpatialValidThisFrame = false;
+        m_rtRestirResolvedValidThisFrame = false;
+
         EnsureRtOutputSize(width, height);
         EnsureRtInstanceData(frameIndex);
         EnsureRtEnvironmentAlias(device, cl);
+        EnsureRtRestirResources(width, height);
         UpdateRtGeometryTable(frameIndex);
 
+        const bool restirNeedsFreshDxr =
+            m_rtEnableRestirEnvDi ||
+            wantsRtRestirDebug;
+
         const bool canReuseAccumulatedOutput =
+            !restirNeedsFreshDxr &&
             m_rtAccumulateThisFrame &&
             m_rtOutputReady &&
             m_rtAccumDiffuseReady &&
             m_rtAccumSpecReady &&
             (m_rtSampleIndex >= m_rtMaxSamples);
+
         if (!canReuseAccumulatedOutput)
         {
             auto cmd4 = GetCommandList4(cl);
@@ -834,6 +900,18 @@ void Renderer::RenderFrame(
                     m_rtSampleIndex = std::min(m_rtSampleIndex + dispatchCount, m_rtMaxSamples);
                 else
                     m_rtSampleIndex = 0;
+
+                if (m_rtRestirResourcesReady &&
+                    m_rtRestirInitialReservoir &&
+                    (m_rtEnableRestirEnvDi || wantsRtRestirDebug))
+                {
+                    D3D12_RESOURCE_BARRIER b{};
+                    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                    b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                    b.UAV.pResource = m_rtRestirInitialReservoir.Get();
+
+                    cmd4->ResourceBarrier(1, &b);
+                }
             }
         }
 
@@ -843,6 +921,27 @@ void Renderer::RenderFrame(
             device,
             width,
             height);
+
+        const bool ranRestirResolve =
+            RunRtRestirResolve(
+                cl,
+                frameIndex,
+                device,
+                width,
+                height,
+                sceneTime,
+                rtDebug);
+
+        if (ranRestirResolve)
+        {
+            RunRtRestirApplyBeauty(
+                cl,
+                frameIndex,
+                device,
+                width,
+                height,
+                rtDebug);
+        }
 
         // Restore all RT writeable resources to UAV state for the next frame
         // This must run regardless of whether the spatial stage used A-Trous,
@@ -892,6 +991,23 @@ void Renderer::RenderFrame(
                 cl.Transition(m_rtSpecSelectedMoments.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
         }
+
+        if (m_rtRestirResourcesReady)
+        {
+            cl.Transition(m_rtRestirInitialReservoir.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtRestirTemporalReservoir[0].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtRestirTemporalReservoir[1].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtRestirSpatialReservoir.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtRestirResolvedDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtRestirResolvedSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+            if (m_rtRestirAppliedReady)
+            {
+                cl.Transition(m_rtRestirAppliedDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cl.Transition(m_rtRestirAppliedSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+        }
+
         cl.FlushBarriers();
 
         if (m_rtOutputReady)
@@ -1083,6 +1199,8 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_rtSurfaceIdHistoryValid = false;
     m_rtDiffuseRobustInputReady = false;
     m_rtSpecRobustInputReady = false;
+    
+    ResetRtRestirResources();
 
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
@@ -1113,7 +1231,8 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
         CreateRtAccum(m_device5.Get(), width, height);
         CreateRtAovs(m_device5.Get(), width, height);
         CreateRtHistoryResources(m_device5.Get(), width, height);
-        
+        EnsureRtRestirResources(width, height);
+
         ResetRtAccumulation();
         m_rtTemporalHistoryValid = false;
     }
@@ -1281,12 +1400,16 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         m_rtMotionDilatePass.Initialize(device, Paths::ShaderDir());
         m_rtTemporalPass.Initialize(device, Paths::ShaderDir());
         CreateRtHistoryResources(m_device5.Get(), m_widthCached, m_heightCached);
+        EnsureRtRestirResources(m_widthCached, m_heightCached);
         m_rtAtrousPass.Initialize(device, Paths::ShaderDir());
         m_rtHistorySelectPass.Initialize(device, Paths::ShaderDir());
         m_rtCombinePass.Initialize(device, Paths::ShaderDir());
         m_rtViewZReconstructPass.Initialize(device, Paths::ShaderDir());
         m_rtDiffuseDemodulatePass.Initialize(device, Paths::ShaderDir());
         m_rtOutlierClampPass.Initialize(device, Paths::ShaderDir());
+        m_rtRestirTemporalPass.Initialize(device, Paths::ShaderDir());
+        m_rtRestirSpatialPass.Initialize(device, Paths::ShaderDir());
+        m_rtRestirApplyPass.Initialize(device, Paths::ShaderDir());
     }
 
     // Load a real texture from disk 
@@ -1946,6 +2069,7 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
         m_rtSurfaceIdHistoryValid = false;
         ResetRtAccumulation();
     }
+    EnsureRtRestirResources(width, height);
 }
 
 void Renderer::CreateRtOutput(ID3D12Device* device, uint32_t width, uint32_t height)
@@ -2074,7 +2198,7 @@ void Renderer::EnsureRtInstanceData(uint32_t frameIndex)
     frame.instanceDataUpload->Unmap(0, &writtenRange);
 }
 
-void Renderer::UpdateRtGeometryTable(uint32_t frameIndex)
+void Renderer::UpdateRtGeometryTable(uint32_t frameIndex, ID3D12Resource* restirResolveReservoir)
 {
     auto& frame = m_rtFrames[frameIndex];
 
@@ -2181,6 +2305,27 @@ void Renderer::UpdateRtGeometryTable(uint32_t frameIndex)
             m_device5.Get(),
             HandleAt(slot),
             DXGI_FORMAT_R8G8B8A8_UNORM);
+    }
+
+    // t34 = selected ReSTIR reservoir for DXR resolve
+    {
+        const uint32_t pixelCount =
+            std::max(1u, m_widthCached * m_heightCached);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_UNKNOWN;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer.FirstElement = 0;
+        srv.Buffer.NumElements =
+            restirResolveReservoir ? pixelCount : 1u;
+        srv.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+        m_device5->CreateShaderResourceView(
+            restirResolveReservoir,
+            &srv,
+            HandleAt(kRtSrv_RestirResolve));
     }
 
     WriteNullRtEnvAliasSrv(HandleAt(kRtSrv_EnvAlias));
@@ -2336,10 +2481,13 @@ void Renderer::ResetRtAccumulation(bool resetTemporalHistory)
     m_rtSampleIndex = 0;
     ++m_rtResetId;
     m_rtDispatchSampleIndex = 0;
+
     if (resetTemporalHistory)
     {
         m_rtTemporalHistoryValid = false;
         m_rtSurfaceIdHistoryValid = false;
+
+        ResetRtRestirHistory();
     }
 
     m_rtHistoryValid = false;
@@ -4380,7 +4528,7 @@ void Renderer::CommitRtMotionWorlds()
     m_prevRtMotionWorldsValid = true;
 }
 
-D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex)
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex, uint32_t restirDispatchMode)
 {
     auto alloc = m_upload.Allocate(frameIndex, sizeof(RtRayGenConstants), 256);
     auto* cb = reinterpret_cast<RtRayGenConstants*>(alloc.cpu);
@@ -4429,8 +4577,18 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex)
 
     cb->sampling.samplingDebugView = m_debugView;
 
+    // Anti-double-counting guard.
+    // When resolved ReSTIR environment lighting is applied to beauty, disable
+    // the older final environment NEE path so direct environment lighting is not
+    // added twice.
+    const bool applyingRestirToBeauty =
+        m_rtEnableRestirEnvDi &&
+        m_rtRestirResolveToBeauty &&
+        m_rtRestirApplyMode != 0u;
+
     cb->sampling.useEnvNeeForFinal =
         (m_rtUseEnvNeeForFinal &&
+            !applyingRestirToBeauty &&
             envAliasUsable &&
             !m_rtEnvAliasFallback)
         ? 1u
@@ -4451,6 +4609,29 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex)
         std::max(1e-4f, m_rtEnvNeeMaxRadiance);
 
     cb->sampling.pad1 = 0.0f;
+
+    cb->restir.enableRestirEnvDi =
+        (m_rtEnableRestirEnvDi || IsRtRestirDebug(m_debugView)) ? 1u : 0u;
+
+    cb->restir.restirInitialCandidateCount =
+        std::max(1u, m_rtRestirInitialCandidateCount);
+
+    cb->restir.restirDebugView =
+        m_debugView;
+
+    cb->restir.restirMaxM =
+        std::max(1.0f, m_rtRestirMaxM);
+
+    cb->restir.restirMaxAge =
+        std::max(0.0f, m_rtRestirMaxAge);
+
+    cb->restir.restirMinTarget =
+        std::max(0.0f, m_rtRestirMinTarget);
+
+    cb->restir.restirMaxWeight =
+        std::max(1.0f, m_rtRestirMaxWeight);
+
+    cb->restir.restirDispatchMode = restirDispatchMode;
 
     return alloc.gpu;
 }
@@ -5367,7 +5548,15 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
     r.wantsDiffuseDemodDebug = IsDiffuseDemodulateDebug(debugView);
     r.wantsOutlierClampDebug = IsOutlierClampDebug(debugView);
     r.wantsRtSamplingDebug = IsRtSamplingDebug(debugView);
-    r.wantsSpatialDebug = r.wantsSvgfDebug;
+    r.wantsRtRestirRayGenDebug = IsRtRestirRayGenDebug(debugView);
+    r.wantsRtRestirTemporalDebug = IsRtRestirTemporalDebug(debugView);
+    r.wantsRtRestirSpatialDebug = IsRtRestirSpatialDebug(debugView);
+    r.wantsRtRestirResolveDebug = IsRtRestirResolveDebug(debugView);
+    r.wantsRtRestirDebug = IsRtRestirDebug(debugView);
+
+    r.wantsSpatialDebug =
+        r.wantsSvgfDebug ||
+        r.wantsRtRestirSpatialDebug;
 
     r.wantsRtPostDebug =
         r.wantsTemporalDebug ||
@@ -5384,7 +5573,8 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
         r.wantsDiffuseAlbedoDebug ||
         r.wantsDiffuseDemodDebug ||
         r.wantsOutlierClampDebug ||
-        r.wantsRtSamplingDebug;
+        r.wantsRtSamplingDebug ||
+        r.wantsRtRestirDebug;
 
     r.wantsRtInspectionDebug =
         r.wantsRtPostDebug ||
@@ -5395,7 +5585,8 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
         r.wantsViewZDebug ||
         r.wantsSurfaceIdDebug ||
         r.wantsDiffuseAlbedoDebug ||
-        r.wantsRtSamplingDebug)
+        r.wantsRtSamplingDebug ||
+        r.wantsRtRestirRayGenDebug)
     {
         r.owner = RtDebugOwner::RayGen;
     }
@@ -5407,7 +5598,8 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
     {
         r.owner = RtDebugOwner::GuideReconstruct;
     }
-    else if (r.wantsTemporalDebug)
+    else if (r.wantsTemporalDebug ||
+        r.wantsRtRestirTemporalDebug)
     {
         r.owner = RtDebugOwner::Temporal;
     }
@@ -5415,9 +5607,14 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
     {
         r.owner = RtDebugOwner::HistorySelect;
     }
-    else if (r.wantsSvgfDebug)
+    else if (r.wantsSvgfDebug ||
+        r.wantsRtRestirSpatialDebug)
     {
         r.owner = RtDebugOwner::Spatial;
+    }
+    else if (r.wantsRtRestirResolveDebug)
+    {
+        r.owner = RtDebugOwner::Combine;
     }
     else
     {
@@ -5635,9 +5832,16 @@ void Renderer::RunRtDenoiser(
         m_rtSvgf &&
         m_rtViewZSigmaScale > 0.0f;
 
+    const bool restirNeedsTemporalGuides =
+        m_rtEnableRestirEnvDi ||
+        rtDebug.wantsRtRestirTemporalDebug ||
+        rtDebug.wantsRtRestirSpatialDebug ||
+        rtDebug.wantsRtRestirResolveDebug;
+
     const bool shouldRunViewZReconstruct =
         temporalWouldRun ||
         postMayRunSpecSpatial ||
+        restirNeedsTemporalGuides ||
         rtDebug.wantsMotionDilateDebug ||
         rtDebug.wantsViewZReconstructDebug ||
         rtDebug.wantsOutlierClampDebug;
@@ -5659,6 +5863,7 @@ void Renderer::RunRtDenoiser(
 
     const bool ranMotionDilate =
         (temporalWouldRun ||
+            restirNeedsTemporalGuides ||
             rtDebug.wantsMotionDilateDebug ||
             rtDebug.wantsOutlierClampDebug) &&
         RunRtMotionDilate(
@@ -5694,6 +5899,30 @@ void Renderer::RunRtDenoiser(
         guides.prevUVDilated = m_rtAovMotionDilated.Get();
         guides.motionConf = m_rtAovMotionConf.Get();
     }
+
+    const bool ranRestirTemporal =
+        RunRtRestirTemporal(
+            cl,
+            frameIndex,
+            device,
+            width,
+            height,
+            guides,
+            ranViewZReconstruct,
+            ranMotionDilate,
+            rtDebug);
+
+    const bool ranRestirSpatial =
+        RunRtRestirSpatial(
+            cl,
+            frameIndex,
+            device,
+            width,
+            height,
+            guides,
+            ranViewZReconstruct,
+            ranRestirTemporal,
+            rtDebug);
 
     const bool outlierClampCanUseViewZ =
         ranViewZReconstruct &&
@@ -6565,8 +6794,19 @@ void Renderer::RunRtDenoiser(
             diffuseIsDemodulated);
     }
 
-    if (RtPostModeCommitsHistory(rtPostMode) &&
-        advancedSplitHistory)
+    const bool restirCanCommitGuideHistory =
+        restirNeedsTemporalGuides &&
+        guides.normalRough &&
+        guides.depth &&
+        guides.surfaceId &&
+        ranViewZReconstruct &&
+        ranMotionDilate;
+
+    const bool shouldCommitGuideHistory =
+        (RtPostModeCommitsHistory(rtPostMode) && advancedSplitHistory) ||
+        restirCanCommitGuideHistory;
+
+    if (shouldCommitGuideHistory)
     {
         CmdBeginEvent(cmdList, "RT History Commit");
 
@@ -6581,11 +6821,16 @@ void Renderer::RunRtDenoiser(
         cl.Get()->CopyResource(m_rtHistoryNormal[writeIndex].Get(), guides.normalRough);
         cl.Get()->CopyResource(m_rtHistoryDepth[writeIndex].Get(), guides.depth);
 
-        if (ranViewZReconstruct && ranMotionDilate && temporalWouldRun)
+        const bool shouldCommitViewZHistory =
+            ranViewZReconstruct &&
+            ranMotionDilate &&
+            (temporalWouldRun || restirNeedsTemporalGuides);
+
+        if (shouldCommitViewZHistory)
         {
             CommitRtViewZHistory(cl, writeIndex);
         }
-        else if (!temporalWouldRun)
+        else if (!temporalWouldRun && !restirNeedsTemporalGuides)
         {
             m_rtViewZHistoryValid = false;
         }
@@ -7279,4 +7524,1433 @@ void Renderer::ClearRtEnvironmentCpuRadiance()
 
     if (hadEnvSource)
         ++m_rtEnvAliasVersion;
+}
+
+void Renderer::ResetRtRestirResources()
+{
+    m_rtRestirInitialReservoir.Reset();
+
+    for (auto& r : m_rtRestirTemporalReservoir)
+        r.Reset();
+
+    m_rtRestirSpatialReservoir.Reset();
+
+    m_rtRestirResolvedDiffuse.Reset();
+    m_rtRestirResolvedSpec.Reset();
+
+    m_rtRestirAppliedDiffuse.Reset();
+    m_rtRestirAppliedSpec.Reset();
+    m_rtRestirAppliedReady = false;
+
+    m_rtRestirResourcesReady = false;
+    ResetRtRestirHistory();
+}
+
+void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
+{
+    if (!m_device5 || width == 0 || height == 0)
+        return;
+
+    ID3D12Device* device = m_device5.Get();
+
+    if (!m_rtOutputUav.IsValid())
+        m_rtOutputUav = m_srvHeap.Allocate(kRtUavTableCount);
+
+    auto WriteNullRestirUavs = [&]()
+    {
+        if (!m_rtOutputUav.IsValid())
+            return;
+
+        // u9 null structured-buffer UAV
+        {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+            uav.Format = DXGI_FORMAT_UNKNOWN;
+            uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            uav.Buffer.FirstElement = 0;
+            uav.Buffer.NumElements = 1;
+            uav.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+            uav.Buffer.CounterOffsetInBytes = 0;
+            uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+
+            device->CreateUnorderedAccessView(
+                nullptr,
+                nullptr,
+                &uav,
+                RtUavCpuAt(9));
+        }
+
+        // u10/u11 null RGBA16 UAVs
+        {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+            uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+            device->CreateUnorderedAccessView(
+                nullptr,
+                nullptr,
+                &uav,
+                RtUavCpuAt(10));
+
+            device->CreateUnorderedAccessView(
+                nullptr,
+                nullptr,
+                &uav,
+                RtUavCpuAt(11));
+        }
+    };
+
+    const bool wantsRestir =
+        m_rtEnableRestirEnvDi ||
+        IsRtRestirDebug(m_debugView);
+
+    if (!wantsRestir)
+    {
+        if (m_rtRestirResourcesReady ||
+            m_rtRestirInitialReservoir ||
+            m_rtRestirTemporalReservoir[0] ||
+            m_rtRestirTemporalReservoir[1] ||
+            m_rtRestirSpatialReservoir ||
+            m_rtRestirResolvedDiffuse ||
+            m_rtRestirResolvedSpec ||
+            m_rtRestirAppliedDiffuse ||
+            m_rtRestirAppliedSpec)
+        {
+            ResetRtRestirResources();
+        }
+
+        // Keep the expanded DXR UAV table deterministic even when ReSTIR is off.
+        WriteNullRestirUavs();
+        return;
+    }
+
+    const bool needCreate =
+        !m_rtRestirResourcesReady ||
+        !m_rtRestirInitialReservoir ||
+        !m_rtRestirTemporalReservoir[0] ||
+        !m_rtRestirTemporalReservoir[1] ||
+        !m_rtRestirSpatialReservoir ||
+        !m_rtRestirResolvedDiffuse ||
+        !m_rtRestirResolvedSpec ||
+        !m_rtRestirAppliedDiffuse ||
+        !m_rtRestirAppliedSpec ||
+        m_rtOutputWidth != width ||
+        m_rtOutputHeight != height;
+
+    if (!needCreate)
+        return;
+
+    ResetRtRestirResources();
+
+    const uint64_t pixelCount64 =
+        static_cast<uint64_t>(width) *
+        static_cast<uint64_t>(height);
+
+    if (pixelCount64 == 0 || pixelCount64 > UINT32_MAX)
+    {
+        WriteNullRestirUavs();
+        return;
+    }
+
+    const UINT pixelCount = static_cast<UINT>(pixelCount64);
+
+    CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+
+    auto CreateReservoirBuffer =
+        [&](ComPtr<ID3D12Resource>& resource, const wchar_t* name)
+    {
+        const uint64_t byteSize =
+            pixelCount64 * static_cast<uint64_t>(sizeof(RtRestirReservoir));
+
+        auto desc = CD3DX12_RESOURCE_DESC::Buffer(
+            byteSize,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&resource)),
+            "Create RT ReSTIR reservoir buffer");
+
+        SetD3D12ObjectName(resource.Get(), name);
+
+        CommandList::SetGlobalState(
+            resource.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    };
+
+    auto CreateRgba16UavTexture =
+        [&](ComPtr<ID3D12Resource>& resource, const wchar_t* name)
+    {
+        auto desc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&resource)),
+            "Create RT ReSTIR resolved texture");
+
+        SetD3D12ObjectName(resource.Get(), name);
+
+        CommandList::SetGlobalState(
+            resource.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    };
+
+    CreateReservoirBuffer(
+        m_rtRestirInitialReservoir,
+        L"RT ReSTIR Initial Reservoir");
+
+    CreateReservoirBuffer(
+        m_rtRestirTemporalReservoir[0],
+        L"RT ReSTIR Temporal Reservoir 0");
+
+    CreateReservoirBuffer(
+        m_rtRestirTemporalReservoir[1],
+        L"RT ReSTIR Temporal Reservoir 1");
+
+    CreateReservoirBuffer(
+        m_rtRestirSpatialReservoir,
+        L"RT ReSTIR Spatial Reservoir");
+
+    CreateRgba16UavTexture(
+        m_rtRestirResolvedDiffuse,
+        L"RT ReSTIR Resolved Diffuse");
+
+    CreateRgba16UavTexture(
+        m_rtRestirResolvedSpec,
+        L"RT ReSTIR Resolved Spec");
+
+    CreateRgba16UavTexture(
+        m_rtRestirAppliedDiffuse,
+        L"RT ReSTIR Applied Diffuse");
+
+    CreateRgba16UavTexture(
+        m_rtRestirAppliedSpec,
+        L"RT ReSTIR Applied Spec");
+
+    // DXR global UAV table slots:
+    // u9 = initial reservoir
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_UNKNOWN;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uav.Buffer.FirstElement = 0;
+        uav.Buffer.NumElements = pixelCount;
+        uav.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+        uav.Buffer.CounterOffsetInBytes = 0;
+        uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+
+        device->CreateUnorderedAccessView(
+            m_rtRestirInitialReservoir.Get(),
+            nullptr,
+            &uav,
+            RtUavCpuAt(9));
+    }
+
+    // u10/u11 = resolved diffuse/spec
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            m_rtRestirResolvedDiffuse.Get(),
+            nullptr,
+            &uav,
+            RtUavCpuAt(10));
+
+        device->CreateUnorderedAccessView(
+            m_rtRestirResolvedSpec.Get(),
+            nullptr,
+            &uav,
+            RtUavCpuAt(11));
+    }
+
+    m_rtRestirResourcesReady = true;
+    m_rtRestirAppliedReady = true;
+    ResetRtRestirHistory();
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirTemporalConstants(
+    uint32_t frameIndex,
+    uint32_t width,
+    uint32_t height,
+    bool temporalHistoryValid,
+    bool surfaceIdHistoryValid,
+    bool viewZHistoryValid)
+{
+    constexpr uint32_t cbSize =
+        (sizeof(RtRestirTemporalConstants) + 255u) & ~255u;
+
+    auto alloc = m_upload.Allocate(frameIndex, cbSize, 256);
+    auto* cb = reinterpret_cast<RtRestirTemporalConstants*>(alloc.cpu);
+
+    *cb = {};
+
+    cb->invResolution =
+    {
+        width > 0 ? 1.0f / static_cast<float>(width) : 0.0f,
+        height > 0 ? 1.0f / static_cast<float>(height) : 0.0f
+    };
+
+    cb->temporalEnabled =
+        m_rtRestirUseTemporal ? 1u : 0u;
+
+    cb->historyValid =
+        temporalHistoryValid ? 1u : 0u;
+
+    cb->surfaceIdHistoryValid =
+        surfaceIdHistoryValid ? 1u : 0u;
+
+    cb->viewZHistoryValid =
+        viewZHistoryValid ? 1u : 0u;
+
+    cb->debugView = m_debugView;
+    cb->frameIndex = frameIndex;
+
+    cb->depthSigma = std::max(1e-5f, m_rtRestirDepthSigma);
+    cb->normalSigma = std::max(1e-5f, m_rtRestirNormalSigma);
+    cb->roughnessSigma = std::max(1e-5f, m_rtRestirRoughnessSigma);
+    cb->viewZSigma = std::max(1e-5f, m_rtRestirViewZSigma);
+
+    cb->reprojectMinWeight =
+        std::clamp(m_rtRestirTemporalMinConfidence, 0.0f, 1.0f);
+
+    cb->maxM =
+        std::max(1.0f, m_rtRestirMaxM);
+
+    cb->maxAge =
+        std::max(0.0f, m_rtRestirMaxAge);
+
+    cb->maxWeight =
+        std::max(1.0f, m_rtRestirMaxWeight);
+
+    return alloc.gpu;
+}
+
+bool Renderer::UpdateRtRestirTemporalTables(
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    ID3D12Resource* prevTemporalReservoir,
+    ID3D12Resource* outTemporalReservoir,
+    ID3D12Resource* currPrevUvResource,
+    ID3D12Resource* currViewZResource,
+    ID3D12Resource* prevViewZResource,
+    ID3D12Resource* prevNormalResource,
+    ID3D12Resource* prevDepthResource,
+    ID3D12Resource* prevSurfaceIdResource,
+    uint32_t width,
+    uint32_t height)
+{
+    if (!device ||
+        !m_rtRestirInitialReservoir ||
+        !outTemporalReservoir ||
+        !currPrevUvResource ||
+        !m_rtAovNormal ||
+        !m_rtAovDepth ||
+        !m_rtAovSurfaceId ||
+        !currViewZResource ||
+        !prevViewZResource ||
+        !prevNormalResource ||
+        !prevDepthResource ||
+        !prevSurfaceIdResource ||
+        !m_rtOutput ||
+        !m_rtRestirResourcesReady ||
+        !m_rtAovReady ||
+        !m_rtAovSurfaceIdReady ||
+        !m_rtOutputReady)
+    {
+        return false;
+    }
+
+    auto& frame = m_rtFrames[frameIndex];
+
+    EnsureRtDescriptorTable(
+        frame.restirTemporalSrvTable,
+        frame.restirTemporalSrvCount,
+        kRtRestirTemporalSrvCount);
+
+    EnsureRtDescriptorTable(
+        frame.restirTemporalUavTable,
+        frame.restirTemporalUavCount,
+        kRtRestirTemporalUavCount);
+
+    const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
+
+    auto SrvAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.restirTemporalSrvTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    auto UavAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.restirTemporalUavTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    const uint32_t pixelCount =
+        std::max(1u, width * height);
+
+    auto WriteReservoirSrv = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_UNKNOWN;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer.FirstElement = 0;
+        srv.Buffer.NumElements = pixelCount;
+        srv.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
+
+    auto WriteReservoirUav = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_UNKNOWN;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uav.Buffer.FirstElement = 0;
+        uav.Buffer.NumElements = pixelCount;
+        uav.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+        uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+
+        device->CreateUnorderedAccessView(
+            resource,
+            nullptr,
+            &uav,
+            UavAt(slot));
+    };
+
+    auto WriteSrv2D = [&](ID3D12Resource* resource, DXGI_FORMAT format, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = format;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
+
+    auto WriteUav2D = [&](ID3D12Resource* resource, DXGI_FORMAT format, uint32_t slot)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = format;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            resource,
+            nullptr,
+            &uav,
+            UavAt(slot));
+    };
+
+    // t0 = current initial reservoir from DXR section 8.
+    WriteReservoirSrv(m_rtRestirInitialReservoir.Get(), 0);
+
+    // t1 = previous temporal reservoir. Null is valid when historyValid == 0.
+    WriteReservoirSrv(prevTemporalReservoir, 1);
+
+    // t2 = current normal/roughness.
+    WriteSrv2D(m_rtAovNormal.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 2);
+
+    // t3 = current depth.
+    WriteSrv2D(m_rtAovDepth.Get(), DXGI_FORMAT_R32_FLOAT, 3);
+
+    // t4 = current previous-UV guide.
+    // Important: this should be the dilated previous UV from MotionDilate,
+    // not the raw DXR motion AOV.
+    WriteSrv2D(currPrevUvResource, DXGI_FORMAT_R16G16_FLOAT, 4);
+
+    // t5 = current reconstructed ViewZ, or raw ViewZ fallback.
+    WriteSrv2D(currViewZResource, DXGI_FORMAT_R16_FLOAT, 5);
+
+    // t6 = current SurfaceId.
+    WriteSrv2D(m_rtAovSurfaceId.Get(), DXGI_FORMAT_R32_UINT, 6);
+
+    // t7 = previous normal/roughness history.
+    WriteSrv2D(prevNormalResource, DXGI_FORMAT_R16G16B16A16_FLOAT, 7);
+
+    // t8 = previous depth history.
+    WriteSrv2D(prevDepthResource, DXGI_FORMAT_R32_FLOAT, 8);
+
+    // t9 = previous reconstructed ViewZ history, or fallback.
+    WriteSrv2D(prevViewZResource, DXGI_FORMAT_R16_FLOAT, 9);
+
+    // t10 = previous SurfaceId history.
+    WriteSrv2D(prevSurfaceIdResource, DXGI_FORMAT_R32_UINT, 10);
+
+    // u0 = current temporal reservoir output.
+    WriteReservoirUav(outTemporalReservoir, 0);
+
+    // u1 = debug output.
+    // Bound consistently because the shader declares it. RunRtRestirTemporal()
+    // transitions m_rtOutput to UAV before dispatch.
+    WriteUav2D(m_rtOutput.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, 1);
+
+    return true;
+}
+
+bool Renderer::RunRtRestirTemporal(
+    CommandList& cl,
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height,
+    const RtDenoiserGuides& guides,
+    bool ranViewZReconstruct,
+    bool ranMotionDilate,
+    const RtDebugRouting& rtDebug)
+{
+    if (!device ||
+        !m_rtRestirResourcesReady ||
+        !m_rtRestirInitialReservoir ||
+        !m_rtRestirTemporalReservoir[0] ||
+        !m_rtRestirTemporalReservoir[1] ||
+        !guides.normalRough ||
+        !guides.depth ||
+        !guides.surfaceId ||
+        !m_rtOutput ||
+        !m_rtOutputReady)
+    {
+        return false;
+    }
+
+    const bool wantsRestirTemporal =
+        m_rtEnableRestirEnvDi ||
+        rtDebug.wantsRtRestirTemporalDebug ||
+        rtDebug.wantsRtRestirSpatialDebug ||
+        rtDebug.wantsRtRestirResolveDebug;
+
+    if (!wantsRestirTemporal)
+        return false;
+
+    ID3D12Resource* currPrevUv =
+        (ranMotionDilate && guides.prevUVDilated)
+        ? guides.prevUVDilated
+        : guides.prevUVRaw;
+
+    if (!currPrevUv)
+    {
+        // The shader declares a prev-UV SRV, so bindable input is required even
+        // when history reuse is disabled. Usually raw DXR motion is the fallback.
+        m_rtRestirHistoryValid = false;
+        ResetRtRestirHistory();
+        return false;
+    }
+
+    const uint32_t readIndex = m_rtRestirHistoryReadIndex;
+    const uint32_t writeIndex = m_rtRestirHistoryWriteIndex;
+
+    ID3D12Resource* outTemporalReservoir =
+        m_rtRestirTemporalReservoir[writeIndex].Get();
+
+    RtDenoiserHistories histories =
+        BuildRtDenoiserHistories(
+            m_rtHistoryReadIndex,
+            1u - m_rtHistoryReadIndex);
+
+    ID3D12Resource* currViewZ =
+        (ranViewZReconstruct && guides.viewZRecons)
+        ? guides.viewZRecons
+        : m_rtAovViewZRaw.Get();
+
+    // Descriptor fallback is allowed, but reuse is not.
+    // The shader tables always bind valid SRVs, but history flags must only be
+    // true when those SRVs are real previous-frame histories.
+    const bool havePreviousGuideHistory =
+        m_rtTemporalHistoryValid &&
+        histories.normalRead &&
+        histories.depthRead &&
+        m_rtSurfaceIdHistoryValid &&
+        histories.surfaceIdRead &&
+        ranViewZReconstruct &&
+        m_rtViewZHistoryValid &&
+        guides.viewZHistoryRead &&
+        currViewZ;
+
+    const bool canUseTemporalHistory =
+        m_rtRestirUseTemporal &&
+        m_rtRestirHistoryValid &&
+        ranMotionDilate &&
+        guides.prevUVDilated &&
+        havePreviousGuideHistory;
+
+    ID3D12Resource* prevTemporalReservoir =
+        canUseTemporalHistory
+        ? m_rtRestirTemporalReservoir[readIndex].Get()
+        : nullptr;
+
+    ID3D12Resource* prevNormal =
+        canUseTemporalHistory
+        ? histories.normalRead
+        : guides.normalRough;
+
+    ID3D12Resource* prevDepth =
+        canUseTemporalHistory
+        ? histories.depthRead
+        : guides.depth;
+
+    ID3D12Resource* prevViewZ =
+        canUseTemporalHistory
+        ? guides.viewZHistoryRead
+        : currViewZ;
+
+    ID3D12Resource* prevSurfaceId =
+        canUseTemporalHistory
+        ? histories.surfaceIdRead
+        : guides.surfaceId;
+
+    const bool surfaceIdHistoryValid = canUseTemporalHistory;
+    const bool viewZHistoryValid = canUseTemporalHistory;
+
+    auto* cmdList = cl.Get();
+
+    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+
+    CmdBeginEvent(cmdList, "RT ReSTIR Temporal");
+
+    cl.Transition(m_rtRestirInitialReservoir.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    if (prevTemporalReservoir)
+    {
+        cl.Transition(prevTemporalReservoir, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    cl.Transition(outTemporalReservoir, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.Transition(guides.normalRough, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(guides.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(currPrevUv, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(guides.surfaceId, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    if (currViewZ)
+        cl.Transition(currViewZ, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    if (prevNormal && prevNormal != guides.normalRough)
+    {
+        cl.Transition(prevNormal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    if (prevDepth && prevDepth != guides.depth)
+    {
+        cl.Transition(prevDepth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    if (prevViewZ && prevViewZ != currViewZ)
+    {
+        cl.Transition(prevViewZ, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    if (prevSurfaceId && prevSurfaceId != guides.surfaceId)
+    {
+        cl.Transition(prevSurfaceId, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    // Bound as u1 for debug 106/107. Keeping the transition here is simple and
+    // matches your other debug-capable compute passes.
+    cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.FlushBarriers();
+
+    const bool okTables =
+        UpdateRtRestirTemporalTables(
+            frameIndex,
+            device,
+            prevTemporalReservoir,
+            outTemporalReservoir,
+            currPrevUv,
+            currViewZ,
+            prevViewZ,
+            prevNormal,
+            prevDepth,
+            prevSurfaceId,
+            width,
+            height);
+
+    if (!okTables)
+    {
+        m_rtRestirTemporalValidThisFrame = false;
+        m_rtRestirHistoryValid = false;
+        ResetRtRestirHistory();
+        CmdEndEvent(cmdList);
+        return false;
+    }
+
+    const D3D12_GPU_VIRTUAL_ADDRESS cb =
+        UpdateRtRestirTemporalConstants(
+            frameIndex,
+            width,
+            height,
+            canUseTemporalHistory,
+            surfaceIdHistoryValid,
+            viewZHistoryValid);
+
+    m_rtRestirTemporalPass.Dispatch(
+        cl,
+        cb,
+        m_rtFrames[frameIndex].restirTemporalSrvTable.gpu,
+        m_rtFrames[frameIndex].restirTemporalUavTable.gpu,
+        width,
+        height);
+
+    D3D12_RESOURCE_BARRIER barriers[2]{};
+
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[0].UAV.pResource = outTemporalReservoir;
+
+    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[1].UAV.pResource = m_rtOutput.Get();
+
+    cmdList->ResourceBarrier(2, barriers);
+
+    // Swap so the current frame's temporal output is readable by spatial/resolve.
+    m_rtRestirHistoryReadIndex = writeIndex;
+    m_rtRestirHistoryWriteIndex = readIndex;
+
+    m_rtRestirTemporalValidThisFrame = true;
+
+    m_rtRestirHistoryValid =
+        m_rtRestirUseTemporal &&
+        m_rtRestirTemporalValidThisFrame &&
+        m_rtRestirTemporalReservoir[m_rtRestirHistoryReadIndex].Get() != nullptr;
+
+    CmdEndEvent(cmdList);
+    return true;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirSpatialConstants(
+    uint32_t frameIndex,
+    uint32_t width,
+    uint32_t height)
+{
+    constexpr uint32_t cbSize =
+        (sizeof(RtRestirSpatialConstants) + 255u) & ~255u;
+
+    auto alloc = m_upload.Allocate(frameIndex, cbSize, 256);
+    auto* cb = reinterpret_cast<RtRestirSpatialConstants*>(alloc.cpu);
+
+    *cb = {};
+
+    cb->invResolution =
+    {
+        width > 0 ? 1.0f / static_cast<float>(width) : 0.0f,
+        height > 0 ? 1.0f / static_cast<float>(height) : 0.0f
+    };
+
+    cb->sampleCount =
+        std::max(1u, m_rtRestirSpatialSamples);
+
+    cb->radius =
+        std::max(1u, m_rtRestirSpatialRadius);
+
+    cb->normalSigma =
+        std::max(1e-5f, m_rtRestirNormalSigma);
+
+    cb->depthSigma =
+        std::max(1e-5f, m_rtRestirDepthSigma);
+
+    cb->roughnessSigma =
+        std::max(1e-5f, m_rtRestirRoughnessSigma);
+
+    cb->viewZSigma =
+        std::max(1e-5f, m_rtRestirViewZSigma);
+
+    cb->maxM =
+        std::max(1.0f, m_rtRestirMaxM);
+
+    cb->maxWeight =
+        std::max(1.0f, m_rtRestirMaxWeight);
+
+    cb->frameIndex = frameIndex;
+    cb->debugView = m_debugView;
+
+    cb->distanceNormParams =
+    {
+        1.0f,
+        0.0f,
+        1.0f
+    };
+
+    cb->distanceNormSigma = 0.08f;
+
+    return alloc.gpu;
+}
+
+bool Renderer::UpdateRtRestirSpatialTables(
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    ID3D12Resource* temporalReservoir,
+    ID3D12Resource* currNormalResource,
+    ID3D12Resource* currDepthResource,
+    ID3D12Resource* currSurfaceIdResource,
+    ID3D12Resource* currViewZResource,
+    ID3D12Resource* outSpatialReservoir,
+    uint32_t width,
+    uint32_t height)
+{
+    if (!device ||
+        !temporalReservoir ||
+        !currNormalResource ||
+        !currDepthResource ||
+        !currSurfaceIdResource ||
+        !currViewZResource ||
+        !outSpatialReservoir ||
+        !m_rtOutput ||
+        !m_rtOutputReady ||
+        !m_rtRestirResourcesReady)
+    {
+        return false;
+    }
+
+    auto& frame = m_rtFrames[frameIndex];
+
+    EnsureRtDescriptorTable(
+        frame.restirSpatialSrvTable,
+        frame.restirSpatialSrvCount,
+        kRtRestirSpatialSrvCount);
+
+    EnsureRtDescriptorTable(
+        frame.restirSpatialUavTable,
+        frame.restirSpatialUavCount,
+        kRtRestirSpatialUavCount);
+
+    const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
+
+    auto SrvAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.restirSpatialSrvTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    auto UavAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.restirSpatialUavTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    const uint32_t pixelCount =
+        std::max(1u, width * height);
+
+    auto WriteReservoirSrv = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_UNKNOWN;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer.FirstElement = 0;
+        srv.Buffer.NumElements = pixelCount;
+        srv.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
+
+    auto WriteReservoirUav = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_UNKNOWN;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uav.Buffer.FirstElement = 0;
+        uav.Buffer.NumElements = pixelCount;
+        uav.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+        uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+
+        device->CreateUnorderedAccessView(
+            resource,
+            nullptr,
+            &uav,
+            UavAt(slot));
+    };
+
+    auto WriteSrv2D = [&](ID3D12Resource* resource, DXGI_FORMAT format, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = format;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
+
+    auto WriteUav2D = [&](ID3D12Resource* resource, DXGI_FORMAT format, uint32_t slot)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = format;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            resource,
+            nullptr,
+            &uav,
+            UavAt(slot));
+    };
+
+    // t0 = temporal reservoir
+    WriteReservoirSrv(temporalReservoir, 0);
+
+    // t1 = current normal/roughness
+    WriteSrv2D(currNormalResource, DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
+
+    // t2 = current depth
+    WriteSrv2D(currDepthResource, DXGI_FORMAT_R32_FLOAT, 2);
+
+    // t3 = current SurfaceId
+    WriteSrv2D(currSurfaceIdResource, DXGI_FORMAT_R32_UINT, 3);
+
+    // t4 = current ViewZ
+    WriteSrv2D(currViewZResource, DXGI_FORMAT_R16_FLOAT, 4);
+
+    // u0 = spatial reservoir
+    WriteReservoirUav(outSpatialReservoir, 0);
+
+    // u1 = debug output
+    WriteUav2D(m_rtOutput.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, 1);
+
+    return true;
+}
+
+bool Renderer::RunRtRestirSpatial(
+    CommandList& cl,
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height,
+    const RtDenoiserGuides& guides,
+    bool ranViewZReconstruct,
+    bool ranRestirTemporal,
+    const RtDebugRouting& rtDebug)
+{
+    if (!device ||
+        !m_rtRestirResourcesReady ||
+        !m_rtRestirSpatialReservoir ||
+        !m_rtOutput ||
+        !m_rtOutputReady ||
+        !guides.normalRough ||
+        !guides.depth ||
+        !guides.surfaceId)
+    {
+        return false;
+    }
+
+    const bool wantsRestirSpatial =
+        (m_rtEnableRestirEnvDi && m_rtRestirUseSpatial) ||
+        rtDebug.wantsRtRestirSpatialDebug ||
+        rtDebug.wantsRtRestirResolveDebug;
+
+    if (!wantsRestirSpatial)
+        return false;
+
+    if (!ranRestirTemporal || !m_rtRestirTemporalValidThisFrame)
+        return false;
+
+    ID3D12Resource* temporalReservoir =
+        m_rtRestirTemporalReservoir[m_rtRestirHistoryReadIndex].Get();
+
+    if (!temporalReservoir)
+        return false;
+
+    ID3D12Resource* currViewZ =
+        (ranViewZReconstruct && guides.viewZRecons)
+        ? guides.viewZRecons
+        : guides.viewZRaw;
+
+    if (!currViewZ)
+        return false;
+
+    ID3D12Resource* outSpatialReservoir =
+        m_rtRestirSpatialReservoir.Get();
+
+    auto* cmdList = cl.Get();
+
+    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+
+    CmdBeginEvent(cmdList, "RT ReSTIR Spatial");
+
+    cl.Transition(temporalReservoir, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(guides.normalRough, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(guides.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(guides.surfaceId, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(currViewZ, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.Transition(outSpatialReservoir, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // Bound as u1 for debug 108/109.
+    cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.FlushBarriers();
+
+    const bool okTables =
+        UpdateRtRestirSpatialTables(
+            frameIndex,
+            device,
+            temporalReservoir,
+            guides.normalRough,
+            guides.depth,
+            guides.surfaceId,
+            currViewZ,
+            outSpatialReservoir,
+            width,
+            height);
+
+    if (!okTables)
+    {
+        m_rtRestirSpatialValidThisFrame = false;
+        CmdEndEvent(cmdList);
+        return false;
+    }
+
+    const D3D12_GPU_VIRTUAL_ADDRESS cb =
+        UpdateRtRestirSpatialConstants(
+            frameIndex,
+            width,
+            height);
+
+    m_rtRestirSpatialPass.Dispatch(
+        cl,
+        cb,
+        m_rtFrames[frameIndex].restirSpatialSrvTable.gpu,
+        m_rtFrames[frameIndex].restirSpatialUavTable.gpu,
+        width,
+        height);
+
+    D3D12_RESOURCE_BARRIER barriers[2]{};
+
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barriers[0].UAV.pResource = outSpatialReservoir;
+
+    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barriers[1].UAV.pResource = m_rtOutput.Get();
+
+    cmdList->ResourceBarrier(2, barriers);
+
+    m_rtRestirSpatialValidThisFrame = true;
+
+    CmdEndEvent(cmdList);
+    return true;
+}
+
+bool Renderer::RunRtRestirResolve(
+    CommandList& cl,
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height,
+    float sceneTime,
+    const RtDebugRouting& rtDebug)
+{
+    if (!device ||
+        !m_device5 ||
+        !m_rtPipeline.StateObject() ||
+        !m_rtRestirResourcesReady ||
+        !m_rtRestirResolvedDiffuse ||
+        !m_rtRestirResolvedSpec ||
+        !m_rtOutputReady ||
+        m_rtFrames[frameIndex].tlas.GpuAddress() == 0)
+    {
+        return false;
+    }
+
+    const bool wantsResolve =
+        (m_rtEnableRestirEnvDi && m_rtRestirResolveToBeauty) ||
+        rtDebug.wantsRtRestirResolveDebug;
+
+    if (!wantsResolve)
+        return false;
+
+    // Resolve consumes the best reservoir produced this frame:
+    //   spatial  -> preferred when enabled and valid
+    //   temporal -> fallback when enabled and valid
+    //   initial  -> last-resort debug/validation fallback
+    //
+    // Resolve is a DXR visibility/material pass. It consumes the selected
+    // reservoir through t34 and must not regenerate initial reservoirs.
+    ID3D12Resource* resolveReservoir = nullptr;
+
+    if (m_rtRestirUseSpatial &&
+        m_rtRestirSpatialValidThisFrame &&
+        m_rtRestirSpatialReservoir)
+    {
+        resolveReservoir = m_rtRestirSpatialReservoir.Get();
+    }
+    else if (m_rtRestirUseTemporal && m_rtRestirTemporalValidThisFrame &&
+        m_rtRestirTemporalReservoir[m_rtRestirHistoryReadIndex])
+    {
+        resolveReservoir =
+            m_rtRestirTemporalReservoir[m_rtRestirHistoryReadIndex].Get();
+    }
+    else if (m_rtRestirInitialReservoir)
+    {
+        // Fallback useful for bring-up/debug if temporal/spatial did not run.
+        resolveReservoir = m_rtRestirInitialReservoir.Get();
+    }
+
+    if (!resolveReservoir)
+        return false;
+
+    auto cmd4 = GetCommandList4(cl);
+    if (!cmd4)
+        return false;
+
+    auto* cmdList = cl.Get();
+
+    ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
+    cmd4->SetDescriptorHeaps(1, heaps);
+
+    CmdBeginEvent(cmdList, "RT ReSTIR Resolve");
+
+    cl.Transition(resolveReservoir, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtRestirResolvedDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(m_rtRestirResolvedSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // Bound as g_Output for debug 110..114.
+    cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.FlushBarriers();
+
+    // Rebind t34 to the reservoir selected for resolve.
+    UpdateRtGeometryTable(
+        frameIndex,
+        resolveReservoir);
+
+    cmd4->SetPipelineState1(m_rtPipeline.StateObject());
+    cmd4->SetComputeRootSignature(m_rtPipeline.GlobalRootSignature());
+
+    cmd4->SetComputeRootDescriptorTable(0, m_rtOutputUav.gpu);
+    cmd4->SetComputeRootShaderResourceView(
+        1,
+        m_rtFrames[frameIndex].tlas.GpuAddress());
+
+    const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb =
+        UpdateGlobalConstants(
+            frameIndex,
+            width,
+            height,
+            sceneTime);
+
+    const D3D12_GPU_VIRTUAL_ADDRESS rtRayGenCb =
+        UpdateRtRayGenConstants(
+            frameIndex,
+            1u); // ReSTIR resolve mode
+
+    cmd4->SetComputeRootConstantBufferView(2, perFrameCb);
+    cmd4->SetComputeRootDescriptorTable(3, m_rtFrames[frameIndex].geometryTable.gpu);
+    cmd4->SetComputeRootConstantBufferView(4, rtRayGenCb);
+
+    auto tableBase =
+        m_rtPipeline.ShaderTable()->GetGPUVirtualAddress();
+
+    D3D12_DISPATCH_RAYS_DESC rays{};
+    rays.RayGenerationShaderRecord.StartAddress =
+        tableBase + m_rtPipeline.RayGenOffset();
+    rays.RayGenerationShaderRecord.SizeInBytes =
+        m_rtPipeline.RayGenRecordSize();
+
+    rays.MissShaderTable.StartAddress =
+        tableBase + m_rtPipeline.MissOffset();
+    rays.MissShaderTable.SizeInBytes =
+        m_rtPipeline.MissRecordSize();
+    rays.MissShaderTable.StrideInBytes =
+        m_rtPipeline.MissRecordSize();
+
+    rays.HitGroupTable.StartAddress =
+        tableBase + m_rtPipeline.HitGroupOffset();
+    rays.HitGroupTable.SizeInBytes =
+        m_rtPipeline.HitGroupRecordSize();
+    rays.HitGroupTable.StrideInBytes =
+        m_rtPipeline.HitGroupRecordSize();
+
+    rays.Width = width;
+    rays.Height = height;
+    rays.Depth = 1;
+
+    cmd4->DispatchRays(&rays);
+
+    D3D12_RESOURCE_BARRIER barriers[3]{};
+
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barriers[0].UAV.pResource = m_rtRestirResolvedDiffuse.Get();
+
+    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barriers[1].UAV.pResource = m_rtRestirResolvedSpec.Get();
+
+    barriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[2].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barriers[2].UAV.pResource = m_rtOutput.Get();
+
+    cmdList->ResourceBarrier(3, barriers);
+
+    m_rtRestirResolvedValidThisFrame = true;
+
+    CmdEndEvent(cmdList);
+    return true;
+}
+
+// ReSTIR reservoir history depends on both reservoir settings and the guide
+// histories used to validate reuse. Raw accumulation resets alone should not
+// clear ReSTIR history, but true temporal/guide invalidation must.
+void Renderer::ResetRtRestirHistory()
+{
+    m_rtRestirHistoryValid = false;
+
+    m_rtRestirTemporalValidThisFrame = false;
+    m_rtRestirSpatialValidThisFrame = false;
+    m_rtRestirResolvedValidThisFrame = false;
+
+    m_rtRestirHistoryReadIndex = 0;
+    m_rtRestirHistoryWriteIndex = 1;
+}
+
+bool Renderer::UpdateRtRestirApplyTables(
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    ID3D12Resource* baseDiffuse,
+    ID3D12Resource* baseSpec,
+    ID3D12Resource* restirDiffuse,
+    ID3D12Resource* restirSpec,
+    ID3D12Resource* outDiffuse,
+    ID3D12Resource* outSpec)
+{
+    if (!device ||
+        !baseDiffuse ||
+        !baseSpec ||
+        !restirDiffuse ||
+        !restirSpec ||
+        !outDiffuse ||
+        !outSpec)
+    {
+        return false;
+    }
+
+    auto& frame = m_rtFrames[frameIndex];
+
+    EnsureRtDescriptorTable(
+        frame.restirApplySrvTable,
+        frame.restirApplySrvCount,
+        kRtRestirApplySrvCount);
+
+    EnsureRtDescriptorTable(
+        frame.restirApplyUavTable,
+        frame.restirApplyUavCount,
+        kRtRestirApplyUavCount);
+
+    const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
+
+    auto SrvAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.restirApplySrvTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    auto UavAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.restirApplyUavTable.cpu;
+        h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;
+        return h;
+    };
+
+    auto WriteTextureSrv = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+        srv.Texture2D.PlaneSlice = 0;
+        srv.Texture2D.ResourceMinLODClamp = 0.0f;
+
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
+
+    auto WriteTextureUav = [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        uav.Texture2D.MipSlice = 0;
+        uav.Texture2D.PlaneSlice = 0;
+
+        device->CreateUnorderedAccessView(
+            resource,
+            nullptr,
+            &uav,
+            UavAt(slot));
+    };
+
+    // t0 = base diffuse
+    // t1 = base spec
+    // t2 = resolved ReSTIR diffuse
+    // t3 = resolved ReSTIR spec
+    WriteTextureSrv(baseDiffuse, 0);
+    WriteTextureSrv(baseSpec, 1);
+    WriteTextureSrv(restirDiffuse, 2);
+    WriteTextureSrv(restirSpec, 3);
+
+    // u0 = applied diffuse
+    // u1 = applied spec
+    WriteTextureUav(outDiffuse, 0);
+    WriteTextureUav(outSpec, 1);
+
+    return true;
+}
+
+// Optional validation apply for resolved ReSTIR environment lighting.
+// The resolved diffuse/specular terms are added after the existing RT signal
+// pipeline, so this is useful for inspection but is not equivalent to injecting
+// the signal before temporal/spatial filtering.
+bool Renderer::RunRtRestirApplyBeauty(
+    CommandList& cl,
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height,
+    const RtDebugRouting& rtDebug)
+{
+    if (!m_rtEnableRestirEnvDi ||
+        !m_rtRestirResolveToBeauty ||
+        rtDebug.wantsRtRestirResolveDebug ||
+        !m_rtRestirResolvedValidThisFrame ||
+        !m_rtRestirAppliedReady ||
+        !m_rtRestirResolvedDiffuse ||
+        !m_rtRestirResolvedSpec ||
+        !m_rtRestirAppliedDiffuse ||
+        !m_rtRestirAppliedSpec ||
+        !m_rtPostReady ||
+        !m_rtPostDiffuse ||
+        !m_rtPostSpec)
+    {
+        return false;
+    }
+
+    auto* cmdList = cl.Get();
+
+    CmdBeginEvent(cmdList, "RT ReSTIR Apply Beauty");
+
+    cl.Transition(m_rtPostDiffuse.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtPostSpec.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtRestirResolvedDiffuse.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtRestirResolvedSpec.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.Transition(m_rtRestirAppliedDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(m_rtRestirAppliedSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.FlushBarriers();
+
+    const bool okTables =
+        UpdateRtRestirApplyTables(
+            frameIndex,
+            device,
+            m_rtPostDiffuse.Get(),
+            m_rtPostSpec.Get(),
+            m_rtRestirResolvedDiffuse.Get(),
+            m_rtRestirResolvedSpec.Get(),
+            m_rtRestirAppliedDiffuse.Get(),
+            m_rtRestirAppliedSpec.Get());
+
+    if (!okTables)
+    {
+        CmdEndEvent(cmdList);
+        return false;
+    }
+
+    const D3D12_GPU_VIRTUAL_ADDRESS applyCb =
+        UpdateRtRestirApplyConstants(frameIndex);
+
+    m_rtRestirApplyPass.Dispatch(
+        cl,
+        applyCb,
+        m_rtFrames[frameIndex].restirApplySrvTable.gpu,
+        m_rtFrames[frameIndex].restirApplyUavTable.gpu,
+        width,
+        height);
+
+    D3D12_RESOURCE_BARRIER barriers[2]{};
+
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barriers[0].UAV.pResource = m_rtRestirAppliedDiffuse.Get();
+
+    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barriers[1].UAV.pResource = m_rtRestirAppliedSpec.Get();
+
+    cmdList->ResourceBarrier(2, barriers);
+
+    CmdEndEvent(cmdList);
+
+    return CombineRtSignalsToOutput(
+        device,
+        cl,
+        frameIndex,
+        m_rtRestirAppliedDiffuse.Get(),
+        m_rtRestirAppliedSpec.Get(),
+        width,
+        height,
+        "RT ReSTIR Applied Combine",
+        true);
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirApplyConstants(uint32_t frameIndex)
+{
+    constexpr uint32_t cbSize =
+        (sizeof(RtRestirApplyConstants) + 255u) & ~255u;
+
+    auto alloc = m_upload.Allocate(frameIndex, cbSize, 256);
+    auto* cb = reinterpret_cast<RtRestirApplyConstants*>(alloc.cpu);
+
+    *cb = {};
+    cb->diffuseScale = std::max(0.0f, m_rtRestirApplyDiffuseScale);
+    cb->specularScale = std::max(0.0f, m_rtRestirApplySpecularScale);
+    cb->mode = m_rtRestirApplyMode;
+    cb->flags = 0;
+
+    return alloc.gpu;
 }
