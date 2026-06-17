@@ -1,5 +1,29 @@
 #include "Window.h"
 
+namespace
+{
+    bool IsTrackedInputKey(uint32_t key)
+    {
+        switch (key)
+        {
+        case 'A':
+        case 'D':
+        case 'W':
+        case 'S':
+        case 'O':
+        case '0':
+        case VK_F6:
+        case VK_F7:
+        case VK_F8:
+        case VK_F9:
+            return true;
+
+        default:
+            return false;
+        }
+    }
+}
+
 Window::~Window()
 {
     if (m_hwnd)
@@ -89,6 +113,14 @@ bool Window::ConsumeKeyPress(uint32_t virtualKey)
     return pressed;
 }
 
+bool Window::IsKeyDown(uint32_t virtualKey) const
+{
+    if (virtualKey >= m_keyDown.size())
+        return false;
+
+    return m_keyDown[virtualKey];
+}
+
 LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
     Window* self = nullptr;
@@ -118,22 +150,51 @@ LRESULT Window::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 
     case WM_KEYDOWN:
     {
-        // Record one edge-triggered key press, but do not return here.
-        // Falling through to DefWindowProcW keeps default/future keyboard handling
-        // from being bypassed.
+        const uint32_t key = static_cast<uint32_t>(wparam);
+
+        if (!IsTrackedInputKey(key))
+            break;
+
+        // Track held state for continuous input, and record one edge-triggered
+        // press for toggle-style controls.
         constexpr LPARAM kWasDownMask = (LPARAM(1) << 30);
 
-        if ((lparam & kWasDownMask) == 0)
+        if (key < m_keyDown.size())
         {
-            const uint32_t key = static_cast<uint32_t>(wparam);
+            m_keyDown[key] = true;
 
-            if (key < m_keyPressed.size())
+            if ((lparam & kWasDownMask) == 0)
             {
                 m_keyPressed[key] = true;
             }
         }
 
-        break;
+        // These are application-owned keys. Do not let 'O' or movement keys reach
+        // DefWindowProcW, because 'O' has default Windows menu behaviour and can
+        // interfere with subsequent keyboard input.
+        return 0;
+    }
+
+    case WM_KEYUP:
+    {
+        const uint32_t key = static_cast<uint32_t>(wparam);
+
+        if (!IsTrackedInputKey(key))
+            break;
+
+        if (key < m_keyDown.size())
+        {
+            m_keyDown[key] = false;
+        }
+
+        return 0;
+    }
+
+    case WM_KILLFOCUS:
+    {
+        m_keyPressed.fill(false);
+        m_keyDown.fill(false);
+        return 0;
     }
 
     case WM_SIZE:

@@ -4,6 +4,7 @@
 #include "Source/Renderer/Renderer.h"
 #include <cstring>
 #include <format>
+#include <algorithm>
 
 Renderer m_renderer;
 
@@ -185,8 +186,11 @@ int Application::Run()
 
 void Application::Tick()
 {
+    m_timer.Tick();
+
     HandleResizeIfNeeded();
     HandleDebugInput();
+    HandleCameraInput(m_timer.DeltaSeconds());
     Render();
 }
 
@@ -247,6 +251,56 @@ void Application::HandleDebugInput()
             enabled ? "enabled" : "disabled"));
 
         LogSelectedDebugView(m_renderer);
+    }
+}
+
+void Application::HandleCameraInput(float deltaSeconds)
+{
+    const float dt = std::clamp(deltaSeconds, 0.0f, 0.10f);
+
+    if (m_window.ConsumeKeyPress('O'))
+    {
+        m_renderer.ToggleAutoOrbit();
+
+        DebugOutput(std::format(
+            "Camera auto-orbit {}",
+            m_renderer.IsAutoOrbitEnabled() ? "enabled" : "disabled"));
+
+        // Do not process movement in the same frame as the mode toggle. Otherwise
+        // a held/stale movement key can immediately take ownership back from
+        // auto-orbit after re-enabling it.
+        return;
+    }
+
+    float yawDelta = 0.0f;
+    float radiusDelta = 0.0f;
+
+    constexpr float yawSpeed = 1.25f;   // radians per second
+    constexpr float zoomSpeed = 4.0f;   // world units per second
+
+    if (m_window.IsKeyDown('A'))
+    {
+        yawDelta += yawSpeed * dt;
+    }
+
+    if (m_window.IsKeyDown('D'))
+    {
+        yawDelta -= yawSpeed * dt;
+    }
+
+    if (m_window.IsKeyDown('W'))
+    {
+        radiusDelta -= zoomSpeed * dt;
+    }
+
+    if (m_window.IsKeyDown('S'))
+    {
+        radiusDelta += zoomSpeed * dt;
+    }
+
+    if (yawDelta != 0.0f || radiusDelta != 0.0f)
+    {
+        m_renderer.ApplyOrbitCameraInput(yawDelta, radiusDelta);
     }
 }
 
@@ -341,8 +395,6 @@ void Application::EndFrame()
 
 void Application::Render()
 {
-    m_timer.Tick();
-
     BeginFrame(); 
 
     m_frameTimer.Begin(m_cmdList.Get(), m_frameIndex);

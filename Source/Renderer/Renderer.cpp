@@ -90,6 +90,13 @@ namespace
         kDebugReqRtAov |
         DebugViewReq_Restir;
 
+    constexpr float kOrbitAutoYawSpeed = 0.35f;
+    constexpr float kOrbitMinRadius = 1.0f;
+    constexpr float kOrbitMaxRadius = 20.0f;
+    constexpr float kOrbitTargetY = 0.5f;
+    constexpr float kOrbitCameraHeightOffset = 1.5f;
+    constexpr float kCameraMaxDeltaSeconds = 0.10f;
+
     bool HasDebugViewRequirement(const DebugViewDesc& desc, uint32_t requirement)
     {
         return (desc.requirements & requirement) != 0;
@@ -387,6 +394,56 @@ void Renderer::SetRaytracingEnabled(bool enabled)
     {
         m_debugView = 0;
     }
+}
+
+bool Renderer::IsAutoOrbitEnabled() const
+{
+    return m_autoOrbit;
+}
+
+void Renderer::SetAutoOrbitEnabled(bool enabled)
+{
+    if (m_autoOrbit == enabled)
+        return;
+
+    m_autoOrbit = enabled;
+
+    // Avoid a yaw snap when auto-orbit is re-enabled. The next constants update
+    // will establish a fresh time baseline and continue from the current yaw.
+    m_cameraTimeValid = false;
+}
+
+void Renderer::ToggleAutoOrbit()
+{
+    SetAutoOrbitEnabled(!m_autoOrbit);
+}
+
+void Renderer::ApplyOrbitCameraInput(float yawDelta, float radiusDelta)
+{
+    if (yawDelta == 0.0f && radiusDelta == 0.0f)
+        return;
+
+    // Manual orbit input intentionally takes ownership from auto-orbit.
+    if (m_autoOrbit)
+    {
+        m_autoOrbit = false;
+        m_cameraTimeValid = false;
+    }
+
+    m_camYaw += yawDelta;
+
+    // Keep yaw bounded so long debug sessions do not accumulate very large
+    // angles. This does not change camera behaviour.
+    constexpr float twoPi = 6.28318530717958647692f;
+    if (m_camYaw > twoPi || m_camYaw < -twoPi)
+    {
+        m_camYaw = std::fmod(m_camYaw, twoPi);
+    }
+
+    m_camRadius = std::clamp(
+        m_camRadius + radiusDelta,
+        kOrbitMinRadius,
+        kOrbitMaxRadius);
 }
 
 void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
@@ -1572,8 +1629,28 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     auto* cb = reinterpret_cast<PerFrameConstants*>(alloc.cpu);
     if (m_autoOrbit)
     {
-        m_camYaw = time * 0.35f;
+        if (m_cameraTimeValid)
+        {
+            const float dt = std::clamp(
+                time - m_lastCameraUpdateTime,
+                0.0f,
+                kCameraMaxDeltaSeconds);
 
+            m_camYaw += dt * kOrbitAutoYawSpeed;
+        }
+
+        m_lastCameraUpdateTime = time;
+        m_cameraTimeValid = true;
+    }
+    else
+    {
+        // Keep the time baseline current while manual orbit is active so re-enabling
+        // auto-orbit can resume from the current yaw without a large first-frame dt.
+        m_lastCameraUpdateTime = time;
+        m_cameraTimeValid = true;
+    }
+
+    {
         const float cp = cosf(m_camPitch);
         const float sp = sinf(m_camPitch);
         const float cy = cosf(m_camYaw);
@@ -1582,11 +1659,13 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
         m_sceneData.camera.position =
         {
             sy * cp * m_camRadius,
-            sp * m_camRadius + 1.5f,
+            sp * m_camRadius + kOrbitCameraHeightOffset,
             cy * cp * m_camRadius
         };
-        m_sceneData.camera.target = { 0.0f, 0.5f, 0.0f };
+
+        m_sceneData.camera.target = { 0.0f, kOrbitTargetY, 0.0f };
     }
+
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     
     const auto& cam = m_sceneData.camera;

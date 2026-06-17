@@ -24,6 +24,7 @@ private:
     void Render();
     void HandleResizeIfNeeded();
     void HandleDebugInput();
+    void HandleCameraInput(float deltaSeconds);
     void SelectRelativeDebugView(int direction);
     void BeginFrame();
     void EndFrame();

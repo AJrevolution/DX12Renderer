@@ -18,6 +18,7 @@ public:
     // Resize tracking
     bool ConsumeResize(uint32_t& outW, uint32_t& outH);
     bool ConsumeKeyPress(uint32_t virtualKey);
+    bool IsKeyDown(uint32_t virtualKey) const;
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
@@ -33,4 +34,5 @@ private:
     uint32_t m_pendingW = 0;
     uint32_t m_pendingH = 0;
     std::array<bool, 256> m_keyPressed{};
+    std::array<bool, 256> m_keyDown{};
 };

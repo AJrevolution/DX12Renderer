@@ -138,6 +138,10 @@ public:
     uint32_t GetDebugView() const;
     bool IsRaytracingEnabled() const;
     void SetRaytracingEnabled(bool enabled);
+    bool IsAutoOrbitEnabled() const;
+    void SetAutoOrbitEnabled(bool enabled);
+    void ToggleAutoOrbit();
+    void ApplyOrbitCameraInput(float yawDelta, float radiusDelta);
 
 private:
 
@@ -1380,6 +1384,8 @@ private:
     float m_camYaw = 0.0f;
     float m_camPitch = -0.25f;
     float m_camRadius = 4.0f;
+    float m_lastCameraUpdateTime = 0.0f;
+    bool m_cameraTimeValid = false;
     
     //Toggles
     // -----------------------------------------------------------------------------
