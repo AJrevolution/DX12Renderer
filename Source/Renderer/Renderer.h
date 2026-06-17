@@ -177,6 +177,9 @@ public:
     void ToggleFreeRoam();
     void ApplyOrbitCameraInput(const OrbitCameraInput& input);
     void ApplyFreeRoamCameraInput(const FreeRoamCameraInput& input);
+    bool IsRtAccumulationEnabled() const;
+    void SetRtAccumulationEnabled(bool enabled);
+    void ToggleRtAccumulation();
 
 private:
 
@@ -186,6 +189,8 @@ private:
 
     void InitialiseFreeRoamFromOrbitCamera();
     void ProjectOrbitCameraFromFreeRoam();
+    bool ShouldAdvanceSceneAnimation() const;
+    float UpdateSceneAnimationTime(float frameTime);
 
     enum class RtEnvSamplingMode : uint32_t
     {
@@ -1437,6 +1442,9 @@ private:
 
     uint64_t m_cameraRevision = 0;
     uint64_t m_prevRtCameraRevision = 0;
+    float m_sceneAnimationTime = 0.0f;
+    float m_lastSceneAnimationUpdateTime = 0.0f;
+    bool m_sceneAnimationTimeValid = false;
     
     //Toggles
     // -----------------------------------------------------------------------------
@@ -1636,7 +1644,6 @@ private:
     //     40/41/42/43/44 must not be captured by temporal debug output.
     // -----------------------------------------------------------------------------
     uint32_t m_debugView = 0;
-    bool m_pauseAnimation = false;
     bool m_useRaytracing = false;        // Toggle for raytracing vs rasterization (for testing/debugging)
     bool m_rtAccumulate = false;         // validation / progressive mode
     bool m_rtSvgf = true;
@@ -1766,9 +1773,6 @@ private:
     bool m_enableShadows = true;
 
     bool m_dxrAvailable = false;
-
-    float m_frozenTime = 0.0f;
-    bool  m_wasPaused = false;
 
     ComPtr<ID3D12Device5> m_device5;
 

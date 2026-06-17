@@ -251,6 +251,15 @@ void Application::HandleDebugInput()
 
         LogSelectedDebugView(m_renderer);
     }
+
+    if (m_window.ConsumeKeyPress('R'))
+    {
+        m_renderer.ToggleRtAccumulation();
+
+        DebugOutput(std::format(
+            "RT accumulation {}",
+            m_renderer.IsRtAccumulationEnabled() ? "enabled" : "disabled"));
+    }
 }
 
 void Application::HandleCameraInput(float deltaSeconds)

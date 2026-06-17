@@ -105,6 +105,7 @@ namespace
     constexpr float kFreeRoamMaxPitch = 1.45f;
 
     constexpr float kCameraMaxDeltaSeconds = 0.10f;
+    constexpr float kSceneAnimationMaxDeltaSeconds = 0.10f;
 
     float WrapAngleRadians(float angle)
     {
@@ -453,6 +454,28 @@ void Renderer::SetRaytracingEnabled(bool enabled)
     }
 }
 
+bool Renderer::IsRtAccumulationEnabled() const
+{
+    return m_rtAccumulate;
+}
+
+void Renderer::SetRtAccumulationEnabled(bool enabled)
+{
+    if (m_rtAccumulate == enabled)
+        return;
+
+    m_rtAccumulate = enabled;
+
+    // Accumulation mode changes alter the meaning of the RT accumulation
+    // targets. Reset immediately so the next frame starts from a clean sample.
+    ResetRtAccumulation(true);
+}
+
+void Renderer::ToggleRtAccumulation()
+{
+    SetRtAccumulationEnabled(!m_rtAccumulate);
+}
+
 CameraControlMode Renderer::GetCameraControlMode() const
 {
     return m_cameraMode;
@@ -683,6 +706,39 @@ void Renderer::ProjectOrbitCameraFromFreeRoam()
             -0.95f,
             0.95f));
     }
+}
+
+bool Renderer::ShouldAdvanceSceneAnimation() const
+{
+    // Auto-orbit is presentation mode: camera and demo animation both advance.
+    // Manual orbit and free-roam are inspection modes: the scene freezes so
+    // progressive RT accumulation can converge once the camera stops moving.
+    return m_cameraMode == CameraControlMode::AutoOrbit;
+}
+
+float Renderer::UpdateSceneAnimationTime(float frameTime)
+{
+    if (!m_sceneAnimationTimeValid)
+    {
+        m_sceneAnimationTime = frameTime;
+        m_lastSceneAnimationUpdateTime = frameTime;
+        m_sceneAnimationTimeValid = true;
+        return m_sceneAnimationTime;
+    }
+
+    const float dt = std::clamp(
+        frameTime - m_lastSceneAnimationUpdateTime,
+        0.0f,
+        kSceneAnimationMaxDeltaSeconds);
+
+    m_lastSceneAnimationUpdateTime = frameTime;
+
+    if (ShouldAdvanceSceneAnimation())
+    {
+        m_sceneAnimationTime += dt;
+    }
+
+    return m_sceneAnimationTime;
 }
 
 
@@ -1020,13 +1076,7 @@ void Renderer::RenderFrame(
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
     cmdList->SetDescriptorHeaps(1, heaps);
 
-    if (m_pauseAnimation && !m_wasPaused)
-    {
-        m_frozenTime = time;
-    }
-
-    const float sceneTime = m_pauseAnimation ? m_frozenTime : time;
-    m_wasPaused = m_pauseAnimation;
+    const float sceneTime = UpdateSceneAnimationTime(time);
 
     BuildDrawList(sceneTime);
 
@@ -1053,6 +1103,10 @@ void Renderer::RenderFrame(
 
     RtPostMode rtPostMode = ResolveRtPostMode(rtDebug);
 
+    const bool allowsStationaryCameraAccumulation =
+        m_cameraMode == CameraControlMode::ManualOrbit ||
+        m_cameraMode == CameraControlMode::FreeRoam;
+
     const bool allowRtAccumulation =
         m_rtAccumulate &&
         !wantsMotionDilateDebug &&
@@ -1064,7 +1118,7 @@ void Renderer::RenderFrame(
         ((m_debugView == 0) || wantsRtInspectionDebug) &&
         (
             m_rtTemporal ||
-            (m_cameraMode == CameraControlMode::ManualOrbit && m_pauseAnimation) ||
+            allowsStationaryCameraAccumulation ||
             wantsSplitDebug ||
             wantsMotionDebug ||
             wantsViewZDebug ||
