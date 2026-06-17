@@ -20,9 +20,16 @@ public:
     bool ConsumeKeyPress(uint32_t virtualKey);
     bool IsKeyDown(uint32_t virtualKey) const;
 
+    void SetMouseCaptured(bool enabled);
+    bool IsMouseCaptured() const;
+    void ConsumeMouseDelta(float& outDeltaX, float& outDeltaY);
+
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
     LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
+    void CentreCapturedCursor();
+    void UpdateCursorClip();
+    void SetCursorVisible(bool visible);
 
 private:
     HWND m_hwnd = nullptr;
@@ -35,4 +42,10 @@ private:
     uint32_t m_pendingH = 0;
     std::array<bool, 256> m_keyPressed{};
     std::array<bool, 256> m_keyDown{};
+
+    bool m_mouseCaptured = false;
+    bool m_cursorVisible = true;
+    bool m_ignoreNextMouseMove = false;
+    float m_mouseDeltaX = 0.0f;
+    float m_mouseDeltaY = 0.0f;
 };

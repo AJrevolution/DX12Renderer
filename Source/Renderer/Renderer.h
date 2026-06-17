@@ -110,6 +110,35 @@ const DebugViewDesc* FindDebugViewDesc(uint32_t id);
 const DebugViewDesc* GetDebugViewDescs(std::size_t& count);
 const char* DebugViewAvailabilityName(DebugViewAvailability availability);
 
+enum class CameraControlMode : uint8_t
+{
+    AutoOrbit,
+    ManualOrbit,
+    FreeRoam
+};
+
+struct OrbitCameraInput
+{
+    // -1..1 style axes supplied by the application input layer.
+    // Renderer owns speed, clamping, and camera state changes.
+    float yawAxis = 0.0f;
+    float zoomAxis = 0.0f;
+    float deltaSeconds = 0.0f;
+};
+
+struct FreeRoamCameraInput
+{
+    // -1..1 style axes supplied by the application input layer.
+    // Mouse deltas are in pixels accumulated by Window since last frame.
+    float moveForwardAxis = 0.0f;
+    float moveRightAxis = 0.0f;
+    float mouseDeltaX = 0.0f;
+    float mouseDeltaY = 0.0f;
+    float deltaSeconds = 0.0f;
+};
+
+const char* CameraControlModeName(CameraControlMode mode);
+
 class Renderer
 {
 public:
@@ -138,12 +167,25 @@ public:
     uint32_t GetDebugView() const;
     bool IsRaytracingEnabled() const;
     void SetRaytracingEnabled(bool enabled);
+    CameraControlMode GetCameraControlMode() const;
+    void SetCameraControlMode(CameraControlMode mode);
     bool IsAutoOrbitEnabled() const;
     void SetAutoOrbitEnabled(bool enabled);
     void ToggleAutoOrbit();
-    void ApplyOrbitCameraInput(float yawDelta, float radiusDelta);
+    bool IsFreeRoamEnabled() const;
+    void SetFreeRoamEnabled(bool enabled);
+    void ToggleFreeRoam();
+    void ApplyOrbitCameraInput(const OrbitCameraInput& input);
+    void ApplyFreeRoamCameraInput(const FreeRoamCameraInput& input);
 
 private:
+
+    void ComputeOrbitCamera(
+        DirectX::XMFLOAT3& outPosition,
+        DirectX::XMFLOAT3& outTarget) const;
+
+    void InitialiseFreeRoamFromOrbitCamera();
+    void ProjectOrbitCameraFromFreeRoam();
 
     enum class RtEnvSamplingMode : uint32_t
     {
@@ -1384,8 +1426,17 @@ private:
     float m_camYaw = 0.0f;
     float m_camPitch = -0.25f;
     float m_camRadius = 4.0f;
+    CameraControlMode m_cameraMode = CameraControlMode::AutoOrbit;
     float m_lastCameraUpdateTime = 0.0f;
     bool m_cameraTimeValid = false;
+
+    DirectX::XMFLOAT3 m_freeCamPosition{ 0.0f, 1.5f, 4.0f };
+    float m_freeCamYaw = 0.0f;
+    float m_freeCamPitch = 0.0f;
+    bool m_freeCamInitialised = false;
+
+    uint64_t m_cameraRevision = 0;
+    uint64_t m_prevRtCameraRevision = 0;
     
     //Toggles
     // -----------------------------------------------------------------------------
@@ -1585,7 +1636,6 @@ private:
     //     40/41/42/43/44 must not be captured by temporal debug output.
     // -----------------------------------------------------------------------------
     uint32_t m_debugView = 0;
-    bool  m_autoOrbit = true;
     bool m_pauseAnimation = false;
     bool m_useRaytracing = false;        // Toggle for raytracing vs rasterization (for testing/debugging)
     bool m_rtAccumulate = false;         // validation / progressive mode

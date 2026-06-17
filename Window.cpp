@@ -11,6 +11,7 @@ namespace
         case 'W':
         case 'S':
         case 'O':
+        case 'F':
         case '0':
         case VK_F6:
         case VK_F7:
@@ -26,6 +27,11 @@ namespace
 
 Window::~Window()
 {
+    if (m_mouseCaptured)
+    {
+        SetMouseCaptured(false);
+    }
+
     if (m_hwnd)
     {
         DestroyWindow(m_hwnd);
@@ -121,6 +127,114 @@ bool Window::IsKeyDown(uint32_t virtualKey) const
     return m_keyDown[virtualKey];
 }
 
+void Window::SetMouseCaptured(bool enabled)
+{
+    if (!m_hwnd || m_mouseCaptured == enabled)
+        return;
+
+    m_mouseDeltaX = 0.0f;
+    m_mouseDeltaY = 0.0f;
+    m_ignoreNextMouseMove = false;
+
+    if (enabled)
+    {
+        m_mouseCaptured = true;
+
+        SetCapture(m_hwnd);
+        UpdateCursorClip();
+        CentreCapturedCursor();
+        m_ignoreNextMouseMove = true;
+        SetCursorVisible(false);
+    }
+    else
+    {
+        m_mouseCaptured = false;
+
+        ClipCursor(nullptr);
+
+        if (GetCapture() == m_hwnd)
+        {
+            ReleaseCapture();
+        }
+
+        SetCursorVisible(true);
+    }
+}
+
+bool Window::IsMouseCaptured() const
+{
+    return m_mouseCaptured;
+}
+
+void Window::ConsumeMouseDelta(float& outDeltaX, float& outDeltaY)
+{
+    outDeltaX = m_mouseDeltaX;
+    outDeltaY = m_mouseDeltaY;
+
+    m_mouseDeltaX = 0.0f;
+    m_mouseDeltaY = 0.0f;
+}
+
+void Window::CentreCapturedCursor()
+{
+    if (!m_hwnd)
+        return;
+
+    RECT client{};
+    GetClientRect(m_hwnd, &client);
+
+    POINT centre{};
+    centre.x = (client.right - client.left) / 2;
+    centre.y = (client.bottom - client.top) / 2;
+
+    ClientToScreen(m_hwnd, &centre);
+    SetCursorPos(centre.x, centre.y);
+}
+
+void Window::UpdateCursorClip()
+{
+    if (!m_hwnd)
+        return;
+
+    RECT client{};
+    GetClientRect(m_hwnd, &client);
+
+    POINT topLeft{ client.left, client.top };
+    POINT bottomRight{ client.right, client.bottom };
+
+    ClientToScreen(m_hwnd, &topLeft);
+    ClientToScreen(m_hwnd, &bottomRight);
+
+    RECT clip{};
+    clip.left = topLeft.x;
+    clip.top = topLeft.y;
+    clip.right = bottomRight.x;
+    clip.bottom = bottomRight.y;
+
+    ClipCursor(&clip);
+}
+
+void Window::SetCursorVisible(bool visible)
+{
+    if (m_cursorVisible == visible)
+        return;
+
+    m_cursorVisible = visible;
+
+    if (visible)
+    {
+        while (ShowCursor(TRUE) < 0)
+        {
+        }
+    }
+    else
+    {
+        while (ShowCursor(FALSE) >= 0)
+        {
+        }
+    }
+}
+
 LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
     Window* self = nullptr;
@@ -145,9 +259,62 @@ LRESULT Window::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
     switch (msg)
     {
     case WM_DESTROY:
+        SetMouseCaptured(false);
         PostQuitMessage(0);
         return 0;
 
+    case WM_MOUSEMOVE:
+    {
+        if (!m_mouseCaptured)
+            break;
+
+        RECT client{};
+        GetClientRect(hwnd, &client);
+
+        const int centreX = (client.right - client.left) / 2;
+        const int centreY = (client.bottom - client.top) / 2;
+
+        const int x = static_cast<int>(static_cast<short>(LOWORD(lparam)));
+        const int y = static_cast<int>(static_cast<short>(HIWORD(lparam)));
+
+        if (m_ignoreNextMouseMove && x == centreX && y == centreY)
+        {
+            m_ignoreNextMouseMove = false;
+            return 0;
+        }
+
+        m_ignoreNextMouseMove = false;
+
+        const int dx = x - centreX;
+        const int dy = y - centreY;
+
+        if (dx != 0 || dy != 0)
+        {
+            m_mouseDeltaX += static_cast<float>(dx);
+            m_mouseDeltaY += static_cast<float>(dy);
+
+            CentreCapturedCursor();
+            m_ignoreNextMouseMove = true;
+        }
+
+        return 0;
+    }
+
+    case WM_CAPTURECHANGED:
+    {
+        if (m_mouseCaptured && reinterpret_cast<HWND>(lparam) != m_hwnd)
+        {
+            m_mouseCaptured = false;
+            m_mouseDeltaX = 0.0f;
+            m_mouseDeltaY = 0.0f;
+            m_ignoreNextMouseMove = false;
+
+            ClipCursor(nullptr);
+            SetCursorVisible(true);
+        }
+
+        return 0;
+    }
     case WM_KEYDOWN:
     {
         const uint32_t key = static_cast<uint32_t>(wparam);
@@ -169,9 +336,8 @@ LRESULT Window::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             }
         }
 
-        // These are application-owned keys. Do not let 'O' or movement keys reach
-        // DefWindowProcW, because 'O' has default Windows menu behaviour and can
-        // interfere with subsequent keyboard input.
+        // These are application-owned keys. Do not let movement/debug shortcuts reach
+        // DefWindowProcW, where they may trigger default system or accelerator handling.
         return 0;
     }
 
@@ -194,6 +360,7 @@ LRESULT Window::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
     {
         m_keyPressed.fill(false);
         m_keyDown.fill(false);
+        SetMouseCaptured(false);
         return 0;
     }
 
@@ -211,6 +378,13 @@ LRESULT Window::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             m_pendingResize = true;
             m_pendingW = w;
             m_pendingH = h;
+        }
+
+        if (m_mouseCaptured)
+        {
+            UpdateCursorClip();
+            CentreCapturedCursor();
+            m_ignoreNextMouseMove = true;
         }
         return 0;
     }

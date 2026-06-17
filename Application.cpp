@@ -4,7 +4,6 @@
 #include "Source/Renderer/Renderer.h"
 #include <cstring>
 #include <format>
-#include <algorithm>
 
 Renderer m_renderer;
 
@@ -256,52 +255,98 @@ void Application::HandleDebugInput()
 
 void Application::HandleCameraInput(float deltaSeconds)
 {
-    const float dt = std::clamp(deltaSeconds, 0.0f, 0.10f);
-
-    if (m_window.ConsumeKeyPress('O'))
+    if (m_window.ConsumeKeyPress('F'))
     {
-        m_renderer.ToggleAutoOrbit();
+        const bool enableFreeRoam =
+            m_renderer.GetCameraControlMode() != CameraControlMode::FreeRoam;
+
+        m_renderer.SetCameraControlMode(
+            enableFreeRoam
+            ? CameraControlMode::FreeRoam
+            : CameraControlMode::ManualOrbit);
+
+        m_window.SetMouseCaptured(enableFreeRoam);
 
         DebugOutput(std::format(
-            "Camera auto-orbit {}",
-            m_renderer.IsAutoOrbitEnabled() ? "enabled" : "disabled"));
+            "Camera mode: {}",
+            CameraControlModeName(m_renderer.GetCameraControlMode())));
 
-        // Do not process movement in the same frame as the mode toggle. Otherwise
-        // a held/stale movement key can immediately take ownership back from
-        // auto-orbit after re-enabling it.
         return;
     }
 
-    float yawDelta = 0.0f;
-    float radiusDelta = 0.0f;
+    if (m_window.ConsumeKeyPress('O'))
+    {
+        if (m_renderer.GetCameraControlMode() == CameraControlMode::FreeRoam)
+        {
+            m_window.SetMouseCaptured(false);
+        }
 
-    constexpr float yawSpeed = 1.25f;   // radians per second
-    constexpr float zoomSpeed = 4.0f;   // world units per second
+        m_renderer.ToggleAutoOrbit();
+
+        DebugOutput(std::format(
+            "Camera mode: {}",
+            CameraControlModeName(m_renderer.GetCameraControlMode())));
+
+        return;
+    }
+
+    if (m_renderer.GetCameraControlMode() == CameraControlMode::FreeRoam)
+    {
+        FreeRoamCameraInput input{};
+        input.deltaSeconds = deltaSeconds;
+
+        m_window.ConsumeMouseDelta(
+            input.mouseDeltaX,
+            input.mouseDeltaY);
+
+        if (m_window.IsKeyDown('W'))
+        {
+            input.moveForwardAxis += 1.0f;
+        }
+
+        if (m_window.IsKeyDown('S'))
+        {
+            input.moveForwardAxis -= 1.0f;
+        }
+
+        if (m_window.IsKeyDown('A'))
+        {
+            input.moveRightAxis += 1.0f;
+        }
+
+        if (m_window.IsKeyDown('D'))
+        {
+            input.moveRightAxis -= 1.0f;
+        }
+
+        m_renderer.ApplyFreeRoamCameraInput(input);
+        return;
+    }
+
+    OrbitCameraInput input{};
+    input.deltaSeconds = deltaSeconds;
 
     if (m_window.IsKeyDown('A'))
     {
-        yawDelta += yawSpeed * dt;
+        input.yawAxis += 1.0f;
     }
 
     if (m_window.IsKeyDown('D'))
     {
-        yawDelta -= yawSpeed * dt;
+        input.yawAxis -= 1.0f;
     }
 
     if (m_window.IsKeyDown('W'))
     {
-        radiusDelta -= zoomSpeed * dt;
+        input.zoomAxis -= 1.0f;
     }
 
     if (m_window.IsKeyDown('S'))
     {
-        radiusDelta += zoomSpeed * dt;
+        input.zoomAxis += 1.0f;
     }
 
-    if (yawDelta != 0.0f || radiusDelta != 0.0f)
-    {
-        m_renderer.ApplyOrbitCameraInput(yawDelta, radiusDelta);
-    }
+    m_renderer.ApplyOrbitCameraInput(input);
 }
 
 void Application::SelectRelativeDebugView(int direction)

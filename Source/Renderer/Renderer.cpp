@@ -91,11 +91,53 @@ namespace
         DebugViewReq_Restir;
 
     constexpr float kOrbitAutoYawSpeed = 0.35f;
+    constexpr float kOrbitManualYawSpeed = 1.25f;
+    constexpr float kOrbitManualZoomSpeed = 4.0f;
+
     constexpr float kOrbitMinRadius = 1.0f;
     constexpr float kOrbitMaxRadius = 20.0f;
     constexpr float kOrbitTargetY = 0.5f;
     constexpr float kOrbitCameraHeightOffset = 1.5f;
+
+    constexpr float kFreeRoamMoveSpeed = 3.0f;
+    constexpr float kFreeRoamMouseSensitivity = 0.0025f;
+    constexpr float kFreeRoamMinPitch = -1.45f;
+    constexpr float kFreeRoamMaxPitch = 1.45f;
+
     constexpr float kCameraMaxDeltaSeconds = 0.10f;
+
+    float WrapAngleRadians(float angle)
+    {
+        constexpr float twoPi = 6.28318530717958647692f;
+
+        if (angle > twoPi || angle < -twoPi)
+            return std::fmod(angle, twoPi);
+
+        return angle;
+    }
+
+    DirectX::XMVECTOR FreeRoamForwardVector(float yaw, float pitch)
+    {
+        const float cp = cosf(pitch);
+
+        return DirectX::XMVector3Normalize(DirectX::XMVectorSet(
+            sinf(yaw) * cp,
+            sinf(pitch),
+            -cosf(yaw) * cp,
+            0.0f));
+    }
+
+    DirectX::XMVECTOR FreeRoamRightVector(float yaw)
+    {
+        const DirectX::XMVECTOR forward =
+            FreeRoamForwardVector(yaw, 0.0f);
+
+        const DirectX::XMVECTOR up =
+            DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+        return DirectX::XMVector3Normalize(
+            DirectX::XMVector3Cross(forward, up));
+    }
 
     bool HasDebugViewRequirement(const DebugViewDesc& desc, uint32_t requirement)
     {
@@ -258,6 +300,21 @@ const char* DebugViewAvailabilityName(DebugViewAvailability availability)
     }
 }
 
+const char* CameraControlModeName(CameraControlMode mode)
+{
+    switch (mode)
+    {
+    case CameraControlMode::AutoOrbit:
+        return "Auto orbit";
+    case CameraControlMode::ManualOrbit:
+        return "Manual orbit";
+    case CameraControlMode::FreeRoam:
+        return "Free roam";
+    default:
+        return "Unknown camera mode";
+    }
+}
+
 DebugViewAvailability Renderer::GetDebugViewAvailability(uint32_t id) const
 {
     const DebugViewDesc* desc = FindDebugViewDesc(id);
@@ -396,55 +453,238 @@ void Renderer::SetRaytracingEnabled(bool enabled)
     }
 }
 
+CameraControlMode Renderer::GetCameraControlMode() const
+{
+    return m_cameraMode;
+}
+
+void Renderer::SetCameraControlMode(CameraControlMode mode)
+{
+    if (m_cameraMode == mode)
+        return;
+
+    const CameraControlMode oldMode = m_cameraMode;
+
+    if (mode == CameraControlMode::FreeRoam)
+    {
+        InitialiseFreeRoamFromOrbitCamera();
+    }
+    else if (oldMode == CameraControlMode::FreeRoam)
+    {
+        ProjectOrbitCameraFromFreeRoam();
+    }
+
+    m_cameraMode = mode;
+
+    // Reset the camera time baseline whenever the mode changes. This prevents
+    // auto-orbit from snapping or consuming a large accumulated time delta when
+    // returning from manual/free camera control.
+    m_cameraTimeValid = false;
+    ++m_cameraRevision;
+}
+
 bool Renderer::IsAutoOrbitEnabled() const
 {
-    return m_autoOrbit;
+    return m_cameraMode == CameraControlMode::AutoOrbit;
 }
 
 void Renderer::SetAutoOrbitEnabled(bool enabled)
 {
-    if (m_autoOrbit == enabled)
-        return;
-
-    m_autoOrbit = enabled;
-
-    // Avoid a yaw snap when auto-orbit is re-enabled. The next constants update
-    // will establish a fresh time baseline and continue from the current yaw.
-    m_cameraTimeValid = false;
+    SetCameraControlMode(
+        enabled
+        ? CameraControlMode::AutoOrbit
+        : CameraControlMode::ManualOrbit);
 }
 
 void Renderer::ToggleAutoOrbit()
 {
-    SetAutoOrbitEnabled(!m_autoOrbit);
+    SetAutoOrbitEnabled(!IsAutoOrbitEnabled());
 }
 
-void Renderer::ApplyOrbitCameraInput(float yawDelta, float radiusDelta)
+bool Renderer::IsFreeRoamEnabled() const
 {
-    if (yawDelta == 0.0f && radiusDelta == 0.0f)
+    return m_cameraMode == CameraControlMode::FreeRoam;
+}
+
+void Renderer::SetFreeRoamEnabled(bool enabled)
+{
+    SetCameraControlMode(
+        enabled
+        ? CameraControlMode::FreeRoam
+        : CameraControlMode::ManualOrbit);
+}
+
+void Renderer::ToggleFreeRoam()
+{
+    SetFreeRoamEnabled(!IsFreeRoamEnabled());
+}
+
+void Renderer::ApplyOrbitCameraInput(const OrbitCameraInput& input)
+{
+    const float dt = std::clamp(
+        input.deltaSeconds,
+        0.0f,
+        kCameraMaxDeltaSeconds);
+
+    const float yawAxis = std::clamp(input.yawAxis, -1.0f, 1.0f);
+    const float zoomAxis = std::clamp(input.zoomAxis, -1.0f, 1.0f);
+
+    if (dt <= 0.0f || (yawAxis == 0.0f && zoomAxis == 0.0f))
         return;
 
-    // Manual orbit input intentionally takes ownership from auto-orbit.
-    if (m_autoOrbit)
-    {
-        m_autoOrbit = false;
-        m_cameraTimeValid = false;
-    }
+    SetCameraControlMode(CameraControlMode::ManualOrbit);
 
-    m_camYaw += yawDelta;
+    const float oldYaw = m_camYaw;
+    const float oldRadius = m_camRadius;
 
-    // Keep yaw bounded so long debug sessions do not accumulate very large
-    // angles. This does not change camera behaviour.
-    constexpr float twoPi = 6.28318530717958647692f;
-    if (m_camYaw > twoPi || m_camYaw < -twoPi)
-    {
-        m_camYaw = std::fmod(m_camYaw, twoPi);
-    }
+    m_camYaw = WrapAngleRadians(
+        m_camYaw + yawAxis * kOrbitManualYawSpeed * dt);
 
     m_camRadius = std::clamp(
-        m_camRadius + radiusDelta,
+        m_camRadius + zoomAxis * kOrbitManualZoomSpeed * dt,
         kOrbitMinRadius,
         kOrbitMaxRadius);
+
+    if (oldYaw != m_camYaw || oldRadius != m_camRadius)
+    {
+        ++m_cameraRevision;
+    }
 }
+
+void Renderer::ApplyFreeRoamCameraInput(const FreeRoamCameraInput& input)
+{
+    if (m_cameraMode != CameraControlMode::FreeRoam)
+        return;
+
+    const float dt = std::clamp(
+        input.deltaSeconds,
+        0.0f,
+        kCameraMaxDeltaSeconds);
+
+    const float forwardAxis = std::clamp(input.moveForwardAxis, -1.0f, 1.0f);
+    const float rightAxis = std::clamp(input.moveRightAxis, -1.0f, 1.0f);
+
+    const float mouseDeltaX = std::clamp(input.mouseDeltaX, -1000.0f, 1000.0f);
+    const float mouseDeltaY = std::clamp(input.mouseDeltaY, -1000.0f, 1000.0f);
+
+    bool changed = false;
+
+    if (mouseDeltaX != 0.0f || mouseDeltaY != 0.0f)
+    {
+        m_freeCamYaw = WrapAngleRadians(
+            m_freeCamYaw - mouseDeltaX * kFreeRoamMouseSensitivity);
+
+        m_freeCamPitch = std::clamp(
+            m_freeCamPitch - mouseDeltaY * kFreeRoamMouseSensitivity,
+            kFreeRoamMinPitch,
+            kFreeRoamMaxPitch);
+
+        changed = true;
+    }
+
+    if (dt > 0.0f && (forwardAxis != 0.0f || rightAxis != 0.0f))
+    {
+        using namespace DirectX;
+
+        const XMVECTOR forward =
+            FreeRoamForwardVector(m_freeCamYaw, m_freeCamPitch);
+
+        const XMVECTOR right =
+            FreeRoamRightVector(m_freeCamYaw);
+
+        XMVECTOR position =
+            XMLoadFloat3(&m_freeCamPosition);
+
+        const float moveDistance = kFreeRoamMoveSpeed * dt;
+
+        position += forward * (forwardAxis * moveDistance);
+        position += right * (rightAxis * moveDistance);
+
+        XMStoreFloat3(&m_freeCamPosition, position);
+
+        changed = true;
+    }
+
+    if (changed)
+    {
+        ++m_cameraRevision;
+    }
+}
+
+void Renderer::ComputeOrbitCamera(
+    DirectX::XMFLOAT3& outPosition,
+    DirectX::XMFLOAT3& outTarget) const
+{
+    const float cp = cosf(m_camPitch);
+    const float sp = sinf(m_camPitch);
+    const float cy = cosf(m_camYaw);
+    const float sy = sinf(m_camYaw);
+
+    outPosition =
+    {
+        sy * cp * m_camRadius,
+        sp * m_camRadius + kOrbitCameraHeightOffset,
+        cy * cp * m_camRadius
+    };
+
+    outTarget = { 0.0f, kOrbitTargetY, 0.0f };
+}
+
+void Renderer::InitialiseFreeRoamFromOrbitCamera()
+{
+    using namespace DirectX;
+
+    XMFLOAT3 position{};
+    XMFLOAT3 target{};
+    ComputeOrbitCamera(position, target);
+
+    m_freeCamPosition = position;
+
+    XMVECTOR forward =
+        XMLoadFloat3(&target) - XMLoadFloat3(&position);
+
+    forward = XMVector3Normalize(forward);
+
+    XMFLOAT3 forward3{};
+    XMStoreFloat3(&forward3, forward);
+
+    m_freeCamPitch = asinf(
+        std::clamp(forward3.y, -1.0f, 1.0f));
+
+    m_freeCamYaw = atan2f(forward3.x, -forward3.z);
+    m_freeCamYaw = WrapAngleRadians(m_freeCamYaw);
+
+    m_freeCamInitialised = true;
+}
+
+void Renderer::ProjectOrbitCameraFromFreeRoam()
+{
+    if (!m_freeCamInitialised)
+        return;
+
+    const float x = m_freeCamPosition.x;
+    const float z = m_freeCamPosition.z;
+    const float y = m_freeCamPosition.y - kOrbitCameraHeightOffset;
+
+    const float radius =
+        sqrtf(x * x + y * y + z * z);
+
+    m_camRadius = std::clamp(
+        radius,
+        kOrbitMinRadius,
+        kOrbitMaxRadius);
+
+    if (m_camRadius > 1e-4f)
+    {
+        m_camYaw = WrapAngleRadians(atan2f(x, z));
+
+        m_camPitch = asinf(std::clamp(
+            y / m_camRadius,
+            -0.95f,
+            0.95f));
+    }
+}
+
 
 void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
 {
@@ -824,7 +1064,7 @@ void Renderer::RenderFrame(
         ((m_debugView == 0) || wantsRtInspectionDebug) &&
         (
             m_rtTemporal ||
-            (!m_autoOrbit && m_pauseAnimation) ||
+            (m_cameraMode == CameraControlMode::ManualOrbit && m_pauseAnimation) ||
             wantsSplitDebug ||
             wantsMotionDebug ||
             wantsViewZDebug ||
@@ -879,14 +1119,19 @@ void Renderer::RenderFrame(
         (m_rtAtrousEnableLengthSkip != m_prevRtAtrousEnableLengthSkip);
 
     
+    const bool cameraRevisionChanged =
+        (m_cameraRevision != m_prevRtCameraRevision);
+
     const bool bigCameraChanged =
         !m_rtHistoryValid ||
+        cameraRevisionChanged ||
         (std::fabs(m_camYaw - m_prevRtCamYaw) > 0.05f) ||
         (std::fabs(m_camPitch - m_prevRtCamPitch) > 0.05f) ||
         (std::fabs(m_camRadius - m_prevRtCamRadius) > 0.10f);
 
     const bool cameraChanged =
         !m_rtHistoryValid ||
+        cameraRevisionChanged ||
         (std::fabs(m_camYaw - m_prevRtCamYaw) > 1e-6f) ||
         (std::fabs(m_camPitch - m_prevRtCamPitch) > 1e-6f) ||
         (std::fabs(m_camRadius - m_prevRtCamRadius) > 1e-6f);
@@ -1062,6 +1307,7 @@ void Renderer::RenderFrame(
     m_prevRtCamYaw = m_camYaw;
     m_prevRtCamPitch = m_camPitch;
     m_prevRtCamRadius = m_camRadius;
+    m_prevRtCameraRevision = m_cameraRevision;
     m_prevRtDebugView = m_debugView;
     m_prevRtHasBrdfLut = rtHasBrdfLut;
     m_prevRtHasIbl = rtHasIbl;
@@ -1627,7 +1873,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
 
     auto alloc = m_upload.Allocate(frameIndex, cbSize, 256);
     auto* cb = reinterpret_cast<PerFrameConstants*>(alloc.cpu);
-    if (m_autoOrbit)
+    if (m_cameraMode == CameraControlMode::AutoOrbit)
     {
         if (m_cameraTimeValid)
         {
@@ -1636,7 +1882,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
                 0.0f,
                 kCameraMaxDeltaSeconds);
 
-            m_camYaw += dt * kOrbitAutoYawSpeed;
+            m_camYaw = WrapAngleRadians(
+                m_camYaw + dt * kOrbitAutoYawSpeed);
         }
 
         m_lastCameraUpdateTime = time;
@@ -1644,26 +1891,31 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     }
     else
     {
-        // Keep the time baseline current while manual orbit is active so re-enabling
-        // auto-orbit can resume from the current yaw without a large first-frame dt.
+        // Keep the time baseline current while manual/free camera control is active
+        // so re-enabling auto-orbit can resume from the current yaw without a large
+        // first-frame delta.
         m_lastCameraUpdateTime = time;
         m_cameraTimeValid = true;
     }
 
+    if (m_cameraMode == CameraControlMode::FreeRoam)
     {
-        const float cp = cosf(m_camPitch);
-        const float sp = sinf(m_camPitch);
-        const float cy = cosf(m_camYaw);
-        const float sy = sinf(m_camYaw);
+        using namespace DirectX;
 
-        m_sceneData.camera.position =
-        {
-            sy * cp * m_camRadius,
-            sp * m_camRadius + kOrbitCameraHeightOffset,
-            cy * cp * m_camRadius
-        };
+        const XMVECTOR position =
+            XMLoadFloat3(&m_freeCamPosition);
 
-        m_sceneData.camera.target = { 0.0f, kOrbitTargetY, 0.0f };
+        const XMVECTOR target =
+            position + FreeRoamForwardVector(m_freeCamYaw, m_freeCamPitch);
+
+        XMStoreFloat3(&m_sceneData.camera.position, position);
+        XMStoreFloat3(&m_sceneData.camera.target, target);
+    }
+    else
+    {
+        ComputeOrbitCamera(
+            m_sceneData.camera.position,
+            m_sceneData.camera.target);
     }
 
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
