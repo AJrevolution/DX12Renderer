@@ -23,7 +23,8 @@ private:
     void Tick();
     void Render();
     void HandleResizeIfNeeded();
-
+    void HandleDebugInput();
+    void SelectRelativeDebugView(int direction);
     void BeginFrame();
     void EndFrame();
 

@@ -67,6 +67,326 @@ namespace
             dv == 91 ||
             dv == 92;
     }
+
+    constexpr uint32_t kDebugReqDxr =
+        DebugViewReq_DxrSupport |
+        DebugViewReq_RaytracingEnabled |
+        DebugViewReq_DxrPipeline;
+
+    constexpr uint32_t kDebugReqRtOutput =
+        kDebugReqDxr |
+        DebugViewReq_RtResources;
+
+    constexpr uint32_t kDebugReqRtAov =
+        kDebugReqRtOutput |
+        DebugViewReq_RtAovs;
+
+    constexpr uint32_t kDebugReqRtPost =
+        kDebugReqRtAov |
+        DebugViewReq_RtHistory |
+        DebugViewReq_RtPostStack;
+
+    constexpr uint32_t kDebugReqRtRestir =
+        kDebugReqRtAov |
+        DebugViewReq_Restir;
+
+    bool HasDebugViewRequirement(const DebugViewDesc& desc, uint32_t requirement)
+    {
+        return (desc.requirements & requirement) != 0;
+    }
+
+    constexpr DebugViewDesc kDebugViewDescs[] =
+    {
+        { 0, "Final Shaded Output", "Final", DebugViewDomain::Final, DebugViewReq_None, false, false, false, false },
+
+        { 18, "Reprojection Validity", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 19, "Rejection / Disocclusion", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 20, "Chosen Previous UV", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 21, "History Current Difference", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 22, "History Length", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 23, "Temporal Alpha", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 24, "Temporal Moments Variance", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 25, "History Warm-Up / Convergence", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 26, "Depth Reprojection Error", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 27, "Stored Guide Roughness", "DXR AOV", DebugViewDomain::RT_AOV, kDebugReqRtAov, true, true, true, true },
+        { 28, "Roughness / Specular Protection Proxy", "RT A-Trous", DebugViewDomain::RT_Spatial, kDebugReqRtPost, true, true, true, true },
+        { 29, "Final History Selector Mask", "RT History Select", DebugViewDomain::RT_HistorySelect, kDebugReqRtPost, true, true, true, true },
+        { 30, "Stable History Signal", "RT History Select", DebugViewDomain::RT_HistorySelect, kDebugReqRtPost, true, true, true, true },
+        { 31, "Responsive History Signal", "RT History Select", DebugViewDomain::RT_HistorySelect, kDebugReqRtPost, true, true, true, true },
+        { 32, "Spec Direction Reuse Mask", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 33, "Spec Direction Dot", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 34, "Reprojection Search Chosen Offset", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 35, "Reprojection Best Score", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 36, "Confidence-Scaled Alpha", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 37, "Roughness Selector Vote", "RT History Select", DebugViewDomain::RT_HistorySelect, kDebugReqRtPost, true, true, true, true },
+        { 38, "Length Selector Vote", "RT History Select", DebugViewDomain::RT_HistorySelect, kDebugReqRtPost, true, true, true, true },
+        { 39, "Final Selector Value", "RT History Select", DebugViewDomain::RT_HistorySelect, kDebugReqRtPost, true, true, true, true },
+        { 40, "Stable History Length", "RT History Select", DebugViewDomain::RT_HistorySelect, kDebugReqRtPost, true, true, true, true },
+        { 41, "Responsive History Length", "RT History Select", DebugViewDomain::RT_HistorySelect, kDebugReqRtPost, true, true, true, true },
+        { 42, "Selected History Length", "RT History Select", DebugViewDomain::RT_HistorySelect, kDebugReqRtPost, true, true, true, true },
+        { 43, "Centre History Length Attenuation", "RT A-Trous", DebugViewDomain::RT_Spatial, kDebugReqRtPost, true, true, true, true },
+        { 44, "Wide Iteration Skip Mask", "RT A-Trous", DebugViewDomain::RT_Spatial, kDebugReqRtPost, true, true, true, true },
+        { 45, "Variance-Normalised Signal", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 46, "Reprojection Best Score", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 47, "Final Alpha After Variance Shaping", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 48, "Diffuse Accumulation", "DXR Split", DebugViewDomain::DXR, kDebugReqRtOutput, true, true, true, true },
+        { 49, "Specular Accumulation", "DXR Split", DebugViewDomain::DXR, kDebugReqRtOutput, true, true, true, true },
+        { 50, "Diffuse + Specular Accumulation", "DXR Split", DebugViewDomain::DXR, kDebugReqRtOutput, true, true, true, true },
+        { 51, "Stored Previous UV", "DXR Motion", DebugViewDomain::RT_AOV, kDebugReqRtAov, true, true, true, true },
+        { 52, "Invalid Previous UV Mask", "DXR Motion", DebugViewDomain::RT_AOV, kDebugReqRtAov, true, true, true, true },
+        { 53, "Raw Previous UV Invalid Mask", "DXR Motion", DebugViewDomain::RT_AOV, kDebugReqRtAov, true, true, true, true },
+        { 54, "Dilated Previous UV Invalid Mask", "RT Motion Dilation", DebugViewDomain::RT_GuideReconstruct, kDebugReqRtAov, true, true, true, true },
+        { 55, "Motion Confidence", "RT Motion Dilation", DebugViewDomain::RT_GuideReconstruct, kDebugReqRtAov, true, true, true, true },
+        { 56, "Temporal Motion Confidence", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 57, "Alpha After Motion-Confidence Scaling", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 58, "Post-Power Motion Confidence", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 59, "Selected Spec Variance", "RT History Select", DebugViewDomain::RT_HistorySelect, kDebugReqRtPost, true, true, true, true },
+        { 60, "Spec A-Trous Shaped Motion Confidence", "RT A-Trous", DebugViewDomain::RT_Spatial, kDebugReqRtPost, true, true, true, true },
+        { 61, "Raw ViewZ Heatmap", "DXR ViewZ", DebugViewDomain::RT_AOV, kDebugReqRtAov, true, true, true, true },
+        { 62, "Invalid Raw ViewZ Mask", "DXR ViewZ", DebugViewDomain::RT_AOV, kDebugReqRtAov, true, true, true, true },
+        { 63, "Reconstructed ViewZ Heatmap", "RT ViewZ Reconstruction", DebugViewDomain::RT_GuideReconstruct, kDebugReqRtAov, true, true, true, true },
+        { 64, "Reconstructed ViewZ Confidence", "RT ViewZ Reconstruction", DebugViewDomain::RT_GuideReconstruct, kDebugReqRtAov, true, true, true, true },
+        { 65, "SurfaceId Visualisation", "DXR SurfaceId", DebugViewDomain::RT_AOV, kDebugReqRtAov, true, true, true, true },
+        { 66, "Invalid SurfaceId Mask", "DXR SurfaceId", DebugViewDomain::RT_AOV, kDebugReqRtAov, true, true, true, true },
+        { 67, "Diffuse Albedo Visualisation", "DXR Diffuse Albedo", DebugViewDomain::RT_AOV, kDebugReqRtAov, true, true, true, true },
+        { 68, "Invalid / Near-Zero Diffuse Albedo Mask", "DXR Diffuse Albedo", DebugViewDomain::RT_AOV, kDebugReqRtAov, true, true, true, true },
+        { 69, "Demodulated Diffuse Lighting", "RT Diffuse Demodulation", DebugViewDomain::RT_GuideReconstruct, kDebugReqRtAov, true, true, true, true },
+        { 70, "Demodulation Instability Mask", "RT Diffuse Demodulation", DebugViewDomain::RT_GuideReconstruct, kDebugReqRtAov, true, true, true, true },
+        { 71, "Temporal Hit-Distance Weight", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 72, "Spec History Mismatch Mask", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 73, "Spec A-Trous Hit-Distance Weight", "RT A-Trous", DebugViewDomain::RT_Spatial, kDebugReqRtPost, true, true, true, true },
+        { 74, "SurfaceId Visualisation", "DXR SurfaceId", DebugViewDomain::RT_AOV, kDebugReqRtAov, true, true, true, true },
+        { 75, "Invalid SurfaceId Mask", "DXR SurfaceId", DebugViewDomain::RT_AOV, kDebugReqRtAov, true, true, true, true },
+
+        // Present in Renderer.cpp routing, but not documented in the locked
+        // Renderer.h namespace comment. Preserve as current routed IDs.
+        { 76, "Temporal Debug 76", "RT Temporal / Current Routing", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 77, "Temporal Debug 77", "RT Temporal / Current Routing", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 78, "A-Trous Output Debug 78", "RT A-Trous / Current Routing", DebugViewDomain::RT_Spatial, kDebugReqRtPost, true, true, true, true },
+
+        { 79, "Normalised Reconstructed ViewZ", "RT ViewZ Reconstruction", DebugViewDomain::RT_GuideReconstruct, kDebugReqRtAov, true, true, true, true },
+        { 80, "Invalid Normalised ViewZ Mask", "RT ViewZ Reconstruction", DebugViewDomain::RT_GuideReconstruct, kDebugReqRtAov, true, true, true, true },
+        { 81, "Diffuse Outlier Clamp Factor", "RT Outlier Clamp", DebugViewDomain::RT_GuideReconstruct, kDebugReqRtAov, true, true, true, true },
+        { 82, "Specular Outlier Clamp Factor", "RT Outlier Clamp", DebugViewDomain::RT_GuideReconstruct, kDebugReqRtAov, true, true, true, true },
+        { 83, "Invalid / NaN / Inf Sanitised Mask", "RT Outlier Clamp", DebugViewDomain::RT_GuideReconstruct, kDebugReqRtAov, true, true, true, true },
+        { 84, "Temporal History Colour Clamp Amount", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 85, "Moment Variance Clamp Mask", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 86, "Outlier Neighbourhood Valid Weight", "RT Outlier Clamp", DebugViewDomain::RT_GuideReconstruct, kDebugReqRtAov, true, true, true, true },
+        { 87, "Temporal Signal Confidence", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 88, "Temporal Anti-Lag Responsiveness", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 89, "Confidence-Shaped History Length", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 90, "Temporal Luminance Delta Confidence", "RT Temporal", DebugViewDomain::RT_Temporal, kDebugReqRtPost, true, true, true, true },
+        { 91, "Spec Responsive Selection Weight", "RT History Select", DebugViewDomain::RT_HistorySelect, kDebugReqRtPost, true, true, true, true },
+        { 92, "Spec Stable History Confidence", "RT History Select", DebugViewDomain::RT_HistorySelect, kDebugReqRtPost, true, true, true, true },
+        { 93, "Adaptive Blur Strength", "RT A-Trous", DebugViewDomain::RT_Spatial, kDebugReqRtPost, true, true, true, true },
+        { 94, "Wide-Iteration Suppression Mask", "RT A-Trous", DebugViewDomain::RT_Spatial, kDebugReqRtPost, true, true, true, true },
+        { 95, "Variance / History Instability", "RT A-Trous", DebugViewDomain::RT_Spatial, kDebugReqRtPost, true, true, true, true },
+        { 96, "Environment Alias / PDF Heatmap", "RT Environment Sampling", DebugViewDomain::RT_Sampling, kDebugReqRtOutput, true, true, true, true },
+        { 97, "Sampled Environment Direction / PDF", "RT Environment Sampling", DebugViewDomain::RT_Sampling, kDebugReqRtOutput, true, true, true, true },
+        { 98, "Environment NEE MIS Weight", "RT Environment Sampling", DebugViewDomain::RT_Sampling, kDebugReqRtOutput, true, true, true, true },
+        { 99, "Environment Visibility Mask", "RT Environment Sampling", DebugViewDomain::RT_Sampling, kDebugReqRtOutput, true, true, true, true },
+        { 100, "Direct Environment NEE Luminance", "RT Environment Sampling", DebugViewDomain::RT_Sampling, kDebugReqRtOutput, true, true, true, true },
+        { 101, "BRDF Environment-Hit Luminance Approximation", "RT Environment Sampling", DebugViewDomain::RT_Sampling, kDebugReqRtOutput, true, true, true, true },
+        { 102, "Environment Sampling Technique / Mode", "RT Environment Sampling", DebugViewDomain::RT_Sampling, kDebugReqRtOutput, true, true, true, true },
+        { 103, "Environment Sampling Fallback / Readiness", "RT Environment Sampling", DebugViewDomain::RT_Sampling, kDebugReqRtOutput, true, true, true, true },
+        { 104, "Initial ReSTIR Target Luminance", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 105, "Initial ReSTIR Source PDF", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 106, "Temporal ReSTIR Reuse Accepted Mask", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 107, "Temporal ReSTIR M / Confidence", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 108, "Spatial ReSTIR Accepted Neighbour Count", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 109, "Spatial ReSTIR Selected Neighbour Distance", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 110, "Resolved ReSTIR Reservoir Final W", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 111, "Resolved ReSTIR Visibility Mask", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 112, "Resolved ReSTIR Diffuse Luminance", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 113, "Resolved ReSTIR Specular Luminance", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 114, "Resolved ReSTIR Invalid Reason Mask", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+    };
+}
+
+const DebugViewDesc* FindDebugViewDesc(uint32_t id)
+{
+    for (const DebugViewDesc& desc : kDebugViewDescs)
+    {
+        if (desc.id == id)
+            return &desc;
+    }
+
+    return nullptr;
+}
+
+const DebugViewDesc* GetDebugViewDescs(std::size_t& count)
+{
+    count = sizeof(kDebugViewDescs) / sizeof(kDebugViewDescs[0]);
+    return kDebugViewDescs;
+}
+
+const char* DebugViewAvailabilityName(DebugViewAvailability availability)
+{
+    switch (availability)
+    {
+    case DebugViewAvailability::Available:
+        return "Available";
+    case DebugViewAvailability::Unavailable:
+        return "Unavailable";
+    case DebugViewAvailability::RequiresDxrSupport:
+        return "Requires DXR support";
+    case DebugViewAvailability::RequiresRaytracingEnabled:
+        return "Requires raytracing enabled";
+    case DebugViewAvailability::RequiresDxrPipeline:
+        return "Requires DXR pipeline";
+    case DebugViewAvailability::PendingResources:
+        return "Pending resources";
+    case DebugViewAvailability::PendingHistory:
+        return "Pending history";
+    case DebugViewAvailability::RequiresRestir:
+        return "Requires ReSTIR";
+    case DebugViewAvailability::RequiresGBuffer:
+        return "Requires G-buffer";
+    case DebugViewAvailability::RequiresShadow:
+        return "Requires shadow";
+    case DebugViewAvailability::UnknownId:
+        return "Unknown debug view";
+    default:
+        return "Unknown availability";
+    }
+}
+
+DebugViewAvailability Renderer::GetDebugViewAvailability(uint32_t id) const
+{
+    const DebugViewDesc* desc = FindDebugViewDesc(id);
+    if (!desc)
+        return DebugViewAvailability::UnknownId;
+
+    if (id == 0)
+        return DebugViewAvailability::Available;
+
+    if (HasDebugViewRequirement(*desc, DebugViewReq_DxrSupport) &&
+        !m_dxrAvailable)
+    {
+        return DebugViewAvailability::RequiresDxrSupport;
+    }
+
+    if (HasDebugViewRequirement(*desc, DebugViewReq_RaytracingEnabled) &&
+        !m_useRaytracing)
+    {
+        return DebugViewAvailability::RequiresRaytracingEnabled;
+    }
+
+    if (HasDebugViewRequirement(*desc, DebugViewReq_DxrPipeline) &&
+        (!m_device5 || !m_rtPipeline.StateObject()))
+    {
+        return DebugViewAvailability::RequiresDxrPipeline;
+    }
+
+    if (HasDebugViewRequirement(*desc, DebugViewReq_GBuffer) &&
+        !m_gbufferReady)
+    {
+        return DebugViewAvailability::RequiresGBuffer;
+    }
+
+    if (HasDebugViewRequirement(*desc, DebugViewReq_Shadow) &&
+        !m_shadowReady)
+    {
+        return DebugViewAvailability::RequiresShadow;
+    }
+
+    // The checks below intentionally describe "ready this exact frame".
+    // They are not selection gates. RT output, AOV, history, and ReSTIR
+    // resources may be created or populated later in the same valid DXR frame
+    // by EnsureRtOutputSize(), EnsureRtRestirResources(), and existing
+    // pass-level readiness checks.
+    if (HasDebugViewRequirement(*desc, DebugViewReq_RtResources) &&
+        (!m_rtOutputReady ||
+            !m_rtOutput ||
+            !m_rtAccumDiffuseReady ||
+            !m_rtAccumSpecReady))
+    {
+        return DebugViewAvailability::PendingResources;
+    }
+
+    if (HasDebugViewRequirement(*desc, DebugViewReq_RtAovs) &&
+        (!m_rtAovReady ||
+            !m_rtAovNormal ||
+            !m_rtAovDepth))
+    {
+        return DebugViewAvailability::PendingResources;
+    }
+
+    if (HasDebugViewRequirement(*desc, DebugViewReq_RtPostStack) &&
+        (!m_rtPostReady ||
+            !m_rtPostDiffuse ||
+            !m_rtPostSpec))
+    {
+        return DebugViewAvailability::PendingResources;
+    }
+
+    if (HasDebugViewRequirement(*desc, DebugViewReq_RtHistory) &&
+        (!m_rtHistoryAccum[0] ||
+            !m_rtHistoryAccum[1] ||
+            !m_rtHistoryNormal[0] ||
+            !m_rtHistoryNormal[1] ||
+            !m_rtHistoryDepth[0] ||
+            !m_rtHistoryDepth[1]))
+    {
+        return DebugViewAvailability::PendingHistory;
+    }
+
+    if (HasDebugViewRequirement(*desc, DebugViewReq_Restir) &&
+        !m_rtRestirResourcesReady)
+    {
+        return DebugViewAvailability::PendingResources;
+    }
+
+    return DebugViewAvailability::Available;
+}
+
+bool Renderer::IsDebugViewSelectable(uint32_t id) const
+{
+    // PendingResources and PendingHistory are selectable by design.
+    // Valid DXR debug views may need to be selected before EnsureRtOutputSize(),
+    // EnsureRtRestirResources(), temporal history allocation, or the first DXR
+    // frame has populated their resources. Only hard platform/mode failures
+    // such as missing DXR support, raytracing disabled, missing pipeline, or
+    // unknown IDs should block selection here.
+    switch (GetDebugViewAvailability(id))
+    {
+    case DebugViewAvailability::Available:
+    case DebugViewAvailability::PendingResources:
+    case DebugViewAvailability::PendingHistory:
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+bool Renderer::SetDebugView(uint32_t id)
+{
+    if (!IsDebugViewSelectable(id))
+        return false;
+
+    m_debugView = id;
+    return true;
+}
+
+uint32_t Renderer::GetDebugView() const
+{
+    return m_debugView;
+}
+
+bool Renderer::IsRaytracingEnabled() const
+{
+    return m_useRaytracing;
+}
+
+void Renderer::SetRaytracingEnabled(bool enabled)
+{
+    m_useRaytracing = enabled;
+
+    if (!IsDebugViewSelectable(m_debugView))
+    {
+        m_debugView = 0;
+    }
 }
 
 void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
@@ -412,6 +732,11 @@ void Renderer::RenderFrame(
     m_wasPaused = m_pauseAnimation;
 
     BuildDrawList(sceneTime);
+
+    if (!IsDebugViewSelectable(m_debugView))
+    {
+        m_debugView = 0;
+    }
 
     const RtDebugRouting rtDebug =
         BuildRtDebugRouting(m_debugView);
@@ -7599,24 +7924,86 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
         }
     };
 
+    auto WriteLiveRestirUavs = [&]()
+    {
+        if (!m_rtOutputUav.IsValid() ||
+            !m_rtRestirInitialReservoir ||
+            !m_rtRestirResolvedDiffuse ||
+            !m_rtRestirResolvedSpec)
+        {
+            WriteNullRestirUavs();
+            return false;
+        }
+
+        const uint64_t pixelCount64 =
+            static_cast<uint64_t>(width) *
+            static_cast<uint64_t>(height);
+
+        if (pixelCount64 == 0 || pixelCount64 > UINT32_MAX)
+        {
+            WriteNullRestirUavs();
+            return false;
+        }
+
+        const UINT pixelCount = static_cast<UINT>(pixelCount64);
+
+        // u9 = initial reservoir
+        {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+            uav.Format = DXGI_FORMAT_UNKNOWN;
+            uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            uav.Buffer.FirstElement = 0;
+            uav.Buffer.NumElements = pixelCount;
+            uav.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+            uav.Buffer.CounterOffsetInBytes = 0;
+            uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+
+            device->CreateUnorderedAccessView(
+                m_rtRestirInitialReservoir.Get(),
+                nullptr,
+                &uav,
+                RtUavCpuAt(9));
+        }
+
+        // u10/u11 = resolved diffuse/spec
+        {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+            uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+            device->CreateUnorderedAccessView(
+                m_rtRestirResolvedDiffuse.Get(),
+                nullptr,
+                &uav,
+                RtUavCpuAt(10));
+
+            device->CreateUnorderedAccessView(
+                m_rtRestirResolvedSpec.Get(),
+                nullptr,
+                &uav,
+                RtUavCpuAt(11));
+        }
+
+        return true;
+    };
+
     const bool wantsRestir =
         m_rtEnableRestirEnvDi ||
         IsRtRestirDebug(m_debugView);
 
     if (!wantsRestir)
     {
-        if (m_rtRestirResourcesReady ||
-            m_rtRestirInitialReservoir ||
-            m_rtRestirTemporalReservoir[0] ||
-            m_rtRestirTemporalReservoir[1] ||
-            m_rtRestirSpatialReservoir ||
-            m_rtRestirResolvedDiffuse ||
-            m_rtRestirResolvedSpec ||
-            m_rtRestirAppliedDiffuse ||
-            m_rtRestirAppliedSpec)
-        {
-            ResetRtRestirResources();
-        }
+        // Do not destroy ReSTIR resources just because the current frame does not
+        // need ReSTIR. They may still be referenced by recently submitted GPU work,
+        // and keeping them alive also avoids churn while cycling debug views.
+        //
+        // The shared DXR UAV table is still made deterministic for non-ReSTIR
+        // frames by binding null descriptors to the ReSTIR UAV slots.
+
+        m_rtRestirTemporalValidThisFrame = false;
+        m_rtRestirSpatialValidThisFrame = false;
+        m_rtRestirResolvedValidThisFrame = false;
+        m_rtRestirAppliedReady = false;
 
         // Keep the expanded DXR UAV table deterministic even when ReSTIR is off.
         WriteNullRestirUavs();
@@ -7637,8 +8024,25 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
         m_rtOutputHeight != height;
 
     if (!needCreate)
-        return;
+    {
+        // Resources may have stayed alive while the previous non-ReSTIR frame
+        // wrote null UAVs into u9/u10/u11. Rebind the live descriptors every time
+        // ReSTIR is wanted and resources already exist.
+        if (!WriteLiveRestirUavs())
+        {
+            m_rtRestirResourcesReady = false;
+            m_rtRestirAppliedReady = false;
+            ResetRtRestirHistory();
+            return;
+        }
 
+        m_rtRestirResourcesReady = true;
+        m_rtRestirAppliedReady =
+            m_rtRestirAppliedDiffuse &&
+            m_rtRestirAppliedSpec;
+
+        return;
+    }
     ResetRtRestirResources();
 
     const uint64_t pixelCount64 =
@@ -7745,41 +8149,14 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
         L"RT ReSTIR Applied Spec");
 
     // DXR global UAV table slots:
-    // u9 = initial reservoir
+    // u9  = initial reservoir
+    // u10 = resolved diffuse
+    // u11 = resolved spec
+    if (!WriteLiveRestirUavs())
     {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-        uav.Format = DXGI_FORMAT_UNKNOWN;
-        uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        uav.Buffer.FirstElement = 0;
-        uav.Buffer.NumElements = pixelCount;
-        uav.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
-        uav.Buffer.CounterOffsetInBytes = 0;
-        uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
-
-        device->CreateUnorderedAccessView(
-            m_rtRestirInitialReservoir.Get(),
-            nullptr,
-            &uav,
-            RtUavCpuAt(9));
-    }
-
-    // u10/u11 = resolved diffuse/spec
-    {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-        uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-
-        device->CreateUnorderedAccessView(
-            m_rtRestirResolvedDiffuse.Get(),
-            nullptr,
-            &uav,
-            RtUavCpuAt(10));
-
-        device->CreateUnorderedAccessView(
-            m_rtRestirResolvedSpec.Get(),
-            nullptr,
-            &uav,
-            RtUavCpuAt(11));
+        m_rtRestirResourcesReady = false;
+        ResetRtRestirHistory();
+        return;
     }
 
     m_rtRestirResourcesReady = true;

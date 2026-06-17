@@ -79,6 +79,16 @@ bool Window::ConsumeResize(uint32_t& outW, uint32_t& outH)
     return true;
 }
 
+bool Window::ConsumeKeyPress(uint32_t virtualKey)
+{
+    if (virtualKey >= m_keyPressed.size())
+        return false;
+
+    const bool pressed = m_keyPressed[virtualKey];
+    m_keyPressed[virtualKey] = false;
+    return pressed;
+}
+
 LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
     Window* self = nullptr;
@@ -105,6 +115,26 @@ LRESULT Window::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
+
+    case WM_KEYDOWN:
+    {
+        // Record one edge-triggered key press, but do not return here.
+        // Falling through to DefWindowProcW keeps default/future keyboard handling
+        // from being bypassed.
+        constexpr LPARAM kWasDownMask = (LPARAM(1) << 30);
+
+        if ((lparam & kWasDownMask) == 0)
+        {
+            const uint32_t key = static_cast<uint32_t>(wparam);
+
+            if (key < m_keyPressed.size())
+            {
+                m_keyPressed[key] = true;
+            }
+        }
+
+        break;
+    }
 
     case WM_SIZE:
     {

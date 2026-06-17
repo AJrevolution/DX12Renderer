@@ -2,6 +2,8 @@
 #include <filesystem>
 #include <vector>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include "Common.h"
 #include "Source/Renderer/Passes/TrianglePass.h"
 #include "Source/Renderer/Passes/ForwardPBRPass.h"
@@ -35,6 +37,79 @@
 #include "Source/Renderer/Passes/RtRestirSpatialPass.h"
 #include "Source/Renderer/Passes/RtRestirApplyPass.h"
 
+enum class DebugViewDomain : uint8_t
+{
+    Final,
+    Raster,
+    GBuffer,
+    Shadow,
+    DXR,
+    RT_AOV,
+    RT_Temporal,
+    RT_HistorySelect,
+    RT_Spatial,
+    RT_GuideReconstruct,
+    RT_Combine,
+    RT_Sampling,
+    RT_ReSTIR
+};
+
+enum class DebugViewAvailability : uint8_t
+{
+    Available,
+    Unavailable,
+    RequiresDxrSupport,
+    RequiresRaytracingEnabled,
+    RequiresDxrPipeline,
+    PendingResources,
+    PendingHistory,
+    RequiresRestir,
+    RequiresGBuffer,
+    RequiresShadow,
+    UnknownId
+};
+
+enum DebugViewRequirementFlags : uint32_t
+{
+    DebugViewReq_None = 0,
+    DebugViewReq_DxrSupport = 1u << 0,
+    DebugViewReq_RaytracingEnabled = 1u << 1,
+    DebugViewReq_DxrPipeline = 1u << 2,
+    DebugViewReq_RtResources = 1u << 3,
+    DebugViewReq_RtAovs = 1u << 4,
+    DebugViewReq_RtHistory = 1u << 5,
+    DebugViewReq_RtPostStack = 1u << 6,
+    DebugViewReq_Restir = 1u << 7,
+    DebugViewReq_GBuffer = 1u << 8,
+    DebugViewReq_Shadow = 1u << 9
+};
+
+struct DebugViewDesc
+{
+    uint32_t id = 0;
+    const char* name = "";
+    const char* category = "";
+
+    DebugViewDomain domain = DebugViewDomain::Final;
+    uint32_t requirements = DebugViewReq_None;
+
+    // True for IDs consumed by the existing RT debug routing system.
+    bool affectsRtRouting = false;
+
+    // Metadata only in this first patch. RenderFrame still preserves the
+    // existing debug-view-change reset behaviour.
+    bool canResetAccumulation = false;
+    bool canResetTemporalHistory = false;
+
+    // True when the existing routing can make this ID own the displayed
+    // m_rtOutput image for the frame.
+    bool canOwnFinalRtOutput = false;
+};
+
+const DebugViewDesc* FindDebugViewDesc(uint32_t id);
+const DebugViewDesc* GetDebugViewDescs(std::size_t& count);
+const char* DebugViewAvailabilityName(DebugViewAvailability availability);
+
 class Renderer
 {
 public:
@@ -57,7 +132,12 @@ public:
     
     void SetupResources(ID3D12Device* device, CommandList& cl, uint32_t frameIndex);
 
-
+    DebugViewAvailability GetDebugViewAvailability(uint32_t id) const;
+    bool IsDebugViewSelectable(uint32_t id) const;
+    bool SetDebugView(uint32_t id);
+    uint32_t GetDebugView() const;
+    bool IsRaytracingEnabled() const;
+    void SetRaytracingEnabled(bool enabled);
 
 private:
 

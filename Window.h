@@ -1,5 +1,6 @@
 #pragma once
 #include "Common.h"
+#include <array>
 
 class Window
 {
@@ -15,7 +16,8 @@ public:
     uint32_t Height()    const { return m_height; }
 
     // Resize tracking
-    bool     ConsumeResize(uint32_t& outW, uint32_t& outH);
+    bool ConsumeResize(uint32_t& outW, uint32_t& outH);
+    bool ConsumeKeyPress(uint32_t virtualKey);
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
@@ -30,4 +32,5 @@ private:
     bool m_pendingResize = false;
     uint32_t m_pendingW = 0;
     uint32_t m_pendingH = 0;
+    std::array<bool, 256> m_keyPressed{};
 };

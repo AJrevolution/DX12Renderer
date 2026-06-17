@@ -2,8 +2,100 @@
 #include "Source/Renderer/Passes/TrianglePass.h"
 #include "Source/Core/Paths.h"
 #include "Source/Renderer/Renderer.h"
+#include <cstring>
+#include <format>
 
 Renderer m_renderer;
+
+namespace
+{
+    void LogSelectedDebugView(const Renderer& renderer)
+    {
+        const uint32_t id = renderer.GetDebugView();
+        const DebugViewDesc* desc = FindDebugViewDesc(id);
+
+        if (!desc)
+        {
+            DebugOutput(std::format(
+                "Debug view selected: [{}] <unknown>",
+                id));
+            return;
+        }
+
+        const DebugViewAvailability availability =
+            renderer.GetDebugViewAvailability(desc->id);
+
+        DebugOutput(std::format(
+            "Debug view selected: [{}] {} / {} ({})",
+            desc->id,
+            desc->category,
+            desc->name,
+            DebugViewAvailabilityName(availability)));
+    }
+
+    bool DebugCategorySeenBefore(
+        const DebugViewDesc* views,
+        std::size_t index,
+        const char* category)
+    {
+        for (std::size_t i = 0; i < index; ++i)
+        {
+            if (std::strcmp(views[i].category, category) == 0)
+                return true;
+        }
+
+        return false;
+    }
+
+    void LogDebugViewList(const Renderer& renderer)
+    {
+        std::size_t count = 0;
+        const DebugViewDesc* views = GetDebugViewDescs(count);
+
+        if (!views || count == 0)
+        {
+            DebugOutput("Debug views: <none>");
+            return;
+        }
+
+        DebugOutput("Debug views:");
+
+        for (std::size_t categoryIndex = 0; categoryIndex < count; ++categoryIndex)
+        {
+            const char* category = views[categoryIndex].category;
+
+            if (DebugCategorySeenBefore(views, categoryIndex, category))
+                continue;
+
+            DebugOutput(std::format("  {}", category));
+
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const DebugViewDesc& desc = views[i];
+
+                if (std::strcmp(desc.category, category) != 0)
+                    continue;
+
+                const DebugViewAvailability availability =
+                    renderer.GetDebugViewAvailability(desc.id);
+
+                const bool selectable =
+                    renderer.IsDebugViewSelectable(desc.id);
+
+                const bool selected =
+                    renderer.GetDebugView() == desc.id;
+
+                DebugOutput(std::format(
+                    "    {}{}[{}] {} ({})",
+                    selected ? "* " : "  ",
+                    selectable ? "" : "disabled ",
+                    desc.id,
+                    desc.name,
+                    DebugViewAvailabilityName(availability)));
+            }
+        }
+    }
+}
 
 bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* title)
 {
@@ -94,6 +186,7 @@ int Application::Run()
 void Application::Tick()
 {
     HandleResizeIfNeeded();
+    HandleDebugInput();
     Render();
 }
 
@@ -110,6 +203,93 @@ void Application::HandleResizeIfNeeded()
     
     //Depth Buffer
     m_renderer.OnResize(m_device.GetDevice(), w, h);
+}
+
+void Application::HandleDebugInput()
+{
+    // Keeps visible debug selection small and dependency-free:
+    //
+    // 0  = final shaded output
+    // F6 = previous selectable debug view
+    // F7 = next selectable debug view
+    // F8 = dump the dynamic debug-view list to DebugOutput
+    // F9 = toggle raytracing on/off
+    if (m_window.ConsumeKeyPress('0'))
+    {
+        if (m_renderer.SetDebugView(0))
+        {
+            LogSelectedDebugView(m_renderer);
+        }
+    }
+
+    if (m_window.ConsumeKeyPress(VK_F6))
+    {
+        SelectRelativeDebugView(-1);
+    }
+
+    if (m_window.ConsumeKeyPress(VK_F7))
+    {
+        SelectRelativeDebugView(1);
+    }
+
+    if (m_window.ConsumeKeyPress(VK_F8))
+    {
+        LogDebugViewList(m_renderer);
+    }
+
+    if (m_window.ConsumeKeyPress(VK_F9))
+    {
+        const bool enabled = !m_renderer.IsRaytracingEnabled();
+        m_renderer.SetRaytracingEnabled(enabled);
+
+        DebugOutput(std::format(
+            "Raytracing {}",
+            enabled ? "enabled" : "disabled"));
+
+        LogSelectedDebugView(m_renderer);
+    }
+}
+
+void Application::SelectRelativeDebugView(int direction)
+{
+    std::size_t count = 0;
+    const DebugViewDesc* views = GetDebugViewDescs(count);
+
+    if (!views || count == 0)
+        return;
+
+    const uint32_t currentId = m_renderer.GetDebugView();
+
+    std::size_t currentIndex = 0;
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        if (views[i].id == currentId)
+        {
+            currentIndex = i;
+            break;
+        }
+    }
+
+    for (std::size_t step = 1; step <= count; ++step)
+    {
+        const std::size_t index = direction >= 0
+            ? (currentIndex + step) % count
+            : (currentIndex + count - (step % count)) % count;
+
+        const DebugViewDesc& candidate = views[index];
+
+        if (!m_renderer.IsDebugViewSelectable(candidate.id))
+            continue;
+
+        if (m_renderer.SetDebugView(candidate.id))
+        {
+            LogSelectedDebugView(m_renderer);
+        }
+
+        return;
+    }
+
+    DebugOutput("No selectable debug view found.");
 }
 
 void Application::BeginFrame()
