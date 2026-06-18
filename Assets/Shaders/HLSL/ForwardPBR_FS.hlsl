@@ -44,6 +44,11 @@ cbuffer PerFrameConstants : register(b0)
     uint RtAccumulate;
     uint RtEnableIndirect;
     float RtIndirectScale;
+    
+    uint PointLightCount;
+    float3 PointLightPad;
+
+    PointLightData PointLights[MAX_POINT_LIGHTS];
 };
 
 cbuffer PerDrawConstants : register(b1)
@@ -146,12 +151,25 @@ float4 main(PSIn i) : SV_Target
     p.metallic = metallic;
     p.roughness = roughness;
      
-    // Direct light
+    // Directional sun.
     float3 direct = EvalDirectPBR(p, LightColor);
-    
-    //Shadow
+
+    // Directional shadow remains sun-only in Phase 3A.
+    // Point-light shadows are intentionally not part of this phase.
     float shadowFactor = ComputeShadowFactor(i.worldPos, worldNormal, LightDir);
     direct *= shadowFactor;
+
+    // Local point lights.
+    uint pointLightCount = min(PointLightCount, (uint) MAX_POINT_LIGHTS);
+
+    [loop]
+    for (uint lightIndex = 0u; lightIndex < pointLightCount; ++lightIndex)
+    {
+        direct += EvalPointLightPBR(
+            p,
+            i.worldPos,
+            PointLights[lightIndex]);
+    }
     
     // Forward path is the baseline reference for deferred parity.
     float NdotV = saturate(dot(worldNormal, V));

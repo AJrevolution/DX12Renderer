@@ -27,12 +27,19 @@ void GBufferPass::Render(
     D3D12_GPU_VIRTUAL_ADDRESS perDrawCb,
     D3D12_GPU_DESCRIPTOR_HANDLE sceneTableGpu,
     const Material& material,
-    const Mesh& mesh)
+    const Mesh& mesh,
+    const Mesh::Submesh* submesh)
 {
     auto* cmd = cl.Get();
 
-    const D3D12_VIEWPORT vp{ 0,0,(float)width,(float)height,0,1 };
-    const D3D12_RECT sc{ 0,0,(LONG)width,(LONG)height };
+    const D3D12_VIEWPORT vp{ 0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1 };
+    const D3D12_RECT sc{ 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
+
+    const Mesh::Submesh& drawRange =
+        submesh ? *submesh : mesh.WholeMeshSubmesh();
+
+    if (drawRange.indexCount == 0)
+        return;
 
     cmd->SetPipelineState(m_pso.Get());
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
@@ -53,5 +60,10 @@ void GBufferPass::Render(
     cmd->IASetVertexBuffers(0, 1, &mesh.VBV());
     cmd->IASetIndexBuffer(&mesh.IBV());
 
-    cmd->DrawIndexedInstanced(mesh.IndexCount(), 1, 0, 0, 0);
+    cmd->DrawIndexedInstanced(
+        drawRange.indexCount,
+        1,
+        drawRange.indexStart,
+        drawRange.vertexBase,
+        0);
 }

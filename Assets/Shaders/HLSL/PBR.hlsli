@@ -40,6 +40,29 @@ struct PbrInputs
     float roughness;
 };
 
+#ifndef MAX_POINT_LIGHTS
+#define MAX_POINT_LIGHTS 8
+#endif
+
+struct PointLightData
+{
+    float3 position;
+    float range;
+
+    float3 color;
+    float intensity;
+};
+
+float PointLightAttenuation(float distanceSq, float range)
+{
+    float rangeSq = max(range * range, 1e-4f);
+
+    float rangeAttenuation = saturate(1.0f - distanceSq / rangeSq);
+    rangeAttenuation *= rangeAttenuation;
+
+    return rangeAttenuation / max(distanceSq, 1e-4f);
+}
+
 float3 EvalDirectPBR(PbrInputs i, float3 lightColor)
 {
     float3 N = SafeNormalize(i.N);
@@ -67,5 +90,38 @@ float3 EvalDirectPBR(PbrInputs i, float3 lightColor)
     float3 diff = kd * i.albedo / PI;
 
     return (diff + spec) * lightColor * NdotL;
+}
+
+float3 EvalPointLightPBR(
+    PbrInputs pbr,
+    float3 worldPos,
+    PointLightData light)
+{
+    float3 toLight = light.position - worldPos;
+    float distanceSq = dot(toLight, toLight);
+
+    if (distanceSq <= 1e-6f)
+    {
+        return 0.0f.xxx;
+    }
+
+    float rangeSq = light.range * light.range;
+
+    if (distanceSq >= rangeSq)
+    {
+        return 0.0f.xxx;
+    }
+
+    pbr.L = toLight * rsqrt(distanceSq);
+
+    float attenuation =
+        PointLightAttenuation(distanceSq, light.range);
+
+    float3 radiance =
+        max(light.color, 0.0f.xxx) *
+        max(light.intensity, 0.0f) *
+        attenuation;
+
+    return EvalDirectPBR(pbr, radiance);
 }
 #endif

@@ -192,6 +192,9 @@ private:
     bool ShouldAdvanceSceneAnimation() const;
     float UpdateSceneAnimationTime(float frameTime);
 
+    //Lights
+    void ConfigureDefaultPointLights();
+
     enum class RtEnvSamplingMode : uint32_t
     {
         BrdfOnly = 0,
@@ -435,6 +438,8 @@ private:
         Material* material = nullptr;
         DirectX::XMFLOAT4X4 world{};
         uint32_t rtObjectId = 0;
+
+        uint32_t submeshIndex = 0;
     };
 
     struct RtHistorySelectConstants
@@ -1912,8 +1917,11 @@ private:
     float m_prevRtCamPitch = 0.0f;
     float m_prevRtCamRadius = 0.0f;
     std::vector<DirectX::XMFLOAT4X4> m_prevRtWorlds;
+    std::vector<const Mesh*> m_prevRtMeshes;
     std::vector<const Material*> m_prevRtMaterials;
+    std::vector<uint32_t> m_prevRtSubmeshIndices;
     std::vector<DirectX::XMFLOAT4X4> m_prevRtMotionWorlds;
+
     bool m_prevRtMotionWorldsValid = false;
 
     uint32_t m_widthCached = 1;

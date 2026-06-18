@@ -29,7 +29,8 @@ public:
         D3D12_GPU_VIRTUAL_ADDRESS perDrawCb,
         D3D12_GPU_DESCRIPTOR_HANDLE sceneTableGpu,
         const Material& material,
-        const Mesh& mesh);
+        const Mesh& mesh,
+        const Mesh::Submesh* submesh = nullptr);
 
 private:
     bool m_initialized = false;

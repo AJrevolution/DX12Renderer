@@ -18,12 +18,19 @@ void ShadowPass::Render(
     uint32_t shadowSize,
     D3D12_GPU_VIRTUAL_ADDRESS perFrameCb,
     D3D12_GPU_VIRTUAL_ADDRESS perDrawCb,
-    const Mesh& mesh)
+    const Mesh& mesh,
+    const Mesh::Submesh* submesh)
 {
     auto* cmd = cl.Get();
 
-    const D3D12_VIEWPORT vp{ 0, 0, (float)shadowSize, (float)shadowSize, 0.0f, 1.0f };
-    const D3D12_RECT sc{ 0, 0, (LONG)shadowSize, (LONG)shadowSize };
+    const D3D12_VIEWPORT vp{ 0, 0, static_cast<float>(shadowSize), static_cast<float>(shadowSize), 0.0f, 1.0f };
+    const D3D12_RECT sc{ 0, 0, static_cast<LONG>(shadowSize), static_cast<LONG>(shadowSize) };
+
+    const Mesh::Submesh& drawRange =
+        submesh ? *submesh : mesh.WholeMeshSubmesh();
+
+    if (drawRange.indexCount == 0)
+        return;
 
     cmd->SetPipelineState(m_pso.Get());
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
@@ -38,5 +45,10 @@ void ShadowPass::Render(
     cmd->IASetVertexBuffers(0, 1, &mesh.VBV());
     cmd->IASetIndexBuffer(&mesh.IBV());
 
-    cmd->DrawIndexedInstanced(mesh.IndexCount(), 1, 0, 0, 0);
+    cmd->DrawIndexedInstanced(
+        drawRange.indexCount,
+        1,
+        drawRange.indexStart,
+        drawRange.vertexBase,
+        0);
 }

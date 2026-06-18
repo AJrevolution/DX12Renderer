@@ -745,6 +745,8 @@ float Renderer::UpdateSceneAnimationTime(float frameTime)
 void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
 {
     m_backbufferFormat = backbufferFormat;
+    
+    ConfigureDefaultPointLights();
 
     m_upload.Initialize(device, frameCount, 64 * 1024 * 1024);
 
@@ -1130,7 +1132,9 @@ void Renderer::RenderFrame(
     bool drawListStructuralChanged =
         !m_rtHistoryValid ||
         (m_draws.size() != m_prevRtWorlds.size()) ||
-        (m_draws.size() != m_prevRtMaterials.size());
+        (m_draws.size() != m_prevRtMeshes.size()) ||
+        (m_draws.size() != m_prevRtMaterials.size()) ||
+        (m_draws.size() != m_prevRtSubmeshIndices.size());
 
     bool drawTransformChanged = !m_rtHistoryValid;
 
@@ -1138,7 +1142,9 @@ void Renderer::RenderFrame(
     {
         for (size_t i = 0; i < m_draws.size(); ++i)
         {
-            if (m_prevRtMaterials[i] != m_draws[i].material ||
+            if (m_prevRtMeshes[i] != m_draws[i].mesh ||
+                m_prevRtMaterials[i] != m_draws[i].material ||
+                m_prevRtSubmeshIndices[i] != m_draws[i].submeshIndex ||
                 m_draws[i].mesh == nullptr)
             {
                 drawListStructuralChanged = true;
@@ -1368,7 +1374,9 @@ void Renderer::RenderFrame(
     m_rtAccumulatingLastFrame = m_rtAccumulateThisFrame;
 
     m_prevRtWorlds.resize(m_draws.size());
+    m_prevRtMeshes.resize(m_draws.size());
     m_prevRtMaterials.resize(m_draws.size());
+    m_prevRtSubmeshIndices.resize(m_draws.size());
     m_prevRtSvgf = m_rtSvgf;
     m_prevRtAtrousIterations = m_rtAtrousIterations;
     m_prevRtAtrousIterationsSpec = m_rtAtrousIterationsSpec;
@@ -1409,7 +1417,9 @@ void Renderer::RenderFrame(
     for (size_t i = 0; i < m_draws.size(); ++i)
     {
         m_prevRtWorlds[i] = m_draws[i].world;
+        m_prevRtMeshes[i] = m_draws[i].mesh;
         m_prevRtMaterials[i] = m_draws[i].material;
+        m_prevRtSubmeshIndices[i] = m_draws[i].submeshIndex;
     }
     m_prevRtEnableIndirect = m_rtEnableIndirect;
     m_prevRtIndirectScale = m_rtIndirectScale;
@@ -1726,8 +1736,14 @@ void Renderer::RenderFrame(
 
             for (const DrawItem& item : m_draws)
             {
+                if (!item.mesh)
+                    continue;
+
                 const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
-                m_shadowPass.Render(cl, m_shadowSize, perFrameCb, perDrawCb, *item.mesh);
+                const Mesh::Submesh& submesh =
+                    item.mesh->GetSubmesh(item.submeshIndex);
+                
+                m_shadowPass.Render(cl, m_shadowSize, perFrameCb, perDrawCb, *item.mesh, &submesh);
             }
             CmdEndEvent(cmdList);
         }
@@ -1770,7 +1786,12 @@ void Renderer::RenderFrame(
 
             for (const DrawItem& item : m_draws)
             {
+                if (!item.mesh || !item.material)
+                    continue;
+
                 const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
+                const Mesh::Submesh& submesh =
+                    item.mesh->GetSubmesh(item.submeshIndex);
                 m_gbufferPass.Render(
                     cl,
                     width,
@@ -1779,7 +1800,8 @@ void Renderer::RenderFrame(
                     perDrawCb,
                     m_scene.table.gpu,
                     *item.material,
-                    *item.mesh);
+                    *item.mesh,
+                    &submesh);
             }
             CmdEndEvent(cmdList);
 
@@ -1835,7 +1857,12 @@ void Renderer::RenderFrame(
 
             for (const DrawItem& item : m_draws)
             {
+                if (!item.mesh || !item.material)
+                    continue;
+
                 const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
+                const Mesh::Submesh& submesh =
+                    item.mesh->GetSubmesh(item.submeshIndex);
                 m_forwardPbr.Render(
                     cl,
                     width,
@@ -1844,7 +1871,8 @@ void Renderer::RenderFrame(
                     perDrawCb,
                     m_scene.table.gpu,
                     *item.material,
-                    *item.mesh);
+                    *item.mesh,
+                    &submesh);
             }
             CmdEndEvent(cmdList);
             CmdEndEvent(cmdList);
@@ -2043,6 +2071,19 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     
     m_currViewProj = cb->viewProj;
     m_currInvViewProj = cb->invViewProj;
+
+    cb->pointLightCount =
+        std::min<uint32_t>(m_sceneData.pointLightCount, kMaxPointLights);
+
+    cb->pointLightPad = { 0.0f, 0.0f, 0.0f };
+
+    for (uint32_t i = 0; i < kMaxPointLights; ++i)
+    {
+        cb->pointLights[i] =
+            (i < cb->pointLightCount)
+            ? m_sceneData.pointLights[i]
+            : PointLight{};
+    }
 
     return alloc.gpu;
 }
@@ -2517,6 +2558,7 @@ void Renderer::BuildDrawList(float time)
         DrawItem item{};
         item.mesh = &m_floor;
         item.material = &m_floorMaterial;
+        item.submeshIndex = 0;
         XMStoreFloat4x4(&item.world, XMMatrixIdentity());
         item.rtObjectId = 1u;
         m_draws.push_back(item);
@@ -2527,6 +2569,7 @@ void Renderer::BuildDrawList(float time)
         DrawItem item{};
         item.mesh = &m_quad;
         item.material = &m_metalMaterial;
+        item.submeshIndex = 0;
         XMMATRIX world =
             XMMatrixRotationY(rotationAngle) *
             XMMatrixTranslation(0.0f, 0.5f, 0.0f);
@@ -2540,6 +2583,7 @@ void Renderer::BuildDrawList(float time)
         DrawItem item{};
         item.mesh = &m_quad;
         item.material = &m_matteMaterial;
+        item.submeshIndex = 0;
         XMMATRIX world =
             XMMatrixScaling(0.9f, 0.9f, 0.9f) *
             XMMatrixTranslation(-1.75f, 0.5f, 0.0f);
@@ -2553,6 +2597,7 @@ void Renderer::BuildDrawList(float time)
         DrawItem item{};
         item.mesh = &m_quad;
         item.material = &m_glossyMaterial;
+        item.submeshIndex = 0;
         XMMATRIX world =
             XMMatrixScaling(0.9f, 0.9f, 0.9f) *
             XMMatrixTranslation(1.75f, 0.5f, 0.0f);
@@ -9715,4 +9760,38 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirApplyConstants(uint32_t frameI
     cb->flags = 0;
 
     return alloc.gpu;
+}
+
+void Renderer::ConfigureDefaultPointLights()
+{
+    m_sceneData.pointLightCount = 3;
+
+    m_sceneData.pointLights[0] =
+    {
+        { -2.25f, 2.5f, -1.75f },
+        10.0f,
+        { 1.0f, 0.45f, 0.20f },
+        40.0f
+    };
+
+    m_sceneData.pointLights[1] =
+    {
+        { 2.25f, 2.25f, 1.75f },
+        10.0f,
+        { 0.25f, 0.45f, 1.0f },
+        40.0f
+    };
+
+    m_sceneData.pointLights[2] =
+    {
+        { 0.0f, 4.0f, 2.75f },
+        12.0f,
+        { 0.45f, 1.0f, 0.45f },
+        30.0f
+    };
+
+    for (uint32_t i = m_sceneData.pointLightCount; i < kMaxPointLights; ++i)
+    {
+        m_sceneData.pointLights[i] = {};
+    }
 }

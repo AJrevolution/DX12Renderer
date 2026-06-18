@@ -1,5 +1,9 @@
 #pragma once
 #include <DirectXMath.h>
+#include <cstdint>
+
+#include "Source/Renderer/SceneData.h"
+
 
 // Forward PBR - We use row-major matrices: HLSL declares row_major and multiplies mul(vec, mat)
 struct PerFrameConstants
@@ -27,5 +31,11 @@ struct PerFrameConstants
     uint32_t rtAccumulate = 0;
     uint32_t rtEnableIndirect = 1;
     float    rtIndirectScale = 1.0f;
+
+    uint32_t pointLightCount = 0;
+    DirectX::XMFLOAT3 pointLightPad{};
+
+    PointLight pointLights[kMaxPointLights]{};
 };
+static_assert(sizeof(PointLight) == 32, "PointLight must match HLSL PointLightData layout.");
 static_assert((sizeof(PerFrameConstants) % 16) == 0); 

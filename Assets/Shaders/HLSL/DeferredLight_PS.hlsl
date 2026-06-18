@@ -46,6 +46,11 @@ cbuffer PerFrameConstants : register(b0)
     uint RtAccumulate;
     uint RtEnableIndirect;
     float RtIndirectScale;
+    
+    uint PointLightCount;
+    float3 PointLightPad;
+
+    PointLightData PointLights[MAX_POINT_LIGHTS];
 };
 
 struct PSIn
@@ -131,9 +136,20 @@ float4 main(PSIn i) : SV_Target
     p.roughness = roughness;
 
     float3 direct = EvalDirectPBR(p, LightColor);
-    
+
     float shadowFactor = ComputeShadowFactor(worldPos, N, LightDir);
     direct *= shadowFactor;
+
+    uint pointLightCount = min(PointLightCount, (uint) MAX_POINT_LIGHTS);
+
+    [loop]
+    for (uint lightIndex = 0u; lightIndex < pointLightCount; ++lightIndex)
+    {
+        direct += EvalPointLightPBR(
+            p,
+            worldPos,
+            PointLights[lightIndex]);
+    }
     
     //// Deferred path parity target:
     // - same GGX direct term as forward

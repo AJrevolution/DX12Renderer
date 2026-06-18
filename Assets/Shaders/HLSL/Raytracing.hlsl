@@ -58,6 +58,11 @@ cbuffer PerFrameConstants : register(b0)
     uint RtAccumulate;
     uint RtEnableIndirect;
     float RtIndirectScale;
+    
+    uint PointLightCount;
+    float3 PointLightPad;
+
+    PointLightData PointLights[MAX_POINT_LIGHTS];
 };
 
 cbuffer RtRayGenConstants : register(b1)
@@ -471,12 +476,93 @@ float3 EvalDirectAtSurface(
     return EvalDirectPBR(pbr, LightColor) * shadowVisibility;
 }
 
+float3 EvalPointLightsAtSurface(
+    float3 base,
+    float metallic,
+    float roughness,
+    float3 N,
+    float3 V,
+    float3 worldPos)
+{
+    PbrInputs pbr;
+    pbr.N = N;
+    pbr.V = V;
+    pbr.L = 0.0f.xxx;
+    pbr.albedo = base;
+    pbr.metallic = metallic;
+    pbr.roughness = roughness;
+
+    float3 result = 0.0f.xxx;
+
+    uint pointLightCount = min(PointLightCount, (uint) MAX_POINT_LIGHTS);
+
+    [loop]
+    for (uint lightIndex = 0u; lightIndex < pointLightCount; ++lightIndex)
+    {
+        result += EvalPointLightPBR(
+            pbr,
+            worldPos,
+            PointLights[lightIndex]);
+    }
+
+    return result;
+}
+
 struct PbrSplit
 {
     float3 diffuse;
     float3 spec;
 };
 
+
+PbrSplit EvalDirectPbrSplitWithRadiance(
+    float3 base,
+    float metallic,
+    float roughness,
+    float3 N,
+    float3 V,
+    float3 L,
+    float3 lightRadiance)
+{
+    PbrSplit r;
+    r.diffuse = 0.0f.xxx;
+    r.spec = 0.0f.xxx;
+
+    float NdotL = saturate(dot(N, L));
+    float NdotV = saturate(dot(N, V));
+
+    if (NdotL <= 1e-4f || NdotV <= 1e-4f)
+    {
+        return r;
+    }
+
+    float3 H = SafeNormalize(V + L);
+
+    float NdotH = saturate(dot(N, H));
+    float VdotH = saturate(dot(V, H));
+
+    float rough = saturate(roughness);
+    float metal = saturate(metallic);
+    float alpha = max(rough * rough, 0.002f);
+
+    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metal);
+    float3 F = F_Schlick(VdotH, F0);
+
+    float D = D_GGX(NdotH, alpha);
+    float G = G_Smith(NdotV, NdotL, rough);
+
+    float3 specBrdf =
+    (D * G * F) /
+    max(1e-4f, 4.0f * NdotV * NdotL);
+
+    float3 kd = (1.0f - F) * (1.0f - metal);
+    float3 diffuseBrdf = kd * base / kPi;
+
+    r.diffuse = diffuseBrdf * lightRadiance * NdotL;
+    r.spec = specBrdf * lightRadiance * NdotL;
+
+    return r;
+}
 
 PbrSplit EvalDirectPbrSplit(
     float3 base,
@@ -486,31 +572,74 @@ PbrSplit EvalDirectPbrSplit(
     float3 V,
     float3 L)
 {
+    return EvalDirectPbrSplitWithRadiance(
+        base,
+        metallic,
+        roughness,
+        N,
+        V,
+        L,
+        LightColor);
+}
+
+PbrSplit EvalPointLightsPbrSplitAtSurface(
+    float3 base,
+    float metallic,
+    float roughness,
+    float3 N,
+    float3 V,
+    float3 worldPos)
+{
     PbrSplit r;
     r.diffuse = 0.0f.xxx;
     r.spec = 0.0f.xxx;
 
-    float NdotL = saturate(dot(N, L));
-    float NdotV = saturate(dot(N, V));
-    if (NdotL <= 1e-4f || NdotV <= 1e-4f)
-        return r;
+    uint pointLightCount = min(PointLightCount, (uint) MAX_POINT_LIGHTS);
 
-    float3 H = SafeNormalize(V + L);
-    float NdotH = saturate(dot(N, H));
-    float VdotH = saturate(dot(V, H));
+    [loop]
+    for (uint lightIndex = 0u; lightIndex < pointLightCount; ++lightIndex)
+    {
+        PointLightData light = PointLights[lightIndex];
 
-    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
-    float3 F = F_Schlick(VdotH, F0);
-    float D = D_GGX(NdotH, roughness);
-    float G = G_Smith(NdotV, NdotL, roughness);
+        float3 toLight = light.position - worldPos;
+        float distanceSq = dot(toLight, toLight);
 
-    float3 specBrdf = (D * G * F) / max(1e-4f, 4.0f * NdotV * NdotL);
+        if (distanceSq <= 1e-6f)
+        {
+            continue;
+        }
 
-    float3 kd = (1.0f - F) * (1.0f - metallic);
-    float3 diffuseBrdf = kd * base / kPi;
+        float rangeSq = light.range * light.range;
 
-    r.diffuse = diffuseBrdf * LightColor * NdotL;
-    r.spec = specBrdf * LightColor * NdotL;
+        if (distanceSq >= rangeSq)
+        {
+            continue;
+        }
+
+        float3 L = toLight * rsqrt(distanceSq);
+
+        float attenuation =
+            PointLightAttenuation(distanceSq, light.range);
+
+        float3 radiance =
+            max(light.color, 0.0f.xxx) *
+            max(light.intensity, 0.0f) *
+            attenuation;
+
+        PbrSplit s =
+            EvalDirectPbrSplitWithRadiance(
+                base,
+                metallic,
+                roughness,
+                N,
+                V,
+                L,
+                radiance);
+
+        r.diffuse += s.diffuse;
+        r.spec += s.spec;
+    }
+
     return r;
 }
 
@@ -1904,15 +2033,24 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     
     if (payload.rayType == RT_RAY_INDIRECT)
     {
-        payload.color = EvalDirectAtSurface(
-        base,
-        metallic,
-        roughness,
-        worldNormal,
-        V,
-        L,
-        1.0f);
+        float3 direct = EvalDirectAtSurface(
+            base,
+            metallic,
+            roughness,
+            worldNormal,
+            V,
+            L,
+            1.0f);
 
+        direct += EvalPointLightsAtSurface(
+            base,
+            metallic,
+            roughness,
+            worldNormal,
+            V,
+            worldPos);
+
+        payload.color = direct;
         return;
     }
 
@@ -2412,6 +2550,21 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         V,
         L);
 
+    // Apply sun visibility to the sun only.
+    directSplit.diffuse *= shadowVisibility;
+    directSplit.spec *= shadowVisibility;
+
+    // Add unshadowed local point lights.
+    PbrSplit pointSplit = EvalPointLightsPbrSplitAtSurface(
+        base,
+        metallic,
+        roughness,
+        worldNormal,
+        V,
+        worldPos);
+
+    directSplit.diffuse += pointSplit.diffuse;
+    directSplit.spec += pointSplit.spec;
 
     float3 ambient = base * 0.03f;
     
@@ -2425,12 +2578,12 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
     float3 sampleDiffuse =
         ambient +
-        directSplit.diffuse * shadowVisibility +
+        directSplit.diffuse +
         envDiffuseTerm +
         RtIndirectScale * indirectDiffuse;
 
     float3 sampleSpec =
-        directSplit.spec * shadowVisibility +
+        directSplit.spec +
         envSpecTerm +
         RtIndirectScale * indirectSpec;
 

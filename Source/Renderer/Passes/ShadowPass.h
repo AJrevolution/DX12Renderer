@@ -19,7 +19,8 @@ public:
         uint32_t shadowSize,
         D3D12_GPU_VIRTUAL_ADDRESS perFrameCb,
         D3D12_GPU_VIRTUAL_ADDRESS perDrawCb,
-        const Mesh& mesh);
+        const Mesh& mesh,
+        const Mesh::Submesh* submesh = nullptr);
 
 private:
     bool m_initialized = false;
