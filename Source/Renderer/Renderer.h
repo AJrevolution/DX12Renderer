@@ -36,6 +36,7 @@
 #include "Source/Renderer/Passes/RtRestirTemporalPass.h"
 #include "Source/Renderer/Passes/RtRestirSpatialPass.h"
 #include "Source/Renderer/Passes/RtRestirApplyPass.h"
+#include "Source/Scene/LoadedModel.h"
 
 enum class DebugViewDomain : uint8_t
 {
@@ -1426,6 +1427,13 @@ private:
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRestirApplyConstants(uint32_t frameIndex);
 
+    void LoadDefaultGltfScene(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex);
+
+    void AppendLoadedModelDraws();
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
@@ -1593,7 +1601,7 @@ private:
     //   102 = env sampling technique/mode; red = BRDF-only, green = env-only, blue = MIS reference
     //   103 = env sampling fallback/readiness mask; magenta = invalid/fallback, green = ready
     // 
-    // ReSTIR Env DI / Phase 10.7 views:
+    // ReSTIR Env DI views:
     // These inspect the ReSTIR environment direct-light reservoir pipeline.
     // ReSTIR is environment-direct only here: no RTXDI, no GI, no many-light path.
     //
@@ -1771,6 +1779,10 @@ private:
 
     Mesh m_floor;
     Material m_floorMaterial;
+    
+    LoadedModel m_importedModel;
+    bool m_importedModelEnabled = true;
+    bool m_importedModelLoadAttempted = false;
     
     DirectX::XMFLOAT3 m_sceneBoundsCenter = { 0.0f, 0.5f, 0.0f };
     DirectX::XMFLOAT3 m_sceneBoundsExtent = { 3.5f, 3.5f, 3.5f };
@@ -2372,6 +2384,7 @@ private:
     RtRestirTemporalPass m_rtRestirTemporalPass;
     RtRestirSpatialPass m_rtRestirSpatialPass;
     RtRestirApplyPass m_rtRestirApplyPass; //validation additive apply, not final production integration
+
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

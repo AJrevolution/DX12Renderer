@@ -1,6 +1,93 @@
 #include "Texture.h"
 #include "ThirdParty\DirectX-Headers\include\directx\d3dx12.h"
 #include <DirectXTex.h>
+#include <cstdio>
+#include <sstream>
+
+namespace
+{
+    std::wstring ToWideString(const std::string& text)
+    {
+        return std::wstring(text.begin(), text.end());
+    }
+
+    std::string HResultToString(HRESULT hr)
+    {
+        char buffer[32]{};
+        sprintf_s(
+            buffer,
+            "0x%08X",
+            static_cast<unsigned int>(static_cast<uint32_t>(hr)));
+
+        return buffer;
+    }
+}
+
+void Texture::Reset()
+{
+    m_resource.Reset();
+
+    m_srvFormat = DXGI_FORMAT_UNKNOWN;
+    m_resourceFormat = DXGI_FORMAT_UNKNOWN;
+    m_dsvFormat = DXGI_FORMAT_UNKNOWN;
+
+    m_width = 0;
+    m_height = 0;
+    m_mipCount = 0;
+}
+
+bool Texture::TryLoadFromFile_DirectXTex(
+    ID3D12Device* device,
+    CommandList& cl,
+    UploadArena& upload,
+    uint32_t frameIndex,
+    const std::filesystem::path& filePath,
+    bool treatAsSRGB,
+    const wchar_t* debugName,
+    std::wstring* errorOut)
+{
+    try
+    {
+        LoadFromFile_DirectXTex(
+            device,
+            cl,
+            upload,
+            frameIndex,
+            filePath,
+            treatAsSRGB,
+            debugName);
+
+        return IsValid();
+    }
+    catch (const std::exception& e)
+    {
+        Reset();
+
+        if (errorOut)
+        {
+            *errorOut =
+                L"Texture load failed: " +
+                filePath.wstring() +
+                L" : " +
+                ToWideString(e.what());
+        }
+
+        return false;
+    }
+    catch (...)
+    {
+        Reset();
+
+        if (errorOut)
+        {
+            *errorOut =
+                L"Texture load failed with unknown exception: " +
+                filePath.wstring();
+        }
+
+        return false;
+    }
+}
 
 void Texture::CreateDepth(
     ID3D12Device* device,
@@ -107,6 +194,19 @@ void Texture::LoadFromFile_DirectXTex(
     bool treatAsSRGB,
     const wchar_t* debugName)
 {
+    Reset();
+
+    if (!device)
+        throw std::runtime_error("Texture::LoadFromFile_DirectXTex: null device.");
+
+    std::error_code ec;
+    if (!std::filesystem::exists(filePath, ec))
+    {
+        throw std::runtime_error(
+            "Texture::LoadFromFile_DirectXTex: file does not exist: " +
+            filePath.string());
+    }
+
     using namespace DirectX;
 
     ScratchImage image;
@@ -120,15 +220,38 @@ void Texture::LoadFromFile_DirectXTex(
         hr = LoadFromDDSFile(wpath.c_str(), DDS_FLAGS_NONE, &meta, image);
     else
         hr = LoadFromWICFile(wpath.c_str(), WIC_FLAGS_NONE, &meta, image);
+
+    if (FAILED(hr))
+    {
+        throw std::runtime_error(
+            "DirectXTex: failed to load file: " +
+            filePath.string() +
+            " hr=" +
+            HResultToString(hr));
+    }
+
+    if (image.GetImageCount() == 0)
+    {
+        throw std::runtime_error(
+            "DirectXTex: loaded image has no images: " +
+            filePath.string());
+    }
+
     // 1. If it's compressed (BC1-BC7), we must decompress it first to convert it
     if (DirectX::IsCompressed(meta.format))
     {
         ScratchImage decompressed;
         hr = Decompress(image.GetImages(), image.GetImageCount(), meta, DXGI_FORMAT_R8G8B8A8_UNORM, decompressed);
+        
         if (FAILED(hr))
         {
-            throw std::runtime_error("DirectXTex: Failed to decompress texture.");
+            throw std::runtime_error(
+                "DirectXTex: failed to decompress texture: " +
+                filePath.string() +
+                " hr=" +
+                HResultToString(hr));
         }
+
 
         image = std::move(decompressed);
         meta = image.GetMetadata();
@@ -146,7 +269,14 @@ void Texture::LoadFromFile_DirectXTex(
             converted
         );
         
-        ThrowIfFailed(hr, "DirectXTex: Failed to convert/downsample to RGBA8");
+        if (FAILED(hr))
+        {
+            throw std::runtime_error(
+                "DirectXTex: failed to convert texture to RGBA8: " +
+                filePath.string() +
+                " hr=" +
+                HResultToString(hr));
+        }
 
         image = std::move(converted);
         //meta.format = DXGI_FORMAT_R8G8B8A8_UNORM;

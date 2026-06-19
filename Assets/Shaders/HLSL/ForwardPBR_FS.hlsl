@@ -154,7 +154,7 @@ float4 main(PSIn i) : SV_Target
     // Directional sun.
     float3 direct = EvalDirectPBR(p, LightColor);
 
-    // Directional shadow remains sun-only in Phase 3A.
+    // Directional shadow remains sun-only for now
     // Point-light shadows are intentionally not part of this phase.
     float shadowFactor = ComputeShadowFactor(i.worldPos, worldNormal, LightDir);
     direct *= shadowFactor;

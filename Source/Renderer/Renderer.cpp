@@ -107,6 +107,14 @@ namespace
     constexpr float kCameraMaxDeltaSeconds = 0.10f;
     constexpr float kSceneAnimationMaxDeltaSeconds = 0.10f;
 
+    constexpr uint32_t kImportedModelRtObjectIdBase = 1000u;
+
+    // racetrackentire.gltf currently has its lowest world-space Y around 1.772.
+    // Move it down so the imported ground sits around renderer Y=0.
+    // This is a temporary phase placement constant; a scene manifest should own
+    // model placement later.
+    constexpr float kDefaultImportedModelYOffset = -1.77210808f;
+
     float WrapAngleRadians(float angle)
     {
         constexpr float twoPi = 6.28318530717958647692f;
@@ -748,7 +756,7 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
     
     ConfigureDefaultPointLights();
 
-    m_upload.Initialize(device, frameCount, 64 * 1024 * 1024);
+    m_upload.Initialize(device, frameCount, 512ull * 1024ull * 1024ull);
 
     // CPU-only DSV heap
     m_dsvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 16, false, L"DSV Heap (CPU)");
@@ -2335,6 +2343,8 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
     {
         CreateRtFallbackTextures(device, cl, frameIndex);
     }
+
+    LoadDefaultGltfScene(device, cl, frameIndex);
 }
 
 void Renderer::CreateNullSceneTable(ID3D12Device* device)
@@ -2605,6 +2615,8 @@ void Renderer::BuildDrawList(float time)
         item.rtObjectId = 4u;
         m_draws.push_back(item);
     }
+
+    AppendLoadedModelDraws();
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS Renderer::UploadPerDrawConstants(
@@ -9793,5 +9805,129 @@ void Renderer::ConfigureDefaultPointLights()
     for (uint32_t i = m_sceneData.pointLightCount; i < kMaxPointLights; ++i)
     {
         m_sceneData.pointLights[i] = {};
+    }
+}
+
+void Renderer::LoadDefaultGltfScene(
+    ID3D12Device* device,
+    CommandList& cl,
+    uint32_t frameIndex)
+{
+    if (m_importedModelLoadAttempted ||
+        m_importedModel.IsLoaded())
+    {
+        return;
+    }
+
+    m_importedModelLoadAttempted = true;
+
+    const std::filesystem::path contentDir =
+        Paths::ContentDir_DevOnly();
+
+    if (contentDir.empty())
+    {
+        OutputDebugStringW(L"glTF scene skipped: content dir is empty.\n");
+        return;
+    }
+
+    const std::filesystem::path modelPath =
+        contentDir /
+        L"Models" /
+        L"Racetrack" /
+        L"racetrackentire.gltf";
+
+    if (!std::filesystem::exists(modelPath))
+    {
+        OutputDebugStringW(
+            (L"glTF scene not found: " + modelPath.wstring() + L"\n").c_str());
+
+        return;
+    }
+
+    OutputDebugStringW(
+        (L"Loading glTF scene: " + modelPath.wstring() + L"\n").c_str());
+
+    const DirectX::XMMATRIX importTransform =
+        DirectX::XMMatrixTranslation(
+            0.0f,
+            kDefaultImportedModelYOffset,
+            0.0f);
+
+    try
+    {
+        if (!m_importedModel.LoadGltf(
+            device,
+            cl,
+            m_upload,
+            m_srvHeap,
+            frameIndex,
+            modelPath,
+            importTransform))
+        {
+            OutputDebugStringW(
+                (L"glTF scene load failed: " +
+                    m_importedModel.LastError() +
+                    L"\n").c_str());
+
+            return;
+        }
+
+        OutputDebugStringW(L"glTF scene loaded successfully.\n");
+    }
+    catch (const std::exception& e)
+    {
+        // Do not call m_importedModel.Clear() here.
+        // The loader may have recorded copy commands referencing partially
+        // created resources. Keeping the object alive avoids releasing those
+        // resources before the command list has finished executing.
+        OutputDebugStringA("glTF scene load threw std::exception: ");
+        OutputDebugStringA(e.what());
+        OutputDebugStringA("\n");
+    }
+    catch (...)
+    {
+        // Same reason: do not Clear() here.
+        OutputDebugStringW(L"glTF scene load threw unknown exception.\n");
+    }
+}
+
+void Renderer::AppendLoadedModelDraws()
+{
+    if (!m_importedModelEnabled ||
+        !m_importedModel.IsLoaded())
+    {
+        return;
+    }
+
+    if (m_useRaytracing)
+        return;
+
+    Mesh& mesh =
+        m_importedModel.GetMesh();
+
+    const std::vector<LoadedModel::Draw>& modelDraws =
+        m_importedModel.Draws();
+
+    for (size_t drawIndex = 0; drawIndex < modelDraws.size(); ++drawIndex)
+    {
+        const LoadedModel::Draw& modelDraw =
+            modelDraws[drawIndex];
+
+        Material* material =
+            m_importedModel.GetMaterial(modelDraw.materialIndex);
+
+        if (!material)
+            continue;
+
+        DrawItem item{};
+        item.mesh = &mesh;
+        item.material = material;
+        item.world = modelDraw.world;
+        item.submeshIndex = modelDraw.submeshIndex;
+        item.rtObjectId =
+            kImportedModelRtObjectIdBase +
+            static_cast<uint32_t>(drawIndex);
+
+        m_draws.push_back(item);
     }
 }

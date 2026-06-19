@@ -2,7 +2,6 @@
 #include "Source/RHI/Memory/DescriptorAllocator.h"
 
 // Scene-wide descriptor table bound at root param 2 (space0).
-// Current Phase 5.6 bindings:
 //  - BRDF LUT is a real 2D texture
 //  - IBL diffuse/specular are temporary latlong 2D env maps
 //  - shadow slot is reserved

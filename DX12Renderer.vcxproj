@@ -186,11 +186,16 @@
     <ClInclude Include="Source\RHI\Resources\NullSrvHelpers.h" />
     <ClInclude Include="Source\RHI\Resources\RenderTarget.h" />
     <ClInclude Include="Source\RHI\Resources\Texture.h" />
+    <ClInclude Include="Source\Scene\LoadedModel.h" />
     <ClInclude Include="Source\Scene\Material.h" />
     <ClInclude Include="Source\Scene\Mesh.h" />
     <ClInclude Include="SwapChain.h" />
     <ClInclude Include="ThirdParty\directx\d3d12.h" />
     <ClInclude Include="Source\RHI\Memory\UploadArena.h" />
+    <ClInclude Include="ThirdParty\tinygltf\json.hpp" />
+    <ClInclude Include="ThirdParty\tinygltf\stb_image.h" />
+    <ClInclude Include="ThirdParty\tinygltf\stb_image_write.h" />
+    <ClInclude Include="ThirdParty\tinygltf\tiny_gltf.h" />
     <ClInclude Include="Window.h" />
   </ItemGroup>
   <ItemGroup>
@@ -230,6 +235,7 @@
     <ClCompile Include="Source\RHI\Diagnostics\GPUTimerSet.cpp" />
     <ClCompile Include="Source\RHI\Pipeline\Shader.cpp" />
     <ClCompile Include="Source\RHI\Resources\RenderTarget.cpp" />
+    <ClCompile Include="Source\Scene\LoadedModel.cpp" />
     <ClCompile Include="Source\Scene\Material.cpp" />
     <ClCompile Include="Source\Scene\Mesh.cpp" />
     <ClCompile Include="SwapChain.cpp" />

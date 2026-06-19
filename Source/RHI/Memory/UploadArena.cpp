@@ -51,7 +51,18 @@ UploadArena::Allocation UploadArena::Allocate(uint32_t frameIndex, uint64_t size
     const uint64_t end = aligned + sizeBytes;
 
     if (end > f.capacity)
-        throw std::runtime_error("UploadArena: out of space (increase bytesPerFrame).");
+    {
+        throw std::runtime_error(
+            "UploadArena: out of space. Requested " +
+            std::to_string(sizeBytes) +
+            " bytes, used " +
+            std::to_string(f.head) +
+            " bytes, aligned offset " +
+            std::to_string(aligned) +
+            ", capacity " +
+            std::to_string(f.capacity) +
+            " bytes. Increase bytesPerFrame.");
+    }
 
     Allocation a{};
     a.cpu = f.mapped + aligned;
