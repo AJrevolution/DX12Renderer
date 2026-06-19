@@ -1,6 +1,7 @@
 Texture2D g_BaseColor : register(t0, space1);
 Texture2D g_NormalMap : register(t1, space1);
 Texture2D g_MetalRough : register(t2, space1);
+Texture2D g_OcclusionMap : register(t3, space1);
 
 SamplerState g_LinearWrap : register(s0);
 
@@ -13,7 +14,8 @@ cbuffer PerDrawConstants : register(b1)
     float4 BaseColorFactor;
     float MetallicFactor;
     float RoughnessFactor;
-    float2 _padB;
+    float OcclusionStrength;
+    uint HasOcclusionTexture;
 };
 
 struct PSIn
@@ -38,6 +40,22 @@ float3 DecodeNormal(float3 n)
     return normalize(n * 2.0f - 1.0f);
 }
 
+float ComputeMaterialOcclusion(float2 uv)
+{
+    if (HasOcclusionTexture == 0u)
+    {
+        return 1.0f;
+    }
+
+    float occlusionTexel =
+        g_OcclusionMap.Sample(g_LinearWrap, uv).r;
+
+    return saturate(
+        1.0f +
+        saturate(OcclusionStrength) *
+        (occlusionTexel - 1.0f));
+}
+
 PSOut main(PSIn i)
 {
     PSOut o;
@@ -57,10 +75,11 @@ PSOut main(PSIn i)
     float2 mr = g_MetalRough.Sample(g_LinearWrap, i.uv).gb;
     float roughness = saturate(mr.x * RoughnessFactor);
     float metallic = saturate(mr.y * MetallicFactor);
+    float ao = ComputeMaterialOcclusion(i.uv);
 
     o.rt0 = float4(base, 1.0f);
     o.rt1 = float4(worldNormal, 1.0f);
-    o.rt2 = float4(metallic, roughness, 1.0f, 1.0f); // x=M, y=R, z=AO placeholder, w=1
+    o.rt2 = float4(metallic, roughness, ao, 1.0f); // x=M, y=R, z=AO, w=1
 
     return o;
 }

@@ -973,6 +973,7 @@ bool LoadedModel::LoadGltf(
         int32_t baseColor = -1;
         int32_t normal = -1;
         int32_t metallicRoughness = -1;
+        int32_t occlusion = -1;
     };
 
     const size_t materialCount =
@@ -996,6 +997,7 @@ bool LoadedModel::LoadGltf(
             material.baseColorFactor = { 1.0f, 1.0f, 1.0f, 1.0f };
             material.metallicFactor = 0.0f;
             material.roughnessFactor = 0.5f;
+            material.occlusionStrength = 1.0f;
             continue;
         }
 
@@ -1026,6 +1028,12 @@ bool LoadedModel::LoadGltf(
         material.roughnessFactor =
             static_cast<float>(pbr.roughnessFactor);
 
+        material.occlusionStrength =
+            std::clamp(
+                static_cast<float>(gltfMaterial.occlusionTexture.strength),
+                0.0f,
+                1.0f);
+
         std::wstring materialLabel =
             L"material[" +
             std::to_wstring(materialIndex) +
@@ -1054,6 +1062,23 @@ bool LoadedModel::LoadGltf(
                 gltfMaterial.normalTexture.index,
                 false,
                 materialLabel + L" normal");
+
+        if (gltfMaterial.occlusionTexture.index >= 0 &&
+            gltfMaterial.occlusionTexture.texCoord != 0)
+        {
+            OutputDebugStringW(
+                (L"glTF occlusion texture on " +
+                    materialLabel +
+                    L" uses TEXCOORD_" +
+                    std::to_wstring(gltfMaterial.occlusionTexture.texCoord) +
+                    L"; Phase 3C.1 samples TEXCOORD_0.\n").c_str());
+        }
+
+        refs.occlusion =
+            LoadTexture(
+                gltfMaterial.occlusionTexture.index,
+                false,
+                materialLabel + L" occlusion");
     }
 
     auto TexturePtr = [&](int32_t textureIndex) -> const Texture*
@@ -1077,7 +1102,8 @@ bool LoadedModel::LoadGltf(
             srvHeap,
             TexturePtr(refs.baseColor),
             TexturePtr(refs.normal),
-            TexturePtr(refs.metallicRoughness));
+            TexturePtr(refs.metallicRoughness),
+            TexturePtr(refs.occlusion));
     }
 
     const int sceneIndex =

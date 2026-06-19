@@ -12,6 +12,7 @@ Texture2D g_ShadowMap : register(t3, space0);
 Texture2D g_BaseColor : register(t0, space1);
 Texture2D g_NormalMap : register(t1, space1);
 Texture2D g_MetalRough : register(t2, space1); 
+Texture2D g_OcclusionMap : register(t3, space1);
 
 SamplerState g_LinearWrap : register(s0);
 SamplerState g_LinearClamp : register(s1);
@@ -60,7 +61,8 @@ cbuffer PerDrawConstants : register(b1)
     float4 BaseColorFactor;
     float MetallicFactor;
     float RoughnessFactor;
-    float2 _padB;
+    float OcclusionStrength;
+    uint HasOcclusionTexture;
 };
 
 struct PSIn
@@ -76,6 +78,22 @@ struct PSIn
 float3 DecodeNormal(float3 n)
 {
     return normalize(n * 2.0f - 1.0f);
+}
+
+float ComputeMaterialOcclusion(float2 uv)
+{
+    if (HasOcclusionTexture == 0u)
+    {
+        return 1.0f;
+    }
+
+    float occlusionTexel =
+        g_OcclusionMap.Sample(g_LinearWrap, uv).r;
+
+    return saturate(
+        1.0f +
+        saturate(OcclusionStrength) *
+        (occlusionTexel - 1.0f));
 }
 
 float2 DirToLatLongUV(float3 d)
@@ -139,6 +157,7 @@ float4 main(PSIn i) : SV_Target
     float2 mr = g_MetalRough.Sample(g_LinearWrap, i.uv).gb;
     float roughness = saturate(mr.x * RoughnessFactor); // G
     float metallic = saturate(mr.y * MetallicFactor); // B
+    float ao = ComputeMaterialOcclusion(i.uv);
     
     float3 V = SafeNormalize(CameraPos - i.worldPos);
     float3 L = SafeNormalize(-LightDir);
@@ -213,7 +232,7 @@ float4 main(PSIn i) : SV_Target
     float3 F = F_Schlick(NdotV, F0);
     float3 kd = (1.0f - F) * (1.0f - metallic);
 
-    float3 iblDiffuse = kd * base * diffuseEnv;
+    float3 iblDiffuse = kd * base * diffuseEnv * ao;
     float3 iblSpec = specularEnv * (F0 * brdf.x + brdf.y);
     
     float3 lit = direct + iblDiffuse + iblSpec;

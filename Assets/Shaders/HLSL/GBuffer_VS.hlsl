@@ -36,7 +36,8 @@ cbuffer PerDrawConstants : register(b1)
     float4 BaseColorFactor;
     float MetallicFactor;
     float RoughnessFactor;
-    float2 _padB;
+    float OcclusionStrength;
+    uint HasOcclusionTexture;
 };
 
 struct VSIn

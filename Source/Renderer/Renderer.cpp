@@ -2625,12 +2625,27 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UploadPerDrawConstants(
 {
     auto alloc = m_upload.Allocate(frameIndex, sizeof(PerDrawConstants), 256);
     auto* dc = reinterpret_cast<PerDrawConstants*>(alloc.cpu);
+    *dc = {};
 
     dc->world = item.world;
     dc->materialIndex = 0;
-    dc->baseColorFactor = item.material->baseColorFactor;
-    dc->metallicFactor = item.material->metallicFactor;
-    dc->roughnessFactor = item.material->roughnessFactor;
+
+    const Material* material = item.material;
+
+    dc->baseColorFactor =
+        material ? material->baseColorFactor : DirectX::XMFLOAT4(1, 1, 1, 1);
+
+    dc->metallicFactor =
+        material ? material->metallicFactor : 0.0f;
+
+    dc->roughnessFactor =
+        material ? material->roughnessFactor : 0.5f;
+
+    dc->occlusionStrength =
+        material ? material->occlusionStrength : 1.0f;
+
+    dc->hasOcclusionTexture =
+        material ? material->hasOcclusionTexture : 0u;
 
     return alloc.gpu;
 }
