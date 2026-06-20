@@ -109,11 +109,51 @@ namespace
 
     constexpr uint32_t kImportedModelRtObjectIdBase = 1000u;
 
+    constexpr uint32_t kRtMeshTypeFloor = 0u;
+    constexpr uint32_t kRtMeshTypeQuad = 1u;
+    constexpr uint32_t kRtMeshTypeImported = 2u;
+
+    constexpr uint32_t kRtMaxMaterials = 64u;
+    constexpr uint32_t kRtTexturesPerMaterial = 4u;
+
+    constexpr uint32_t kRtBaseColorTextureSlot = 0u;
+    constexpr uint32_t kRtNormalTextureSlot = 1u;
+    constexpr uint32_t kRtMetalRoughTextureSlot = 2u;
+    constexpr uint32_t kRtOcclusionTextureSlot = 3u;
+
+    constexpr uint32_t kRtRegisterQuadVerts = 1u;
+    constexpr uint32_t kRtRegisterQuadIndices = 2u;
+    constexpr uint32_t kRtRegisterFloorVerts = 3u;
+    constexpr uint32_t kRtRegisterFloorIndices = 4u;
+    constexpr uint32_t kRtRegisterInstanceData = 5u;
+    constexpr uint32_t kRtRegisterMaterialTextures = 6u;
+
+    constexpr uint32_t kRtRegisterImportedVerts = 270u;
+    constexpr uint32_t kRtRegisterImportedIndices = 271u;
+
+    constexpr uint32_t kRtRegisterBrdfLut = 280u;
+    constexpr uint32_t kRtRegisterIblDiffuse = 281u;
+    constexpr uint32_t kRtRegisterIblSpecular = 282u;
+    constexpr uint32_t kRtRegisterEnvAlias = 283u;
+    constexpr uint32_t kRtRegisterRestirResolveReservoir = 284u;
+
     // racetrackentire.gltf currently has its lowest world-space Y around 1.772.
     // Move it down so the imported ground sits around renderer Y=0.
     // This is a temporary phase placement constant; a scene manifest should own
     // model placement later.
     constexpr float kDefaultImportedModelYOffset = -1.77210808f;
+
+    constexpr uint32_t kRtHighestSrvRegister =
+        kRtRegisterRestirResolveReservoir;
+
+    // Descriptor table starts at t1, so 284 descriptors covers t1..t284.
+    constexpr uint32_t kRtSrvTableCount =
+        kRtHighestSrvRegister;
+
+    static_assert(kRtSrvTableCount == 284u);
+    static_assert(
+        kRtRegisterMaterialTextures +
+        kRtMaxMaterials * kRtTexturesPerMaterial - 1u == 261u);
 
     float WrapAngleRadians(float angle)
     {
@@ -756,13 +796,19 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
     
     ConfigureDefaultPointLights();
 
-    m_upload.Initialize(device, frameCount, 512ull * 1024ull * 1024ull);
+    // Normal per-frame uploads: constant buffers, small transient data.
+    m_upload.Initialize(device, frameCount, 128ull * 1024ull * 1024ull);
+
+    // One-shot/static asset imports: large glTF buffers and texture uploads.
+    // This prevents startup asset import pressure from permanently bloating the
+    // dynamic frame upload budget.
+    m_assetUpload.Initialize(device, frameCount, 512ull * 1024ull * 1024ull);
 
     // CPU-only DSV heap
     m_dsvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 16, false, L"DSV Heap (CPU)");
     
     // Shader-visible SRV heap for textures
-    m_srvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1024, true, L"SRV Heap (Shader Visible)");
+    m_srvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4096, true, L"SRV Heap (Shader Visible)");
 
     // Space 0: Scene Table (t0..t3)
     static constexpr uint32_t kSceneSrvCount = 4;
@@ -805,6 +851,7 @@ void Renderer::BeginFrame(uint32_t frameIndex)
 {
     // FrameIndex is already fence-safe by the time Application calls this.
     m_upload.BeginFrame(frameIndex);
+    m_assetUpload.BeginFrame(frameIndex);
 }
 
 bool Renderer::RtPostModeRunsTemporal(RtPostMode mode)
@@ -1089,6 +1136,8 @@ void Renderer::RenderFrame(
     const float sceneTime = UpdateSceneAnimationTime(time);
 
     BuildDrawList(sceneTime);
+
+    BuildRtDrawItems();
 
     if (!IsDebugViewSelectable(m_debugView))
     {
@@ -1478,6 +1527,8 @@ void Renderer::RenderFrame(
         m_rtRestirResolvedValidThisFrame = false;
 
         EnsureRtOutputSize(width, height);
+        BuildRtDrawItems();
+        BuildRtMaterialTable();
         EnsureRtInstanceData(frameIndex);
         EnsureRtEnvironmentAlias(device, cl);
         EnsureRtRestirResources(width, height);
@@ -2345,6 +2396,13 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
     }
 
     LoadDefaultGltfScene(device, cl, frameIndex);
+
+    if (m_dxrAvailable &&
+        m_device5 &&
+        m_importedModel.IsLoaded())
+    {
+        BuildImportedModelBlas(device, cl);
+    }
 }
 
 void Renderer::CreateNullSceneTable(ID3D12Device* device)
@@ -2743,41 +2801,107 @@ bool Renderer::LoadMaterialFromFolder(
         roughnessFactor,
         requireAll);
 }
-
-void Renderer::BuildTlasForDrawList(uint32_t frameIndex, ID3D12GraphicsCommandList4* cmd4)
+void Renderer::BuildTlasForDrawList(
+    uint32_t frameIndex,
+    ID3D12GraphicsCommandList4* cmd4)
 {
-    std::vector<AccelerationStructure::InstanceDesc> instances;
-    instances.reserve(m_draws.size());
+    if (!cmd4)
+        return;
 
-    for (uint32_t i = 0; i < static_cast<uint32_t>(m_draws.size()); ++i)
+    auto& frame =
+        m_rtFrames[frameIndex];
+
+    const uint32_t rtInstanceCount =
+        static_cast<uint32_t>(m_rtDrawItems.size());
+
+    if (rtInstanceCount == 0)
+        return;
+
+    std::vector<AccelerationStructure::InstanceDesc> instances;
+    instances.reserve(rtInstanceCount);
+
+    for (uint32_t rtInstanceIndex = 0;
+        rtInstanceIndex < rtInstanceCount;
+        ++rtInstanceIndex)
     {
-        const DrawItem& item = m_draws[i];
+        const DrawItem* drawItem =
+            m_rtDrawItems[rtInstanceIndex];
+
+        if (!drawItem)
+            continue;
+
+        const AccelerationStructure* blas =
+            GetBlasForDrawItem(*drawItem);
+
+        if (!blas)
+        {
+            OutputDebugStringW(
+                L"BuildTlasForDrawList skipped RT draw with no BLAS.\n");
+
+            continue;
+        }
+
+        const D3D12_GPU_VIRTUAL_ADDRESS blasAddress =
+            blas->GpuAddress();
+
+        if (blasAddress == 0)
+        {
+            OutputDebugStringW(
+                L"BuildTlasForDrawList skipped RT draw with invalid BLAS address.\n");
+
+            continue;
+        }
+
         AccelerationStructure::InstanceDesc inst{};
-        inst.instanceID = i;
+
+        // This is the critical contract:
+        // InstanceID() in HLSL indexes g_InstanceData.
+        // EnsureRtInstanceData() writes g_InstanceData in m_rtDrawItems order.
+        inst.instanceID = rtInstanceIndex;
+
         inst.hitGroupIndex = 0;
         inst.mask = 0xFF;
+        inst.blasAddress = blasAddress;
 
-        inst.blasAddress = (item.mesh == &m_floor)
-            ? m_blasFloor.GpuAddress()
-            : m_blasQuad.GpuAddress();
+        const DirectX::XMFLOAT4X4& world =
+            drawItem->world;
 
-        const auto& m = item.world;
-        inst.transform[0] = m._11; inst.transform[1] = m._12; inst.transform[2] = m._13; inst.transform[3] = m._41;
-        inst.transform[4] = m._21; inst.transform[5] = m._22; inst.transform[6] = m._23; inst.transform[7] = m._42;
-        inst.transform[8] = m._31; inst.transform[9] = m._32; inst.transform[10] = m._33; inst.transform[11] = m._43;
+        // Preserve your existing transform packing convention.
+        // Your current code stores a 3x4 DXR instance transform as:
+        //
+        // [ _11 _12 _13 _41 ]
+        // [ _21 _22 _23 _42 ]
+        // [ _31 _32 _33 _43 ]
+        //
+        // Do not change this unless your AccelerationStructure wrapper
+        // explicitly expects the transposed convention.
+        inst.transform[0] = world._11;
+        inst.transform[1] = world._12;
+        inst.transform[2] = world._13;
+        inst.transform[3] = world._41;
+
+        inst.transform[4] = world._21;
+        inst.transform[5] = world._22;
+        inst.transform[6] = world._23;
+        inst.transform[7] = world._42;
+
+        inst.transform[8] = world._31;
+        inst.transform[9] = world._32;
+        inst.transform[10] = world._33;
+        inst.transform[11] = world._43;
 
         instances.push_back(inst);
     }
 
-    if (!instances.empty())
-    {
-        m_rtFrames[frameIndex].tlas.BuildTopLevel(
-            m_device5.Get(),
-            cmd4,
-            instances.data(),
-            static_cast<uint32_t>(instances.size()),
-            L"TLAS Scene");
-    }
+    if (instances.empty())
+        return;
+
+    frame.tlas.BuildTopLevel(
+        m_device5.Get(),
+        cmd4,
+        instances.data(),
+        static_cast<uint32_t>(instances.size()),
+        L"TLAS Scene");
 }
 
 ComPtr<ID3D12GraphicsCommandList4> Renderer::GetCommandList4(CommandList& cl)
@@ -2897,20 +3021,35 @@ void Renderer::CreateRtOutput(ID3D12Device* device, uint32_t width, uint32_t hei
 
     m_rtOutputReady = true;
 }
-
 void Renderer::EnsureRtInstanceData(uint32_t frameIndex)
 {
     auto& frame = m_rtFrames[frameIndex];
-    const uint32_t requiredCount = std::max<uint32_t>(1u, static_cast<uint32_t>(m_draws.size()));
+
+    const uint32_t instanceCount =
+        static_cast<uint32_t>(m_rtDrawItems.size());
+
+    // No valid DXR instances this frame.
+    // The caller should also avoid building/dispatching DXR work with an empty TLAS.
+    if (instanceCount == 0)
+        return;
+
+    const uint32_t requiredCount =
+        std::max<uint32_t>(1u, instanceCount);
 
     if (!frame.instanceDataUpload || frame.capacity < requiredCount)
     {
-        frame.capacity = std::max<uint32_t>(requiredCount, frame.capacity ? frame.capacity * 2u : 8u);
+        const uint32_t newCapacity =
+            std::max<uint32_t>(
+                requiredCount,
+                frame.capacity ? frame.capacity * 2u : 8u);
 
-        const uint64_t bufferSize = uint64_t(frame.capacity) * uint64_t(sizeof(RTInstanceData));
+        frame.capacity = newCapacity;
+
+        const uint64_t bufferSize =
+            uint64_t(frame.capacity) * uint64_t(sizeof(RTInstanceData));
 
         CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_UPLOAD);
-        auto desc = CD3DX12_RESOURCE_DESC::Buffer(bufferSize);
+        const auto desc = CD3DX12_RESOURCE_DESC::Buffer(bufferSize);
 
         ThrowIfFailed(
             m_device5->CreateCommittedResource(
@@ -2922,143 +3061,20 @@ void Renderer::EnsureRtInstanceData(uint32_t frameIndex)
                 IID_PPV_ARGS(&frame.instanceDataUpload)),
             "Create RT instance data upload");
 
-        SetD3D12ObjectName(frame.instanceDataUpload.Get(), L"RT Instance Data Upload");
+        SetD3D12ObjectName(
+            frame.instanceDataUpload.Get(),
+            L"RT Instance Data Upload");
 
         if (!frame.instanceDataSrv.IsValid())
-            frame.instanceDataSrv = m_srvHeap.Allocate(1);
+        {
+            frame.instanceDataSrv =
+                m_srvHeap.Allocate(1);
+        }
 
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
         srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srv.Format = DXGI_FORMAT_UNKNOWN;
-        srv.Buffer.FirstElement = 0;
-        srv.Buffer.NumElements = frame.capacity;
-        srv.Buffer.StructureByteStride = sizeof(RTInstanceData);
-        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-
-        m_device5->CreateShaderResourceView(frame.instanceDataUpload.Get(), &srv, frame.instanceDataSrv.cpu);
-    }
-
-    D3D12_RANGE readRange{ 0, 0 };
-    RTInstanceData* dst = nullptr;
-    ThrowIfFailed(
-        frame.instanceDataUpload->Map(0, &readRange, reinterpret_cast<void**>(&dst)),
-        "Map RT instance data upload");
-
-    std::memset(dst, 0, sizeof(RTInstanceData) * frame.capacity);
-
-    for (uint32_t i = 0; i < static_cast<uint32_t>(m_draws.size()); ++i)
-    {
-        const DrawItem& item = m_draws[i];
-        const Material* mat = item.material;
-
-        RTInstanceData data{};
-
-        data.objectId = item.rtObjectId != 0u
-            ? item.rtObjectId
-            : static_cast<uint32_t>(i + 1u);
-
-        data.baseColorFactor = mat ? mat->baseColorFactor : DirectX::XMFLOAT4(1, 1, 1, 1);
-        data.metallic = mat ? mat->metallicFactor : 0.0f;
-        data.roughness = mat ? mat->roughnessFactor : 0.5f;
-
-        data.meshType = (item.mesh == &m_floor) ? 0u : 1u;
-        data.materialId = GetRtMaterialId(item.material);
-        
-        const bool hasPrevMotionWorld =
-            m_prevRtMotionWorldsValid &&
-            i < m_prevRtMotionWorlds.size();
-
-        data.prevObjectToWorld = hasPrevMotionWorld
-            ? m_prevRtMotionWorlds[i]
-            : item.world;
-        
-        dst[i] = data;
-    }
-
-    D3D12_RANGE writtenRange{ 0, SIZE_T(sizeof(RTInstanceData) * m_draws.size()) };
-    frame.instanceDataUpload->Unmap(0, &writtenRange);
-}
-
-void Renderer::UpdateRtGeometryTable(uint32_t frameIndex, ID3D12Resource* restirResolveReservoir)
-{
-    auto& frame = m_rtFrames[frameIndex];
-
-    EnsureRtDescriptorTable(
-        frame.geometryTable,
-        frame.geometryTableCount,
-        kRtSrvTableCount);
-
-    auto HandleAt = [&](uint32_t i)
-    {
-        D3D12_CPU_DESCRIPTOR_HANDLE h = frame.geometryTable.cpu;
-        h.ptr += SIZE_T(i) * SIZE_T(m_srvHeap.DescriptorSize());
-        return h;
-    };
-
-    // t1 = quad vertices
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC s{};
-        s.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        s.Format = DXGI_FORMAT_UNKNOWN;
-        s.Buffer.FirstElement = 0;
-        s.Buffer.NumElements = m_quad.VertexCount();
-        s.Buffer.StructureByteStride = m_quad.VertexStride();
-        s.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-        m_device5->CreateShaderResourceView(m_quad.VertexBufferResource(), &s, HandleAt(0));
-    }
-
-    // t2 = quad indices (raw)
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC s{};
-        s.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        s.Format = DXGI_FORMAT_R32_TYPELESS;
-        s.Buffer.FirstElement = 0;
-        s.Buffer.NumElements = (m_quad.IndexCount() * 2 + 3) / 4;
-        s.Buffer.StructureByteStride = 0;
-        s.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-        m_device5->CreateShaderResourceView(m_quad.IndexBufferResource(), &s, HandleAt(1));
-    }
-
-    // t3 = floor vertices
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC s{};
-        s.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        s.Format = DXGI_FORMAT_UNKNOWN;
-        s.Buffer.FirstElement = 0;
-        s.Buffer.NumElements = m_floor.VertexCount();
-        s.Buffer.StructureByteStride = m_floor.VertexStride();
-        s.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-        m_device5->CreateShaderResourceView(m_floor.VertexBufferResource(), &s, HandleAt(2));
-    }
-
-    // t4 = floor indices (raw)
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC s{};
-        s.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        s.Format = DXGI_FORMAT_R32_TYPELESS;
-        s.Buffer.FirstElement = 0;
-        s.Buffer.NumElements = (m_floor.IndexCount() * 2 + 3) / 4;
-        s.Buffer.StructureByteStride = 0;
-        s.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-        m_device5->CreateShaderResourceView(m_floor.IndexBufferResource(), &s, HandleAt(3));
-    }
-
-    // t5 = per-frame instance data
-    //m_device5->CopyDescriptorsSimple( //crashes
-    //    1,
-    //    HandleAt(4),
-    //    frame.instanceDataSrv.cpu,
-    //    D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    // INSTEAD of CopyDescriptorsSimple, create SRV directly into the table
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Format = DXGI_FORMAT_UNKNOWN;
         srv.Buffer.FirstElement = 0;
         srv.Buffer.NumElements = frame.capacity;
@@ -3068,110 +3084,419 @@ void Renderer::UpdateRtGeometryTable(uint32_t frameIndex, ID3D12Resource* restir
         m_device5->CreateShaderResourceView(
             frame.instanceDataUpload.Get(),
             &srv,
-            HandleAt(4) 
-        );
+            frame.instanceDataSrv.cpu);
     }
 
-    
-    // Clear every non-geometry slot to deterministic nulls first.
-    // This covers:
-    // - material textures
-    // - IBL textures
-    // - RT sampling structured buffers
-    for (uint32_t slot = kRtGeometrySrvCount; slot < kRtSrvTableCount; ++slot)
+    D3D12_RANGE readRange{ 0, 0 };
+
+    RTInstanceData* dst = nullptr;
+
+    ThrowIfFailed(
+        frame.instanceDataUpload->Map(
+            0,
+            &readRange,
+            reinterpret_cast<void**>(&dst)),
+        "Map RT instance data upload");
+
+    for (uint32_t instanceIndex = 0;
+        instanceIndex < instanceCount;
+        ++instanceIndex)
     {
-        if (slot == kRtSrv_EnvAlias)
-            continue;
+        const DrawItem& item =
+            *m_rtDrawItems[instanceIndex];
+
+        const Material* material =
+            item.material;
+
+        RTInstanceData data{};
+
+        data.baseColorFactor =
+            material
+            ? material->baseColorFactor
+            : DirectX::XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+
+        data.metallic =
+            material
+            ? material->metallicFactor
+            : 0.0f;
+
+        data.roughness =
+            material
+            ? material->roughnessFactor
+            : 0.5f;
+
+        data.occlusionStrength =
+            material
+            ? material->occlusionStrength
+            : 1.0f;
+
+        data.hasOcclusionTexture =
+            material
+            ? material->hasOcclusionTexture
+            : 0u;
+
+        data.meshType =
+            GetRtMeshTypeForDrawItem(item);
+
+        data.materialId =
+            ResolveRtMaterialId(material);
+
+        data.objectId =
+            item.rtObjectId != 0u
+            ? item.rtObjectId
+            : instanceIndex + 1u;
+
+        data.indexStart =
+            GetRtIndexStartForDrawItem(item);
+
+        const bool hasPrevMotionWorld =
+            m_prevRtMotionWorldsValid &&
+            instanceIndex < m_prevRtMotionWorlds.size();
+
+        data.prevObjectToWorld =
+            hasPrevMotionWorld
+            ? m_prevRtMotionWorlds[instanceIndex]
+            : item.world;
+
+        dst[instanceIndex] = data;
+    }
+
+    const D3D12_RANGE writtenRange
+    {
+        0,
+        SIZE_T(sizeof(RTInstanceData) * instanceCount)
+    };
+
+    frame.instanceDataUpload->Unmap(
+        0,
+        &writtenRange);
+}
+
+void Renderer::UpdateRtGeometryTable(
+    uint32_t frameIndex,
+    ID3D12Resource* restirResolveReservoir)
+{
+    auto& frame =
+        m_rtFrames[frameIndex];
+
+    EnsureRtDescriptorTable(
+        frame.geometryTable,
+        frame.geometryTableCount,
+        kRtSrvTableCount);
+
+    auto CpuForRegister = [&](uint32_t shaderRegister)
+    {
+        assert(shaderRegister >= 1u);
+        assert(shaderRegister <= kRtHighestSrvRegister);
+
+        D3D12_CPU_DESCRIPTOR_HANDLE handle =
+            frame.geometryTable.cpu;
+
+        handle.ptr +=
+            SIZE_T(shaderRegister - 1u) *
+            SIZE_T(m_srvHeap.DescriptorSize());
+
+        return handle;
+    };
+
+    auto CreateNullStructuredBufferSrv =
+        [&](uint32_t shaderRegister, uint32_t stride)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+        desc.ViewDimension =
+            D3D12_SRV_DIMENSION_BUFFER;
+        desc.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        desc.Format =
+            DXGI_FORMAT_UNKNOWN;
+        desc.Buffer.FirstElement =
+            0;
+        desc.Buffer.NumElements =
+            1;
+        desc.Buffer.StructureByteStride =
+            stride;
+        desc.Buffer.Flags =
+            D3D12_BUFFER_SRV_FLAG_NONE;
+
+        m_device5->CreateShaderResourceView(
+            nullptr,
+            &desc,
+            CpuForRegister(shaderRegister));
+    };
+
+    auto CreateNullRawBufferSrv =
+        [&](uint32_t shaderRegister)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+        desc.ViewDimension =
+            D3D12_SRV_DIMENSION_BUFFER;
+        desc.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        desc.Format =
+            DXGI_FORMAT_R32_TYPELESS;
+        desc.Buffer.FirstElement =
+            0;
+        desc.Buffer.NumElements =
+            1;
+        desc.Buffer.StructureByteStride =
+            0;
+        desc.Buffer.Flags =
+            D3D12_BUFFER_SRV_FLAG_RAW;
+
+        m_device5->CreateShaderResourceView(
+            nullptr,
+            &desc,
+            CpuForRegister(shaderRegister));
+    };
+
+    auto CreateStructuredBufferSrv =
+        [&](ID3D12Resource* resource,
+            uint32_t shaderRegister,
+            uint32_t elementCount,
+            uint32_t stride)
+    {
+        if (!resource || elementCount == 0u)
+        {
+            CreateNullStructuredBufferSrv(
+                shaderRegister,
+                stride);
+
+            return;
+        }
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+        desc.ViewDimension =
+            D3D12_SRV_DIMENSION_BUFFER;
+        desc.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        desc.Format =
+            DXGI_FORMAT_UNKNOWN;
+        desc.Buffer.FirstElement =
+            0;
+        desc.Buffer.NumElements =
+            elementCount;
+        desc.Buffer.StructureByteStride =
+            stride;
+        desc.Buffer.Flags =
+            D3D12_BUFFER_SRV_FLAG_NONE;
+
+        m_device5->CreateShaderResourceView(
+            resource,
+            &desc,
+            CpuForRegister(shaderRegister));
+    };
+
+    auto CreateRawBufferSrv =
+        [&](ID3D12Resource* resource,
+            uint32_t shaderRegister,
+            uint32_t byteSize)
+    {
+        if (!resource || byteSize == 0u)
+        {
+            CreateNullRawBufferSrv(shaderRegister);
+            return;
+        }
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+        desc.ViewDimension =
+            D3D12_SRV_DIMENSION_BUFFER;
+        desc.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        desc.Format =
+            DXGI_FORMAT_R32_TYPELESS;
+        desc.Buffer.FirstElement =
+            0;
+        desc.Buffer.NumElements =
+            (byteSize + 3u) / 4u;
+        desc.Buffer.StructureByteStride =
+            0;
+        desc.Buffer.Flags =
+            D3D12_BUFFER_SRV_FLAG_RAW;
+
+        m_device5->CreateShaderResourceView(
+            resource,
+            &desc,
+            CpuForRegister(shaderRegister));
+    };
+
+    auto CreateTextureSrv =
+        [&](const Texture* texture,
+            uint32_t shaderRegister,
+            const Texture* fallback = nullptr)
+    {
+        const Texture* selected =
+            texture && texture->IsValid()
+            ? texture
+            : fallback;
+
+        if (selected && selected->IsValid())
+        {
+            WriteRtTextureSrv(
+                m_device5.Get(),
+                CpuForRegister(shaderRegister),
+                *selected);
+
+            return;
+        }
 
         CreateNullTexture2DSRV(
             m_device5.Get(),
-            HandleAt(slot),
+            CpuForRegister(shaderRegister),
+            DXGI_FORMAT_R8G8B8A8_UNORM);
+    };
+
+    // Fill the whole table with deterministic null texture descriptors first.
+    // Explicit buffer slots are overwritten below with proper buffer SRVs.
+    for (uint32_t shaderRegister = 1u;
+        shaderRegister <= kRtHighestSrvRegister;
+        ++shaderRegister)
+    {
+        CreateNullTexture2DSRV(
+            m_device5.Get(),
+            CpuForRegister(shaderRegister),
             DXGI_FORMAT_R8G8B8A8_UNORM);
     }
 
-    // t34 = selected ReSTIR reservoir for DXR resolve
+    // t1 = quad vertices
+    CreateStructuredBufferSrv(
+        m_quad.VertexBufferResource(),
+        kRtRegisterQuadVerts,
+        m_quad.VertexCount(),
+        m_quad.VertexStride());
+
+    // t2 = quad indices, 16-bit procedural index buffer exposed as raw.
+    CreateRawBufferSrv(
+        m_quad.IndexBufferResource(),
+        kRtRegisterQuadIndices,
+        static_cast<uint32_t>(m_quad.IndexCount() * sizeof(uint16_t)));
+
+    // t3 = floor vertices
+    CreateStructuredBufferSrv(
+        m_floor.VertexBufferResource(),
+        kRtRegisterFloorVerts,
+        m_floor.VertexCount(),
+        m_floor.VertexStride());
+
+    // t4 = floor indices, 16-bit procedural index buffer exposed as raw.
+    CreateRawBufferSrv(
+        m_floor.IndexBufferResource(),
+        kRtRegisterFloorIndices,
+        static_cast<uint32_t>(m_floor.IndexCount() * sizeof(uint16_t)));
+
+    // t5 = RT instance data.
+    //
+    // Important: this count must match the same RT draw list used for TLAS.
+    CreateStructuredBufferSrv(
+        frame.instanceDataUpload.Get(),
+        kRtRegisterInstanceData,
+        static_cast<uint32_t>(m_rtDrawItems.size()),
+        sizeof(RTInstanceData));
+
+    // t6..t261 = material texture table.
+    //
+    // 64 materials × 4 textures:
+    // base color, normal, metallic/roughness, occlusion.
+    for (uint32_t materialIndex = 0u;
+        materialIndex < kRtMaxMaterials;
+        ++materialIndex)
     {
-        const uint32_t pixelCount =
-            std::max(1u, m_widthCached * m_heightCached);
+        const Material* material =
+            materialIndex < m_rtMaterialTable.size()
+            ? m_rtMaterialTable[materialIndex]
+            : nullptr;
 
-        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-        srv.Format = DXGI_FORMAT_UNKNOWN;
-        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srv.Buffer.FirstElement = 0;
-        srv.Buffer.NumElements =
-            restirResolveReservoir ? pixelCount : 1u;
-        srv.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
-        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+        const uint32_t baseRegister =
+            kRtRegisterMaterialTextures +
+            materialIndex * kRtTexturesPerMaterial;
 
-        m_device5->CreateShaderResourceView(
-            restirResolveReservoir,
-            &srv,
-            HandleAt(kRtSrv_RestirResolve));
+        CreateTextureSrv(
+            material ? material->baseColorTexture : nullptr,
+            baseRegister + kRtBaseColorTextureSlot,
+            &m_rtFallbackWhiteTex);
+
+        CreateTextureSrv(
+            material ? material->normalTexture : nullptr,
+            baseRegister + kRtNormalTextureSlot,
+            &m_rtFallbackFlatNormalTex);
+
+        CreateTextureSrv(
+            material ? material->metalRoughTexture : nullptr,
+            baseRegister + kRtMetalRoughTextureSlot,
+            &m_rtFallbackOrmTex);
+
+        CreateTextureSrv(
+            material ? material->occlusionTexture : nullptr,
+            baseRegister + kRtOcclusionTextureSlot,
+            &m_rtFallbackWhiteTex);
     }
 
-    WriteNullRtEnvAliasSrv(HandleAt(kRtSrv_EnvAlias));
-
-    auto WriteMaterial = [&](uint32_t materialId, const Texture* base, const Texture* normal, const Texture* orm)
+    // t270/t271 = imported glTF combined mesh buffers.
+    if (m_importedModel.IsLoaded())
     {
-        if (materialId >= kMaxRtMaterials)
-            return;
+        Mesh& importedMesh =
+            m_importedModel.GetMesh();
 
-        const uint32_t firstSlot =
-            kRtGeometrySrvCount + materialId * kRtTexturesPerMaterial;
+        CreateStructuredBufferSrv(
+            importedMesh.VertexBufferResource(),
+            kRtRegisterImportedVerts,
+            importedMesh.VertexCount(),
+            importedMesh.VertexStride());
 
-        const Texture& baseTex = (base && base->IsValid()) ? *base : m_rtFallbackWhiteTex;
-        const Texture& normalTex = (normal && normal->IsValid()) ? *normal : m_rtFallbackFlatNormalTex;
-        const Texture& ormTex = (orm && orm->IsValid()) ? *orm : m_rtFallbackOrmTex;
+        CreateRawBufferSrv(
+            importedMesh.IndexBufferResource(),
+            kRtRegisterImportedIndices,
+            importedMesh.IndexBufferByteSize());
+    }
+    else
+    {
+        CreateNullStructuredBufferSrv(
+            kRtRegisterImportedVerts,
+            sizeof(Mesh::Vertex));
 
-        WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 0), baseTex);
-        WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 1), normalTex);
-        WriteRtTextureSrv(m_device5.Get(), HandleAt(firstSlot + 2), ormTex);
-    };
+        CreateNullRawBufferSrv(
+            kRtRegisterImportedIndices);
+    }
 
-    // Stable explicit mapping:
-    // 0 = floor
-    // 1 = metal
-    // 2 = matte
-    // 3 = glossy
+    // t280 = BRDF LUT
+    CreateTextureSrv(
+        m_brdfLutTex.IsValid() ? &m_brdfLutTex : nullptr,
+        kRtRegisterBrdfLut);
 
-    WriteMaterial(
-        kRtMaterialFloor,
-        &m_albedoTex,
-        &m_normalTex,
-        &m_metalRoughTex);
+    // t281 = IBL diffuse
+    CreateTextureSrv(
+        m_iblDiffuseTex.IsValid() ? &m_iblDiffuseTex : nullptr,
+        kRtRegisterIblDiffuse);
 
-    WriteMaterial(
-        kRtMaterialMetal,
-        m_metalBaseTex.IsValid() ? &m_metalBaseTex : &m_albedoTex,
-        m_metalNormalTex.IsValid() ? &m_metalNormalTex : &m_normalTex,
-        m_metalOrmTex.IsValid() ? &m_metalOrmTex : &m_metalRoughTex);
+    // t282 = IBL specular
+    CreateTextureSrv(
+        m_iblSpecularTex.IsValid() ? &m_iblSpecularTex : nullptr,
+        kRtRegisterIblSpecular);
 
-    WriteMaterial(
-        kRtMaterialMatte,
-        m_matteBaseTex.IsValid() ? &m_matteBaseTex : &m_albedoTex,
-        m_matteNormalTex.IsValid() ? &m_matteNormalTex : &m_normalTex,
-        m_matteOrmTex.IsValid() ? &m_matteOrmTex : &m_metalRoughTex);
+    // t283 = environment alias table.
+    //
+    // Write a valid null first, then let the real helper overwrite it if the
+    // environment alias resource exists.
+    WriteNullRtEnvAliasSrv(
+        CpuForRegister(kRtRegisterEnvAlias));
 
-    WriteMaterial(
-        kRtMaterialGlossy,
-        m_glossyBaseTex.IsValid() ? &m_glossyBaseTex : &m_albedoTex,
-        m_glossyNormalTex.IsValid() ? &m_glossyNormalTex : &m_normalTex,
-        m_glossyOrmTex.IsValid() ? &m_glossyOrmTex : &m_metalRoughTex);
+    WriteRtEnvAliasSrv(
+        CpuForRegister(kRtRegisterEnvAlias));
 
-    // Leave IBL slots null unless real textures are valid.
-    if (m_brdfLutTex.IsValid())
-        WriteRtTextureSrv(m_device5.Get(), HandleAt(kRtSrv_BrdfLut), m_brdfLutTex);
+    // t284 = selected ReSTIR reservoir for DXR resolve.
+    const uint32_t pixelCount =
+        std::max(1u, m_widthCached * m_heightCached);
 
-    if (m_iblDiffuseTex.IsValid())
-        WriteRtTextureSrv(m_device5.Get(), HandleAt(kRtSrv_IblDiff), m_iblDiffuseTex);
+    CreateStructuredBufferSrv(
+        restirResolveReservoir,
+        kRtRegisterRestirResolveReservoir,
+        restirResolveReservoir ? pixelCount : 1u,
+        sizeof(RtRestirReservoir));
 
-    if (m_iblSpecularTex.IsValid())
-        WriteRtTextureSrv(m_device5.Get(), HandleAt(kRtSrv_IblSpec), m_iblSpecularTex);
-
-    WriteRtEnvAliasSrv(HandleAt(kRtSrv_EnvAlias));
-
-    m_rtMaterialCount = 4;
+    m_rtMaterialCount =
+        static_cast<uint32_t>(
+            std::min<size_t>(
+                m_rtMaterialTable.size(),
+                kRtMaxMaterials));
 }
 
 void Renderer::WriteRtTextureSrv(
@@ -3187,17 +3512,6 @@ void Renderer::WriteRtTextureSrv(
     srv.Texture2D.MipLevels = std::max(1u, texture.MipCount());
 
     device->CreateShaderResourceView(texture.Get(), &srv, dst);
-}
-
-uint32_t Renderer::GetRtMaterialId(const Material* material) const
-{
-    if (material == &m_floorMaterial)  return kRtMaterialFloor;
-    if (material == &m_metalMaterial)  return kRtMaterialMetal;
-    if (material == &m_matteMaterial)  return kRtMaterialMatte;
-    if (material == &m_glossyMaterial) return kRtMaterialGlossy;
-
-    // Current draw list only uses the four materials above.
-    return kRtMaterialFloor;
 }
 
 void Renderer::CreateRtFallbackTextures(
@@ -5300,11 +5614,26 @@ bool Renderer::RunRtDenoiseSignal(
 
 void Renderer::CommitRtMotionWorlds()
 {
-    m_prevRtMotionWorlds.resize(m_draws.size());
+    m_prevRtMotionWorlds.clear();
 
-    for (size_t i = 0; i < m_draws.size(); ++i)
+    if (m_rtDrawItems.empty())
     {
-        m_prevRtMotionWorlds[i] = m_draws[i].world;
+        m_prevRtMotionWorldsValid = false;
+        return;
+    }
+
+    m_prevRtMotionWorlds.reserve(m_rtDrawItems.size());
+
+    for (const DrawItem* item : m_rtDrawItems)
+    {
+        if (!item)
+        {
+            m_prevRtMotionWorldsValid = false;
+            m_prevRtMotionWorlds.clear();
+            return;
+        }
+
+        m_prevRtMotionWorlds.push_back(item->world);
     }
 
     m_prevRtMotionWorldsValid = true;
@@ -9873,7 +10202,7 @@ void Renderer::LoadDefaultGltfScene(
         if (!m_importedModel.LoadGltf(
             device,
             cl,
-            m_upload,
+            m_assetUpload,
             m_srvHeap,
             frameIndex,
             modelPath,
@@ -9914,9 +10243,6 @@ void Renderer::AppendLoadedModelDraws()
         return;
     }
 
-    if (m_useRaytracing)
-        return;
-
     Mesh& mesh =
         m_importedModel.GetMesh();
 
@@ -9946,3 +10272,235 @@ void Renderer::AppendLoadedModelDraws()
         m_draws.push_back(item);
     }
 }
+
+void Renderer::BuildImportedModelBlas(
+    ID3D12Device* device,
+    CommandList& cl)
+{
+    if (!device ||
+        !m_device5 ||
+        m_importedModelBlasBuilt ||
+        !m_importedModel.IsLoaded())
+    {
+        return;
+    }
+
+    auto cmd4 =
+        GetCommandList4(cl);
+
+    if (!cmd4)
+        return;
+
+    Mesh& mesh =
+        m_importedModel.GetMesh();
+
+    const uint32_t submeshCount =
+        mesh.SubmeshCount();
+
+    if (submeshCount == 0 ||
+        !mesh.VertexBufferResource() ||
+        !mesh.IndexBufferResource())
+    {
+        return;
+    }
+
+    if (mesh.IndexFormat() != DXGI_FORMAT_R32_UINT)
+    {
+        OutputDebugStringW(
+            L"Imported glTF DXR BLAS skipped: expected R32 index buffer.\n");
+
+        return;
+    }
+
+    cl.Transition(
+        mesh.VertexBufferResource(),
+        D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.Transition(
+        mesh.IndexBufferResource(),
+        D3D12_RESOURCE_STATE_INDEX_BUFFER |
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.FlushBarriers();
+
+    m_importedModelBlas.clear();
+    m_importedModelBlas.resize(submeshCount);
+
+    for (uint32_t submeshIndex = 0;
+        submeshIndex < submeshCount;
+        ++submeshIndex)
+    {
+        const Mesh::Submesh& submesh =
+            mesh.GetSubmesh(submeshIndex);
+
+        if (submesh.indexCount == 0)
+            continue;
+
+        AccelerationStructure::GeometryDesc geom{};
+        geom.vertexBuffer =
+            mesh.VertexBufferResource()->GetGPUVirtualAddress();
+        geom.vertexCount =
+            mesh.VertexCount();
+        geom.vertexStride =
+            mesh.VertexStride();
+        geom.vertexFormat =
+            DXGI_FORMAT_R32G32B32_FLOAT;
+
+        geom.indexBuffer =
+            mesh.IndexBufferResource()->GetGPUVirtualAddress();
+        geom.indexCount =
+            submesh.indexCount;
+        geom.indexFormat =
+            mesh.IndexFormat();
+        geom.indexBufferOffsetBytes =
+            static_cast<uint64_t>(submesh.indexStart) *
+            sizeof(uint32_t);
+
+        geom.opaque = true;
+
+        std::wstring blasName =
+            L"BLAS Imported glTF Submesh " +
+            std::to_wstring(submeshIndex);
+
+        m_importedModelBlas[submeshIndex].BuildBottomLevel(
+            m_device5.Get(),
+            cmd4.Get(),
+            geom,
+            blasName.c_str());
+    }
+
+    m_importedModelBlasBuilt = true;
+
+    OutputDebugStringW(L"Imported glTF BLAS built for DXR.\n");
+}
+
+bool Renderer::IsImportedModelMesh(const Mesh* mesh) const
+{
+    return
+        m_importedModel.IsLoaded() &&
+        mesh == &m_importedModel.GetMesh();
+}
+
+uint32_t Renderer::GetRtMeshTypeForDrawItem(
+    const DrawItem& item) const
+{
+    if (item.mesh == &m_floor)
+        return kRtMeshTypeFloor;
+
+    if (item.mesh == &m_quad)
+        return kRtMeshTypeQuad;
+
+    if (IsImportedModelMesh(item.mesh))
+        return kRtMeshTypeImported;
+
+    return UINT32_MAX;
+}
+
+uint32_t Renderer::GetRtIndexStartForDrawItem(
+    const DrawItem& item) const
+{
+    if (!item.mesh)
+        return 0u;
+
+    if (!IsImportedModelMesh(item.mesh))
+        return 0u;
+
+    return item.mesh->GetSubmesh(item.submeshIndex).indexStart;
+}
+
+const AccelerationStructure* Renderer::GetBlasForDrawItem(
+    const DrawItem& item) const
+{
+    if (item.mesh == &m_floor)
+        return &m_blasFloor;
+
+    if (item.mesh == &m_quad)
+        return &m_blasQuad;
+
+    if (IsImportedModelMesh(item.mesh))
+    {
+        if (!m_importedModelBlasBuilt)
+            return nullptr;
+
+        if (item.submeshIndex >= m_importedModelBlas.size())
+            return nullptr;
+
+        return &m_importedModelBlas[item.submeshIndex];
+    }
+
+    return nullptr;
+}
+
+void Renderer::BuildRtDrawItems()
+{
+    m_rtDrawItems.clear();
+
+    for (const DrawItem& item : m_draws)
+    {
+        if (!item.mesh || !item.material)
+            continue;
+
+        if (GetRtMeshTypeForDrawItem(item) == UINT32_MAX)
+            continue;
+
+        const AccelerationStructure* blas =
+            GetBlasForDrawItem(item);
+
+        if (!blas || blas->GpuAddress() == 0)
+            continue;
+
+        m_rtDrawItems.push_back(&item);
+    }
+}
+
+void Renderer::BuildRtMaterialTable()
+{
+    m_rtMaterialTable.clear();
+    m_rtMaterialToId.clear();
+
+    for (const DrawItem* item : m_rtDrawItems)
+    {
+        if (!item || !item->material)
+            continue;
+
+        if (m_rtMaterialToId.find(item->material) != m_rtMaterialToId.end())
+            continue;
+
+        if (m_rtMaterialTable.size() >= kRtMaxMaterials)
+        {
+            OutputDebugStringW(
+                L"DXR material table is full; additional materials will use material 0.\n");
+            continue;
+        }
+
+        const uint32_t materialId =
+            static_cast<uint32_t>(m_rtMaterialTable.size());
+
+        m_rtMaterialToId.emplace(item->material, materialId);
+        m_rtMaterialTable.push_back(item->material);
+    }
+
+    if (m_rtMaterialTable.empty())
+    {
+        // Keep material 0 valid.
+        m_rtMaterialTable.push_back(&m_floorMaterial);
+        m_rtMaterialToId.emplace(&m_floorMaterial, 0u);
+    }
+}
+
+uint32_t Renderer::ResolveRtMaterialId(
+    const Material* material) const
+{
+    if (!material)
+        return 0u;
+
+    const auto it =
+        m_rtMaterialToId.find(material);
+
+    if (it == m_rtMaterialToId.end())
+        return 0u;
+
+    return it->second;
+}
+

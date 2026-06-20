@@ -43,7 +43,7 @@ void AccelerationStructure::BuildBottomLevel(
     g.Triangles.VertexFormat = geom.vertexFormat;
     g.Triangles.IndexCount = geom.indexCount;
     g.Triangles.VertexCount = geom.vertexCount;
-    g.Triangles.IndexBuffer = geom.indexBuffer;
+    g.Triangles.IndexBuffer = geom.indexBuffer + geom.indexBufferOffsetBytes;
     g.Triangles.VertexBuffer.StartAddress = geom.vertexBuffer;
     g.Triangles.VertexBuffer.StrideInBytes = geom.vertexStride;
 

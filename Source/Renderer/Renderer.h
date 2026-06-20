@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <unordered_map>
 #include "Common.h"
 #include "Source/Renderer/Passes/TrianglePass.h"
 #include "Source/Renderer/Passes/ForwardPBRPass.h"
@@ -1434,8 +1435,29 @@ private:
 
     void AppendLoadedModelDraws();
 
+    void BuildImportedModelBlas(ID3D12Device* device, CommandList& cl);
+
+    void BuildRtDrawItems();
+
+    bool IsImportedModelMesh(const Mesh* mesh) const;
+
+    const AccelerationStructure* GetBlasForDrawItem(
+        const DrawItem& item) const;
+
+    uint32_t GetRtMeshTypeForDrawItem(
+        const DrawItem& item) const;
+
+    uint32_t GetRtIndexStartForDrawItem(
+        const DrawItem& item) const;
+
+    void BuildRtMaterialTable();
+
+    uint32_t ResolveRtMaterialId(
+        const Material* material) const;
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
+    UploadArena  m_assetUpload;
     DXGI_FORMAT  m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
 
     ForwardPBRPass m_forwardPbr;
@@ -1783,6 +1805,13 @@ private:
     LoadedModel m_importedModel;
     bool m_importedModelEnabled = true;
     bool m_importedModelLoadAttempted = false;
+    std::vector<AccelerationStructure> m_importedModelBlas;
+    bool m_importedModelBlasBuilt = false;
+
+    std::vector<const DrawItem*> m_rtDrawItems;
+
+    std::vector<const Material*> m_rtMaterialTable;
+    std::unordered_map<const Material*, uint32_t> m_rtMaterialToId;
     
     DirectX::XMFLOAT3 m_sceneBoundsCenter = { 0.0f, 0.5f, 0.0f };
     DirectX::XMFLOAT3 m_sceneBoundsExtent = { 3.5f, 3.5f, 3.5f };
@@ -1938,44 +1967,6 @@ private:
 
     uint32_t m_widthCached = 1;
     uint32_t m_heightCached = 1;
-
-    static constexpr uint32_t kMaxRtMaterials = 8;
-    static constexpr uint32_t kRtGeometrySrvCount = 5; // t1..t5
-    static constexpr uint32_t kRtTexturesPerMaterial = 3;
-
-    static constexpr uint32_t kRtMaterialFloor = 0;
-    static constexpr uint32_t kRtMaterialMetal = 1;
-    static constexpr uint32_t kRtMaterialMatte = 2;
-    static constexpr uint32_t kRtMaterialGlossy = 3;
-
-    static constexpr uint32_t kRtIblSrvCount = 3;
-    static constexpr uint32_t kRtSamplingSrvCount = 1;
-    static constexpr uint32_t kRtRestirResolveSrvCount = 1;
-
-    static constexpr uint32_t kRtSrvTableCountWithoutSampling =
-        kRtGeometrySrvCount +
-        (kRtTexturesPerMaterial * kMaxRtMaterials) +
-        kRtIblSrvCount;
-
-    static constexpr uint32_t kRtSrvTableCount =
-        kRtSrvTableCountWithoutSampling +
-        kRtSamplingSrvCount +
-        kRtRestirResolveSrvCount;
-
-    static constexpr uint32_t kRtSrv_BrdfLut =
-        kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 0; // slot 29, HLSL t30
-
-    static constexpr uint32_t kRtSrv_IblDiff =
-        kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 1; // slot 30, HLSL t31
-
-    static constexpr uint32_t kRtSrv_IblSpec =
-        kRtGeometrySrvCount + kRtTexturesPerMaterial * kMaxRtMaterials + 2; // slot 31, HLSL t32
-
-    static constexpr uint32_t kRtSrv_EnvAlias =
-        kRtSrvTableCountWithoutSampling; // slot 32, HLSL t33
-
-    static constexpr uint32_t kRtSrv_RestirResolve =
-        kRtSrv_EnvAlias + 1; // slot 33, HLSL t34
 
     static constexpr uint32_t kRtEnvImportanceFaceSize = 128;
     static constexpr uint32_t kRtEnvImportanceFallbackFaceSize = 64;

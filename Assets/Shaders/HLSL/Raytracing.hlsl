@@ -3,9 +3,18 @@
 #include "RtSampling.hlsli"
 #include "RtReservoir.hlsli"
 
-#define RT_MAX_MATERIALS 8
-#define RT_TEXTURES_PER_MATERIAL 3
+#define RT_MAX_MATERIALS 64
+#define RT_TEXTURES_PER_MATERIAL 4
 #define RT_TEXTURE_COUNT (RT_MAX_MATERIALS * RT_TEXTURES_PER_MATERIAL)
+
+#define RT_TEXTURE_SLOT_BASE_COLOR 0
+#define RT_TEXTURE_SLOT_NORMAL 1
+#define RT_TEXTURE_SLOT_METAL_ROUGH 2
+#define RT_TEXTURE_SLOT_OCCLUSION 3
+
+#define RT_MESH_FLOOR 0
+#define RT_MESH_QUAD 1
+#define RT_MESH_IMPORTED 2
 
 struct VertexRT
 {
@@ -22,12 +31,13 @@ struct RTInstanceData
 
     float metallic;
     float roughness;
-    float2 _pad0;
+    float occlusionStrength;
+    uint hasOcclusionTexture;
 
     uint meshType;
     uint materialId;
     uint objectId;
-    uint _pad1;
+    uint indexStart;
 
     row_major float4x4 prevObjectToWorld;
 };
@@ -173,18 +183,19 @@ StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);
 ByteAddressBuffer                   g_FloorIndices : register(t4);
 StructuredBuffer<RTInstanceData>    g_InstanceData : register(t5);
 
-// t6.. = [base0, normal0, orm0, base1, normal1, orm1, ...]
+// t6..t261 = material texture table:
+// 64 materials × 4 textures:
+// [baseColor, normal, metallicRoughness, occlusion]
 Texture2D<float4>                   g_RtMaterialTextures[RT_TEXTURE_COUNT] : register(t6);
-Texture2D<float4> g_BRDFLut : register(t30);
-Texture2D<float4> g_IBLDiffuse : register(t31);
-Texture2D<float4> g_IBLSpecular : register(t32);
-StructuredBuffer<RtEnvAliasEntry> g_EnvAlias : register(t33);
-StructuredBuffer<RtRestirReservoir> g_RestirResolveReservoir : register(t34);
-// t1..t5   geometry + instance data
-// t6..t29  8 materials × 3 textures
-// t30..t32 IBL resources
-// t33      RT environment alias table
-// t34      selected ReSTIR reservoir for DXR resolve
+StructuredBuffer<VertexRT>          g_ImportedVerts : register(t270);
+ByteAddressBuffer                   g_ImportedIndices : register(t271);
+
+Texture2D<float4>                   g_BRDFLut : register(t280);
+Texture2D<float4>                   g_IBLDiffuse : register(t281);
+Texture2D<float4>                   g_IBLSpecular : register(t282);
+
+StructuredBuffer<RtEnvAliasEntry>   g_EnvAlias : register(t283);
+StructuredBuffer<RtRestirReservoir> g_RestirResolveReservoir : register(t284);
 SamplerState                        g_LinearWrap : register(s0);
 SamplerState                        g_LinearClamp : register(s1);
 
@@ -194,6 +205,11 @@ uint LoadIndex16(ByteAddressBuffer buf, uint idx)
     uint aligned = byteOffset & ~3;
     uint packed = buf.Load(aligned);
     return (byteOffset & 2) ? ((packed >> 16) & 0xFFFF) : (packed & 0xFFFF);
+}
+
+uint LoadIndex32(ByteAddressBuffer buffer, uint indexIndex)
+{
+    return buffer.Load(indexIndex * 4u);
 }
 
 float3x4 GetObjectToWorld()
@@ -240,28 +256,56 @@ float4 BaryLerp4(float4 a, float4 b, float4 c, float2 bary)
 
 VertexRT LoadVertex(uint meshType, uint vertexIndex)
 {
-    if (meshType == 0)
+    if (meshType == RT_MESH_FLOOR)
+    {
         return g_FloorVerts[vertexIndex];
-    else
+    }
+
+    if (meshType == RT_MESH_QUAD)
+    {
         return g_QuadVerts[vertexIndex];
+    }
+
+    return g_ImportedVerts[vertexIndex];
 }
 
 uint LoadMeshIndex(uint meshType, uint indexIndex)
 {
-    return (meshType == 0)
-        ? LoadIndex16(g_FloorIndices, indexIndex)
-        : LoadIndex16(g_QuadIndices, indexIndex);
+    if (meshType == RT_MESH_FLOOR)
+    {
+        return LoadIndex16(g_FloorIndices, indexIndex);
+    }
+
+    if (meshType == RT_MESH_QUAD)
+    {
+        return LoadIndex16(g_QuadIndices, indexIndex);
+    }
+
+    return LoadIndex32(g_ImportedIndices, indexIndex);
 }
 
-void LoadTriangleVertices(uint meshType, uint primitiveIndex, out VertexRT v0, out VertexRT v1, out VertexRT v2)
+void LoadTriangleVertices(
+    RTInstanceData instanceData,
+    uint primitiveIndex,
+    out VertexRT v0,
+    out VertexRT v1,
+    out VertexRT v2)
 {
-    uint i0 = LoadMeshIndex(meshType, primitiveIndex * 3 + 0);
-    uint i1 = LoadMeshIndex(meshType, primitiveIndex * 3 + 1);
-    uint i2 = LoadMeshIndex(meshType, primitiveIndex * 3 + 2);
+    const uint baseIndex =
+        instanceData.indexStart + primitiveIndex * 3u;
 
-    v0 = LoadVertex(meshType, i0);
-    v1 = LoadVertex(meshType, i1);
-    v2 = LoadVertex(meshType, i2);
+    const uint i0 =
+        LoadMeshIndex(instanceData.meshType, baseIndex + 0u);
+
+    const uint i1 =
+        LoadMeshIndex(instanceData.meshType, baseIndex + 1u);
+
+    const uint i2 =
+        LoadMeshIndex(instanceData.meshType, baseIndex + 2u);
+
+    v0 = LoadVertex(instanceData.meshType, i0);
+    v1 = LoadVertex(instanceData.meshType, i1);
+    v2 = LoadVertex(instanceData.meshType, i2);
 }
 
 SurfaceBasisRT FetchSurfaceBasis(uint instanceID, uint primitiveIndex, float2 bary)
@@ -269,7 +313,7 @@ SurfaceBasisRT FetchSurfaceBasis(uint instanceID, uint primitiveIndex, float2 ba
     RTInstanceData inst = g_InstanceData[instanceID];
 
     VertexRT v0, v1, v2;
-    LoadTriangleVertices(inst.meshType, primitiveIndex, v0, v1, v2);
+    LoadTriangleVertices(inst, primitiveIndex, v0, v1, v2);
 
     float2 uv = BaryLerp2(v0.uv, v1.uv, v2.uv, bary);
     float3 objPos = BaryLerp3(v0.pos, v1.pos, v2.pos, bary);
@@ -287,10 +331,11 @@ SurfaceBasisRT FetchSurfaceBasis(uint instanceID, uint primitiveIndex, float2 ba
     return s;
 }
 
-
 uint GetRtTextureBaseIndex(uint materialId)
 {
-    uint clampedId = min(materialId, (uint) (RT_MAX_MATERIALS - 1));
+    const uint clampedId =
+        min(materialId, (uint) (RT_MAX_MATERIALS - 1));
+
     return clampedId * RT_TEXTURES_PER_MATERIAL;
 }
 
@@ -302,18 +347,48 @@ float4 SampleRtTexture(uint materialId, uint slot, float2 uv)
 
 float4 SampleBaseColorTex(uint materialId, float2 uv)
 {
-    return SampleRtTexture(materialId, 0, uv);
+    return SampleRtTexture(
+        materialId,
+        RT_TEXTURE_SLOT_BASE_COLOR,
+        uv);
 }
 
 float3 SampleNormalTex(uint materialId, float2 uv)
 {
-    float3 s = SampleRtTexture(materialId, 1, uv).xyz;
-    return SafeNormalize(s * 2.0f - 1.0f);
+    const float3 texel =
+        SampleRtTexture(
+            materialId,
+            RT_TEXTURE_SLOT_NORMAL,
+            uv).xyz;
+
+    return SafeNormalize(texel * 2.0f - 1.0f);
 }
 
-float3 SampleOrmTex(uint materialId, float2 uv)
+float3 SampleMetalRoughTex(uint materialId, float2 uv)
 {
-    return SampleRtTexture(materialId, 2, uv).rgb;
+    return SampleRtTexture(
+        materialId,
+        RT_TEXTURE_SLOT_METAL_ROUGH,
+        uv).rgb;
+}
+
+float ComputeRtMaterialOcclusion(
+    RTInstanceData instanceData,
+    float2 uv)
+{
+    if (instanceData.hasOcclusionTexture == 0u)
+        return 1.0f;
+
+    const float occlusionTexel =
+        SampleRtTexture(
+            instanceData.materialId,
+            RT_TEXTURE_SLOT_OCCLUSION,
+            uv).r;
+
+    return saturate(
+        1.0f +
+        saturate(instanceData.occlusionStrength) *
+        (occlusionTexel - 1.0f));
 }
 
 uint HashUint(uint x)
@@ -827,18 +902,24 @@ float TraceShadowVisibility(float3 worldPos, float3 geomNormal, float3 L)
     shadowPayload.occluded = 0;
     shadowPayload.rng = 0u;
 
-    float shadowBias = max(0.001f, 0.01f * (1.0f - saturate(dot(geomNormal, L))));
+    float NoL = dot(geomNormal, L);
+
+    float3 biasNormal =
+    (NoL >= 0.0f) ? geomNormal : -geomNormal;
+
+    float shadowBias =
+    max(0.001f, 0.01f * (1.0f - saturate(abs(NoL))));
 
     RayDesc shadowRay;
-    shadowRay.Origin = worldPos + geomNormal * shadowBias;
+    shadowRay.Origin = worldPos + biasNormal * shadowBias;
     shadowRay.Direction = L;
-    shadowRay.TMin = 0.0f;
+    shadowRay.TMin = 0.001f;
     shadowRay.TMax = 1e38f;
 
     TraceRay(
         g_Scene,
         RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-        RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+        RAY_FLAG_FORCE_OPAQUE,
         0xFF,
         0,
         1,
@@ -857,19 +938,24 @@ bool TraceEnvironmentVisibility(float3 worldPos, float3 geomNormal, float3 wi)
     shadowPayload.occluded = 0u;
     shadowPayload.rng = 0u;
 
+    float NoW = dot(geomNormal, wi);
+
+    float3 biasNormal =
+        (NoW >= 0.0f) ? geomNormal : -geomNormal;
+
     float visibilityBias =
-        max(0.001f, 0.01f * (1.0f - saturate(dot(geomNormal, wi))));
+        max(0.001f, 0.01f * (1.0f - saturate(abs(NoW))));
 
     RayDesc shadowRay;
-    shadowRay.Origin = worldPos + geomNormal * visibilityBias;
+    shadowRay.Origin = worldPos + biasNormal * visibilityBias;
     shadowRay.Direction = wi;
-    shadowRay.TMin = 0.0f;
+    shadowRay.TMin = 0.001f;
     shadowRay.TMax = 1.0e30f;
 
     TraceRay(
         g_Scene,
         RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-        RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+        RAY_FLAG_FORCE_OPAQUE,
         0xFF,
         0,
         1,
@@ -1757,7 +1843,11 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
     RTInstanceData data = g_InstanceData[instanceID];
     
-    
+    float ao =
+    ComputeRtMaterialOcclusion(
+        data,
+        surface.uv);
+   
     uint currentSurfaceId = MakeSurfaceId(data.objectId, data.materialId);
 
     float3 T = SafeNormalize(surface.worldTangent - geomNormal * dot(surface.worldTangent, geomNormal));
@@ -1770,11 +1860,12 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         worldNormal = -worldNormal;
 
     float4 baseTex = SampleBaseColorTex(data.materialId, surface.uv);
-    float3 ormTex = SampleOrmTex(data.materialId, surface.uv);
+    float3 metalRoughTex = SampleMetalRoughTex(data.materialId, surface.uv);
 
     float3 base = data.baseColorFactor.rgb * baseTex.rgb;
-    float roughness = saturate(data.roughness * ormTex.g);
-    float metallic = saturate(data.metallic * ormTex.b);
+    float roughness = saturate(data.roughness * metalRoughTex.g);
+
+    float metallic = saturate(data.metallic * metalRoughTex.b);
     
     roughness = max(0.045f, roughness);
     
@@ -2033,6 +2124,12 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     
     if (payload.rayType == RT_RAY_INDIRECT)
     {
+        float sunVisibility =
+        TraceShadowVisibility(
+            worldPos,
+            geomNormal,
+            L);
+        
         float3 direct = EvalDirectAtSurface(
             base,
             metallic,
@@ -2040,7 +2137,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
             worldNormal,
             V,
             L,
-            1.0f);
+            sunVisibility);
 
         direct += EvalPointLightsAtSurface(
             base,
@@ -2216,7 +2313,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     bool allowIndirect =
         ((RtEnableIndirect != 0) || samplingDebugView == 101u) &&
         (
-            (RtAccumulate != 0 && DebugView == 0) ||
+            DebugView == 0 ||
             DebugView == 9 ||
             DebugView == 10 ||
             DebugView == 11 ||
@@ -2566,20 +2663,23 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     directSplit.diffuse += pointSplit.diffuse;
     directSplit.spec += pointSplit.spec;
 
-    float3 ambient = base * 0.03f;
-    
-    float3 envDiffuseTerm = useEnvNeeForFinal
-        ? envNeeDiffuse
-        : iblDiffuse;
+    float3 ambient =
+        base * 0.03f * ao;
 
-    float3 envSpecTerm = useEnvNeeForFinal
-        ? envNeeSpec
-        : iblSpecular;
+    float3 envDiffuseTerm =
+        useEnvNeeForFinal
+            ? envNeeDiffuse
+            : iblDiffuse;
+
+    float3 envSpecTerm =
+        useEnvNeeForFinal
+            ? envNeeSpec
+            : iblSpecular;
 
     float3 sampleDiffuse =
         ambient +
         directSplit.diffuse +
-        envDiffuseTerm +
+        envDiffuseTerm * ao +
         RtIndirectScale * indirectDiffuse;
 
     float3 sampleSpec =

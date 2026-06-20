@@ -27,6 +27,11 @@ struct Material
     float occlusionStrength = 1.0f;
     uint32_t hasOcclusionTexture = 0;
 
+    const Texture* baseColorTexture = nullptr;
+    const Texture* normalTexture = nullptr;
+    const Texture* metalRoughTexture = nullptr;
+    const Texture* occlusionTexture = nullptr;
+
     // Slot convention within the table (space1):
     // t0 baseColor, t1 normal, t2 metallicRoughness, t3 occlusion
     static constexpr uint32_t kBaseColorSlot = 0;
@@ -56,6 +61,18 @@ struct Material
             h.ptr += static_cast<SIZE_T>(slot) * descriptorSize;            
             return h;
         };
+
+        baseColorTexture =
+            (albedo && albedo->IsValid()) ? albedo : nullptr;
+
+        normalTexture =
+            (normal && normal->IsValid()) ? normal : nullptr;
+
+        metalRoughTexture =
+            (metalRough && metalRough->IsValid()) ? metalRough : nullptr;
+
+        occlusionTexture =
+            (occlusion && occlusion->IsValid()) ? occlusion : nullptr;
 
         // Fill all reserved slots with deterministic null SRVs first.
         for (uint32_t slot = 0; slot < kDescriptorCount; ++slot)
@@ -93,15 +110,14 @@ struct Material
             device->CreateShaderResourceView(metalRough->Get(), &srvDesc, GetCpuHandle(kMetalRoughSlot));
         }
 
-        hasOcclusionTexture =
-            (occlusion && occlusion->IsValid()) ? 1u : 0u;
+        hasOcclusionTexture = occlusionTexture ? 1u : 0u;
         // Slot 3: Occlusion
-        if (hasOcclusionTexture != 0u)
+        if (hasOcclusionTexture)
         {
-            srvDesc.Format = occlusion->SrvFormat();
+            srvDesc.Format = occlusionTexture->SrvFormat();
 
             device->CreateShaderResourceView(
-                occlusion->Get(),
+                occlusionTexture->Get(),
                 &srvDesc,
                 GetCpuHandle(kOcclusionSlot));
         }

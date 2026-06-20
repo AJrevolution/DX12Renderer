@@ -15,6 +15,10 @@ public:
         uint32_t indexCount = 0;
         DXGI_FORMAT indexFormat = DXGI_FORMAT_R16_UINT;
 
+        // Byte offset from indexBuffer to the first index for this geometry.
+        // Used by imported combined meshes where each submesh owns an index range.
+        uint64_t indexBufferOffsetBytes = 0;
+
         bool opaque = true;
     };
 
