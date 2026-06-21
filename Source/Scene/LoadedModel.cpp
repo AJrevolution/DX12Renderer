@@ -481,6 +481,123 @@ namespace
 
         return it->second;
     }
+
+    LoadedModel::Bounds MakeInvalidBounds()
+    {
+        LoadedModel::Bounds b{};
+        b.min =
+        {
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max()
+        };
+
+        b.max =
+        {
+            -std::numeric_limits<float>::max(),
+            -std::numeric_limits<float>::max(),
+            -std::numeric_limits<float>::max()
+        };
+
+        b.center = { 0.0f, 0.0f, 0.0f };
+        b.extent = { 0.0f, 0.0f, 0.0f };
+        b.valid = false;
+        return b;
+    }
+
+    void IncludePoint(
+        LoadedModel::Bounds& bounds,
+        DirectX::XMFLOAT3 p)
+    {
+        if (!bounds.valid)
+        {
+            bounds.min = p;
+            bounds.max = p;
+            bounds.valid = true;
+            return;
+        }
+
+        bounds.min.x = std::min(bounds.min.x, p.x);
+        bounds.min.y = std::min(bounds.min.y, p.y);
+        bounds.min.z = std::min(bounds.min.z, p.z);
+
+        bounds.max.x = std::max(bounds.max.x, p.x);
+        bounds.max.y = std::max(bounds.max.y, p.y);
+        bounds.max.z = std::max(bounds.max.z, p.z);
+    }
+
+    void IncludeBounds(
+        LoadedModel::Bounds& dst,
+        const LoadedModel::Bounds& src)
+    {
+        if (!src.valid)
+            return;
+
+        IncludePoint(dst, src.min);
+        IncludePoint(dst, src.max);
+    }
+
+    void FinaliseBounds(LoadedModel::Bounds& bounds)
+    {
+        if (!bounds.valid)
+            return;
+
+        bounds.center =
+        {
+            0.5f * (bounds.min.x + bounds.max.x),
+            0.5f * (bounds.min.y + bounds.max.y),
+            0.5f * (bounds.min.z + bounds.max.z)
+        };
+
+        bounds.extent =
+        {
+            0.5f * (bounds.max.x - bounds.min.x),
+            0.5f * (bounds.max.y - bounds.min.y),
+            0.5f * (bounds.max.z - bounds.min.z)
+        };
+    }
+
+    LoadedModel::Bounds TransformBounds(
+        const LoadedModel::Bounds& localBounds,
+        DirectX::FXMMATRIX transform)
+    {
+        LoadedModel::Bounds worldBounds =
+            MakeInvalidBounds();
+
+        if (!localBounds.valid)
+            return worldBounds;
+
+        const DirectX::XMFLOAT3 mn = localBounds.min;
+        const DirectX::XMFLOAT3 mx = localBounds.max;
+
+        const DirectX::XMFLOAT3 corners[8] =
+        {
+            { mn.x, mn.y, mn.z },
+            { mx.x, mn.y, mn.z },
+            { mn.x, mx.y, mn.z },
+            { mx.x, mx.y, mn.z },
+            { mn.x, mn.y, mx.z },
+            { mx.x, mn.y, mx.z },
+            { mn.x, mx.y, mx.z },
+            { mx.x, mx.y, mx.z }
+        };
+
+        for (const DirectX::XMFLOAT3& corner : corners)
+        {
+            const DirectX::XMVECTOR p =
+                DirectX::XMLoadFloat3(&corner);
+
+            DirectX::XMFLOAT3 transformed{};
+            DirectX::XMStoreFloat3(
+                &transformed,
+                DirectX::XMVector3TransformCoord(p, transform));
+
+            IncludePoint(worldBounds, transformed);
+        }
+
+        FinaliseBounds(worldBounds);
+        return worldBounds;
+    }
 }
 
 void LoadedModel::Clear()
@@ -490,6 +607,8 @@ void LoadedModel::Clear()
     m_textures.clear();
     m_draws.clear();
     m_lastError.clear();
+    m_bounds = {};
+    m_stats = {};
     m_loaded = false;
 }
 
@@ -599,6 +718,7 @@ bool LoadedModel::LoadGltf(
     std::vector<Mesh::Vertex> vertices;
     std::vector<uint32_t> indices;
     std::vector<Mesh::Submesh> submeshes;
+    std::vector<Bounds> submeshLocalBounds;
 
     std::vector<std::vector<uint32_t>> meshPrimitiveToSubmesh;
     meshPrimitiveToSubmesh.resize(model.meshes.size());
@@ -665,6 +785,8 @@ bool LoadedModel::LoadGltf(
                 needsGeneratedTangents = true;
             }
 
+            Bounds primitiveBounds = MakeInvalidBounds();
+
             for (uint32_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex)
             {
                 Mesh::Vertex& v =
@@ -683,6 +805,11 @@ bool LoadedModel::LoadGltf(
                 v.px = values[0];
                 v.py = values[1];
                 v.pz = values[2];
+
+
+                IncludePoint(
+                    primitiveBounds,
+                    { v.px, v.py, v.pz });
 
                 v.nx = 0.0f;
                 v.ny = 1.0f;
@@ -734,6 +861,8 @@ bool LoadedModel::LoadGltf(
                     v.a = values[3] == 0.0f ? 1.0f : values[3];
                 }
             }
+
+            FinaliseBounds(primitiveBounds);
 
             const uint32_t indexStart =
                 static_cast<uint32_t>(indices.size());
@@ -825,6 +954,7 @@ bool LoadedModel::LoadGltf(
                 static_cast<uint32_t>(submeshes.size());
 
             submeshes.push_back(submesh);
+            submeshLocalBounds.push_back(primitiveBounds);
 
             meshPrimitiveToSubmesh[meshIndex][primitiveIndex] =
                 submeshIndex;
@@ -1169,6 +1299,15 @@ bool LoadedModel::LoadGltf(
                     world * importTransform);
 
                 m_draws.push_back(draw);
+
+                const Bounds worldSubmeshBounds =
+                    TransformBounds(
+                        submeshLocalBounds[submeshIndex],
+                        world * importTransform);
+
+                IncludeBounds(
+                    m_bounds,
+                    worldSubmeshBounds);
             }
         }
 
@@ -1190,6 +1329,29 @@ bool LoadedModel::LoadGltf(
 
         return false;
     }
+
+    FinaliseBounds(m_bounds);
+
+    m_stats.vertexCount =
+        static_cast<uint32_t>(vertices.size());
+
+    m_stats.indexCount =
+        static_cast<uint32_t>(indices.size());
+
+    m_stats.triangleCount =
+        static_cast<uint32_t>(indices.size() / 3);
+
+    m_stats.submeshCount =
+        static_cast<uint32_t>(submeshes.size());
+
+    m_stats.drawCount =
+        static_cast<uint32_t>(m_draws.size());
+
+    m_stats.materialCount =
+        static_cast<uint32_t>(m_materials.size());
+
+    m_stats.textureCount =
+        static_cast<uint32_t>(m_textures.size());
 
     m_loaded = true;
     return true;

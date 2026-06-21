@@ -299,6 +299,52 @@ namespace
         { 113, "Resolved ReSTIR Specular Luminance", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
         { 114, "Resolved ReSTIR Invalid Reason Mask", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
     };
+
+    DirectX::XMFLOAT3 SubFloat3(
+        DirectX::XMFLOAT3 a,
+        DirectX::XMFLOAT3 b)
+    {
+        return { a.x - b.x, a.y - b.y, a.z - b.z };
+    }
+
+    DirectX::XMFLOAT3 AddFloat3(
+        DirectX::XMFLOAT3 a,
+        DirectX::XMFLOAT3 b)
+    {
+        return { a.x + b.x, a.y + b.y, a.z + b.z };
+    }
+
+    DirectX::XMFLOAT3 MinFloat3(
+        DirectX::XMFLOAT3 a,
+        DirectX::XMFLOAT3 b)
+    {
+        return
+        {
+            std::min(a.x, b.x),
+            std::min(a.y, b.y),
+            std::min(a.z, b.z)
+        };
+    }
+
+    DirectX::XMFLOAT3 MaxFloat3(
+        DirectX::XMFLOAT3 a,
+        DirectX::XMFLOAT3 b)
+    {
+        return
+        {
+            std::max(a.x, b.x),
+            std::max(a.y, b.y),
+            std::max(a.z, b.z)
+        };
+    }
+
+    DirectX::XMFLOAT3 MulFloat3(
+        DirectX::XMFLOAT3 a,
+        float s)
+    {
+        return { a.x * s, a.y * s, a.z * s };
+    }
+
 }
 
 const DebugViewDesc* FindDebugViewDesc(uint32_t id)
@@ -1529,252 +1575,278 @@ void Renderer::RenderFrame(
         EnsureRtOutputSize(width, height);
         BuildRtDrawItems();
         BuildRtMaterialTable();
-        EnsureRtInstanceData(frameIndex);
-        EnsureRtEnvironmentAlias(device, cl);
-        EnsureRtRestirResources(width, height);
-        UpdateRtGeometryTable(frameIndex);
+        UpdateRtSceneStats();
+        LogRtSceneStatsIfChanged();
 
-        const bool restirNeedsFreshDxr =
-            m_rtEnableRestirEnvDi ||
-            wantsRtRestirDebug;
+        const bool rtSceneValid =
+            ValidateRtSceneContract();
 
-        const bool canReuseAccumulatedOutput =
-            !restirNeedsFreshDxr &&
-            m_rtAccumulateThisFrame &&
-            m_rtOutputReady &&
-            m_rtAccumDiffuseReady &&
-            m_rtAccumSpecReady &&
-            (m_rtSampleIndex >= m_rtMaxSamples);
-
-        if (!canReuseAccumulatedOutput)
+        if (rtSceneValid)
         {
-            auto cmd4 = GetCommandList4(cl);
+            EnsureRtInstanceData(frameIndex);
+            EnsureRtEnvironmentAlias(device, cl);
+            EnsureRtRestirResources(width, height);
+            UpdateRtGeometryTable(frameIndex);
 
-            BuildTlasForDrawList(frameIndex, cmd4.Get());
+            const bool restirNeedsFreshDxr =
+                m_rtEnableRestirEnvDi ||
+                wantsRtRestirDebug;
 
-            ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
-            cmd4->SetDescriptorHeaps(1, heaps);
-            if (m_rtOutputReady && m_rtFrames[frameIndex].tlas.GpuAddress() != 0)
+            const bool canReuseAccumulatedOutput =
+                !restirNeedsFreshDxr &&
+                m_rtAccumulateThisFrame &&
+                m_rtOutputReady &&
+                m_rtAccumDiffuseReady &&
+                m_rtAccumSpecReady &&
+                (m_rtSampleIndex >= m_rtMaxSamples);
+
+            if (!canReuseAccumulatedOutput)
             {
-                cmd4->SetPipelineState1(m_rtPipeline.StateObject());
-                cmd4->SetComputeRootSignature(m_rtPipeline.GlobalRootSignature());
-                cmd4->SetComputeRootDescriptorTable(0, m_rtOutputUav.gpu);
-                cmd4->SetComputeRootShaderResourceView(1, m_rtFrames[frameIndex].tlas.GpuAddress());
-                cmd4->SetComputeRootDescriptorTable(3, m_rtFrames[frameIndex].geometryTable.gpu);
+                auto cmd4 = GetCommandList4(cl);
 
-                auto tableBase = m_rtPipeline.ShaderTable()->GetGPUVirtualAddress();
+                BuildTlasForDrawList(frameIndex, cmd4.Get());
 
-                D3D12_DISPATCH_RAYS_DESC rays{};
-                rays.RayGenerationShaderRecord.StartAddress = tableBase + m_rtPipeline.RayGenOffset();
-                rays.RayGenerationShaderRecord.SizeInBytes = m_rtPipeline.RayGenRecordSize();
-
-                rays.MissShaderTable.StartAddress = tableBase + m_rtPipeline.MissOffset();
-                rays.MissShaderTable.SizeInBytes = m_rtPipeline.MissRecordSize();
-                rays.MissShaderTable.StrideInBytes = m_rtPipeline.MissRecordSize();
-
-                rays.HitGroupTable.StartAddress = tableBase + m_rtPipeline.HitGroupOffset();
-                rays.HitGroupTable.SizeInBytes = m_rtPipeline.HitGroupRecordSize();
-                rays.HitGroupTable.StrideInBytes = m_rtPipeline.HitGroupRecordSize();
-
-                rays.Width = width;
-                rays.Height = height;
-                rays.Depth = 1;
-
-                uint32_t dispatchCount = 1;
-                if (m_rtAccumulateThisFrame)
+                ID3D12DescriptorHeap* heaps[] = { m_srvHeap.GetHeap() };
+                cmd4->SetDescriptorHeaps(1, heaps);
+                if (m_rtOutputReady && m_rtFrames[frameIndex].tlas.GpuAddress() != 0)
                 {
-                    const uint32_t safeSamplesPerFrame =
-                        (m_rtSamplesPerFrame < 1u) ? 1u :
-                        (m_rtSamplesPerFrame > 8u) ? 8u :
-                        m_rtSamplesPerFrame;
+                    cmd4->SetPipelineState1(m_rtPipeline.StateObject());
+                    cmd4->SetComputeRootSignature(m_rtPipeline.GlobalRootSignature());
+                    cmd4->SetComputeRootDescriptorTable(0, m_rtOutputUav.gpu);
+                    cmd4->SetComputeRootShaderResourceView(1, m_rtFrames[frameIndex].tlas.GpuAddress());
+                    cmd4->SetComputeRootDescriptorTable(3, m_rtFrames[frameIndex].geometryTable.gpu);
 
-                    const uint32_t remaining = (m_rtSampleIndex < m_rtMaxSamples)
-                        ? (m_rtMaxSamples - m_rtSampleIndex)
-                        : 0u;
+                    auto tableBase = m_rtPipeline.ShaderTable()->GetGPUVirtualAddress();
 
-                    dispatchCount = std::min(safeSamplesPerFrame, remaining);
-                    if (dispatchCount == 0)
-                        dispatchCount = 1;
+                    D3D12_DISPATCH_RAYS_DESC rays{};
+                    rays.RayGenerationShaderRecord.StartAddress = tableBase + m_rtPipeline.RayGenOffset();
+                    rays.RayGenerationShaderRecord.SizeInBytes = m_rtPipeline.RayGenRecordSize();
 
-                    if (m_rtSampleIndex > 0)
+                    rays.MissShaderTable.StartAddress = tableBase + m_rtPipeline.MissOffset();
+                    rays.MissShaderTable.SizeInBytes = m_rtPipeline.MissRecordSize();
+                    rays.MissShaderTable.StrideInBytes = m_rtPipeline.MissRecordSize();
+
+                    rays.HitGroupTable.StartAddress = tableBase + m_rtPipeline.HitGroupOffset();
+                    rays.HitGroupTable.SizeInBytes = m_rtPipeline.HitGroupRecordSize();
+                    rays.HitGroupTable.StrideInBytes = m_rtPipeline.HitGroupRecordSize();
+
+                    rays.Width = width;
+                    rays.Height = height;
+                    rays.Depth = 1;
+
+                    const bool usePreviewSampleBatch =
+                        !m_rtAccumulateThisFrame &&
+                        m_debugView == 0 &&
+                        m_rtEnableIndirect != 0 &&
+                        m_rtPreviewSamplesPerFrame > 1u;
+
+                    uint32_t dispatchCount = 1;
+                    if (m_rtAccumulateThisFrame)
                     {
-                        D3D12_RESOURCE_BARRIER barriers[2]{};
+                        const uint32_t safeSamplesPerFrame =
+                            (m_rtSamplesPerFrame < 1u) ? 1u :
+                            (m_rtSamplesPerFrame > 8u) ? 8u :
+                            m_rtSamplesPerFrame;
 
-                        barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-                        barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-                        barriers[0].UAV.pResource = m_rtAccumDiffuse.Get();
+                        const uint32_t remaining = (m_rtSampleIndex < m_rtMaxSamples)
+                            ? (m_rtMaxSamples - m_rtSampleIndex)
+                            : 0u;
 
-                        barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-                        barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-                        barriers[1].UAV.pResource = m_rtAccumSpec.Get();
-
-                        cmd4->ResourceBarrier(2, barriers);
+                        dispatchCount = std::min(safeSamplesPerFrame, remaining);
+                        if (dispatchCount == 0)
+                            dispatchCount = 1;
                     }
-                }
-
-
-                for (uint32_t i = 0; i < dispatchCount; ++i)
-                {
-                    m_rtDispatchSampleIndex = m_rtAccumulateThisFrame ? (m_rtSampleIndex + i) : 0u;
-
-                    const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb =
-                        UpdateGlobalConstants(frameIndex, width, height, sceneTime);
-
-                    const D3D12_GPU_VIRTUAL_ADDRESS rtRayGenCb =
-                        UpdateRtRayGenConstants(frameIndex);
-
-                    cmd4->SetComputeRootConstantBufferView(2, perFrameCb);
-                    cmd4->SetComputeRootConstantBufferView(4, rtRayGenCb);
-                    cmd4->DispatchRays(&rays);
-
-                    if (i + 1 < dispatchCount)
+                    else if (usePreviewSampleBatch)
                     {
-                        D3D12_RESOURCE_BARRIER barriers[3]{};
-
-                        barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-                        barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-                        barriers[0].UAV.pResource = m_rtAccumDiffuse.Get();
-
-                        barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-                        barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-                        barriers[1].UAV.pResource = m_rtAccumSpec.Get();
-
-                        barriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-                        barriers[2].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-                        barriers[2].UAV.pResource = m_rtOutput.Get();
-
-                        cmd4->ResourceBarrier(3, barriers);
+                        dispatchCount =
+                            std::min<uint32_t>(
+                                std::max<uint32_t>(m_rtPreviewSamplesPerFrame, 1u),
+                                4u);
                     }
-                }
 
-                if (m_rtAccumulateThisFrame)
-                    m_rtSampleIndex = std::min(m_rtSampleIndex + dispatchCount, m_rtMaxSamples);
-                else
-                    m_rtSampleIndex = 0;
+                    for (uint32_t i = 0; i < dispatchCount; ++i)
+                    {
+                        m_rtDispatchUsesAccumulationPath =
+                            m_rtAccumulateThisFrame || usePreviewSampleBatch;
 
-                if (m_rtRestirResourcesReady &&
-                    m_rtRestirInitialReservoir &&
-                    (m_rtEnableRestirEnvDi || wantsRtRestirDebug))
-                {
-                    D3D12_RESOURCE_BARRIER b{};
-                    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-                    b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-                    b.UAV.pResource = m_rtRestirInitialReservoir.Get();
+                        m_rtDispatchSampleIndex =
+                            m_rtAccumulateThisFrame
+                            ? (m_rtSampleIndex + i)
+                            : (usePreviewSampleBatch ? i : 0u);
 
-                    cmd4->ResourceBarrier(1, &b);
+                        const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb =
+                            UpdateGlobalConstants(frameIndex, width, height, sceneTime);
+
+                        const D3D12_GPU_VIRTUAL_ADDRESS rtRayGenCb =
+                            UpdateRtRayGenConstants(frameIndex);
+
+                        cmd4->SetComputeRootConstantBufferView(2, perFrameCb);
+                        cmd4->SetComputeRootConstantBufferView(4, rtRayGenCb);
+                        cmd4->DispatchRays(&rays);
+
+                        if (i + 1 < dispatchCount)
+                        {
+                            D3D12_RESOURCE_BARRIER barriers[3]{};
+
+                            barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                            barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                            barriers[0].UAV.pResource = m_rtAccumDiffuse.Get();
+
+                            barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                            barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                            barriers[1].UAV.pResource = m_rtAccumSpec.Get();
+
+                            barriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                            barriers[2].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                            barriers[2].UAV.pResource = m_rtOutput.Get();
+
+                            cmd4->ResourceBarrier(3, barriers);
+                        }
+                    }
+
+                    if (m_rtAccumulateThisFrame)
+                        m_rtSampleIndex = std::min(m_rtSampleIndex + dispatchCount, m_rtMaxSamples);
+                    else
+                        m_rtSampleIndex = 0;
+
+                    if (m_rtRestirResourcesReady &&
+                        m_rtRestirInitialReservoir &&
+                        (m_rtEnableRestirEnvDi || wantsRtRestirDebug))
+                    {
+                        D3D12_RESOURCE_BARRIER b{};
+                        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                        b.UAV.pResource = m_rtRestirInitialReservoir.Get();
+
+                        cmd4->ResourceBarrier(1, &b);
+                    }
                 }
             }
-        }
 
-        RunRtDenoiser(
-            cl,
-            frameIndex,
-            device,
-            width,
-            height);
-
-        const bool ranRestirResolve =
-            RunRtRestirResolve(
+            RunRtDenoiser(
                 cl,
                 frameIndex,
                 device,
                 width,
-                height,
-                sceneTime,
-                rtDebug);
+                height);
 
-        if (ranRestirResolve)
-        {
-            RunRtRestirApplyBeauty(
-                cl,
-                frameIndex,
-                device,
-                width,
-                height,
-                rtDebug);
-        }
+            const bool ranRestirResolve =
+                RunRtRestirResolve(
+                    cl,
+                    frameIndex,
+                    device,
+                    width,
+                    height,
+                    sceneTime,
+                    rtDebug);
 
-        // Restore all RT writeable resources to UAV state for the next frame
-        // This must run regardless of whether the spatial stage used A-Trous,
-        // denoise fallback, or no spatial filter.
-        cl.Transition(m_rtAccumDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cl.Transition(m_rtAccumSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cl.Transition(m_rtAovMotion.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cl.Transition(m_rtAovViewZRaw.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cl.Transition(m_rtAovSurfaceId.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cl.Transition(m_rtAovDiffuseAlbedo.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        
-        if (m_rtDiffuseRobustInputReady)
-        {
-            cl.Transition(m_rtDiffuseRobustInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        }
-
-        if (m_rtSpecRobustInputReady)
-        {
-            cl.Transition(m_rtSpecRobustInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        }
-
-        if (m_rtDiffuseDemodulatedReady)
-        {
-            cl.Transition(m_rtDiffuseDemodulated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        }
-
-        if (m_rtAovViewZReconsReady)
-        {
-            cl.Transition(m_rtAovViewZRecons.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        }
-
-        if (m_rtAovViewZReconsConfReady)
-        {
-            cl.Transition(m_rtAovViewZReconsConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        }
-        if (m_rtPostReady)
-        {
-            cl.Transition(m_rtPostDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            cl.Transition(m_rtPostSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-            if (m_rtSpecSelectedMomentsReady)
+            if (ranRestirResolve)
             {
-                cl.Transition(m_rtSpecSelectedMoments.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                RunRtRestirApplyBeauty(
+                    cl,
+                    frameIndex,
+                    device,
+                    width,
+                    height,
+                    rtDebug);
             }
-        }
 
-        if (m_rtRestirResourcesReady)
-        {
-            cl.Transition(m_rtRestirInitialReservoir.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            cl.Transition(m_rtRestirTemporalReservoir[0].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            cl.Transition(m_rtRestirTemporalReservoir[1].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            cl.Transition(m_rtRestirSpatialReservoir.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            cl.Transition(m_rtRestirResolvedDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            cl.Transition(m_rtRestirResolvedSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            // Restore all RT writeable resources to UAV state for the next frame
+            // This must run regardless of whether the spatial stage used A-Trous,
+            // denoise fallback, or no spatial filter.
+            cl.Transition(m_rtAccumDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAccumSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovNormal.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovMotion.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovMotionDilated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovMotionConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovViewZRaw.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovSurfaceId.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cl.Transition(m_rtAovDiffuseAlbedo.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-            if (m_rtRestirAppliedReady)
+            if (m_rtDiffuseRobustInputReady)
             {
-                cl.Transition(m_rtRestirAppliedDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                cl.Transition(m_rtRestirAppliedSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cl.Transition(m_rtDiffuseRobustInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
-        }
 
-        cl.FlushBarriers();
+            if (m_rtSpecRobustInputReady)
+            {
+                cl.Transition(m_rtSpecRobustInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
 
-        if (m_rtOutputReady)
-        {
-            cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
-            cl.Transition(backbufferResource, D3D12_RESOURCE_STATE_COPY_DEST);
+            if (m_rtDiffuseDemodulatedReady)
+            {
+                cl.Transition(m_rtDiffuseDemodulated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+
+            if (m_rtAovViewZReconsReady)
+            {
+                cl.Transition(m_rtAovViewZRecons.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+
+            if (m_rtAovViewZReconsConfReady)
+            {
+                cl.Transition(m_rtAovViewZReconsConf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+            if (m_rtPostReady)
+            {
+                cl.Transition(m_rtPostDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cl.Transition(m_rtPostSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+                if (m_rtSpecSelectedMomentsReady)
+                {
+                    cl.Transition(m_rtSpecSelectedMoments.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                }
+            }
+
+            if (m_rtRestirResourcesReady)
+            {
+                cl.Transition(m_rtRestirInitialReservoir.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cl.Transition(m_rtRestirTemporalReservoir[0].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cl.Transition(m_rtRestirTemporalReservoir[1].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cl.Transition(m_rtRestirSpatialReservoir.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cl.Transition(m_rtRestirResolvedDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cl.Transition(m_rtRestirResolvedSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+                if (m_rtRestirAppliedReady)
+                {
+                    cl.Transition(m_rtRestirAppliedDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    cl.Transition(m_rtRestirAppliedSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                }
+            }
+
             cl.FlushBarriers();
 
-            cl.Get()->CopyResource(backbufferResource, m_rtOutput.Get());
+            if (m_rtOutputReady)
+            {
+                cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+                cl.Transition(backbufferResource, D3D12_RESOURCE_STATE_COPY_DEST);
+                cl.FlushBarriers();
 
-            cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            cl.FlushBarriers();
+                cl.Get()->CopyResource(backbufferResource, m_rtOutput.Get());
 
-            renderedWithDxr = true;
+                cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cl.FlushBarriers();
+
+                renderedWithDxr = true;
+            }
+            m_rtDispatchUsesAccumulationPath = false;
+            CmdEndEvent(cmdList); //DXR
         }
-        CmdEndEvent(cmdList); //DXR
+
+        else
+        {
+            m_rtDispatchUsesAccumulationPath = false;
+            OutputDebugStringW(
+                L"DXR scene contract invalid this frame; skipping DXR dispatch.\n");
+            CmdEndEvent(cmdList); //DXR
+        }
+    }
+    else
+    {
+        OutputDebugStringW(
+            L"DXR unavailable or disabled this frame; using raster path.\n");
     }
     if (!renderedWithDxr)
     {
@@ -2124,7 +2196,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     cb->debugView = m_debugView;
     cb->rtSampleIndex = m_rtDispatchSampleIndex;
     cb->rtResetId = m_rtResetId;
-    cb->rtAccumulate = m_rtAccumulateThisFrame ? 1u : 0u;
+    cb->rtAccumulate = m_rtDispatchUsesAccumulationPath ? 1u : 0u;
     cb->rtEnableIndirect = m_rtEnableIndirect ? 1u : 0u;
     cb->rtIndirectScale = m_rtIndirectScale;
     
@@ -3086,6 +3158,8 @@ void Renderer::EnsureRtInstanceData(uint32_t frameIndex)
             &srv,
             frame.instanceDataSrv.cpu);
     }
+
+    assert(instanceCount <= frame.capacity);
 
     D3D12_RANGE readRange{ 0, 0 };
 
@@ -10197,6 +10271,7 @@ void Renderer::LoadDefaultGltfScene(
             kDefaultImportedModelYOffset,
             0.0f);
 
+
     try
     {
         if (!m_importedModel.LoadGltf(
@@ -10214,6 +10289,14 @@ void Renderer::LoadDefaultGltfScene(
                     L"\n").c_str());
 
             return;
+        }
+
+        AdoptImportedModelBounds();
+
+        if (!m_importedModelSummaryLogged)
+        {
+            LogImportedModelSummary();
+            m_importedModelSummaryLogged = true;
         }
 
         OutputDebugStringW(L"glTF scene loaded successfully.\n");
@@ -10504,3 +10587,183 @@ uint32_t Renderer::ResolveRtMaterialId(
     return it->second;
 }
 
+void Renderer::AdoptImportedModelBounds()
+{
+    if (!m_importedModel.IsLoaded() ||
+        !m_importedModel.HasBounds())
+    {
+        return;
+    }
+
+    const LoadedModel::Bounds& importedBounds =
+        m_importedModel.GetBounds();
+
+    DirectX::XMFLOAT3 currentMin =
+        SubFloat3(m_sceneBoundsCenter, m_sceneBoundsExtent);
+
+    DirectX::XMFLOAT3 currentMax =
+        AddFloat3(m_sceneBoundsCenter, m_sceneBoundsExtent);
+
+    const DirectX::XMFLOAT3 mergedMin =
+        MinFloat3(currentMin, importedBounds.min);
+
+    const DirectX::XMFLOAT3 mergedMax =
+        MaxFloat3(currentMax, importedBounds.max);
+
+    m_sceneBoundsCenter =
+        MulFloat3(
+            AddFloat3(mergedMin, mergedMax),
+            0.5f);
+
+    m_sceneBoundsExtent =
+        MulFloat3(
+            SubFloat3(mergedMax, mergedMin),
+            0.5f);
+
+    OutputDebugStringW(
+        (L"Scene bounds updated from imported glTF. Center=(" +
+            std::to_wstring(m_sceneBoundsCenter.x) + L", " +
+            std::to_wstring(m_sceneBoundsCenter.y) + L", " +
+            std::to_wstring(m_sceneBoundsCenter.z) + L") Extent=(" +
+            std::to_wstring(m_sceneBoundsExtent.x) + L", " +
+            std::to_wstring(m_sceneBoundsExtent.y) + L", " +
+            std::to_wstring(m_sceneBoundsExtent.z) + L")\n").c_str());
+}
+
+void Renderer::LogImportedModelSummary() const
+{
+    if (!m_importedModel.IsLoaded())
+        return;
+
+    const LoadedModel::Stats& stats =
+        m_importedModel.GetStats();
+
+    std::wstring message =
+        L"Imported glTF summary: vertices=" +
+        std::to_wstring(stats.vertexCount) +
+        L", indices=" +
+        std::to_wstring(stats.indexCount) +
+        L", triangles=" +
+        std::to_wstring(stats.triangleCount) +
+        L", submeshes=" +
+        std::to_wstring(stats.submeshCount) +
+        L", draws=" +
+        std::to_wstring(stats.drawCount) +
+        L", materials=" +
+        std::to_wstring(stats.materialCount) +
+        L", textures=" +
+        std::to_wstring(stats.textureCount) +
+        L"\n";
+
+    OutputDebugStringW(message.c_str());
+}
+
+void Renderer::UpdateRtSceneStats()
+{
+    RtSceneStats stats{};
+    stats.drawCount =
+        static_cast<uint32_t>(m_rtDrawItems.size());
+
+    stats.materialCount =
+        static_cast<uint32_t>(
+            std::min<size_t>(
+                m_rtMaterialTable.size(),
+                kRtMaxMaterials));
+
+    stats.importedBlasCount =
+        m_importedModelBlasBuilt
+        ? static_cast<uint32_t>(m_importedModelBlas.size())
+        : 0u;
+
+    stats.srvTableCount =
+        kRtSrvTableCount;
+
+    stats.tlasInstanceCount =
+        static_cast<uint32_t>(m_rtDrawItems.size());
+
+    for (const DrawItem* item : m_rtDrawItems)
+    {
+        if (!item)
+            continue;
+
+        if (IsImportedModelMesh(item->mesh))
+        {
+            ++stats.importedDrawCount;
+        }
+    }
+
+    m_rtSceneStats = stats;
+}
+
+void Renderer::LogRtSceneStatsIfChanged()
+{
+    const bool changed =
+        !m_rtSceneStatsEverLogged ||
+        m_rtSceneStats.drawCount != m_rtSceneStatsLogged.drawCount ||
+        m_rtSceneStats.importedDrawCount != m_rtSceneStatsLogged.importedDrawCount ||
+        m_rtSceneStats.materialCount != m_rtSceneStatsLogged.materialCount ||
+        m_rtSceneStats.importedBlasCount != m_rtSceneStatsLogged.importedBlasCount ||
+        m_rtSceneStats.srvTableCount != m_rtSceneStatsLogged.srvTableCount ||
+        m_rtSceneStats.tlasInstanceCount != m_rtSceneStatsLogged.tlasInstanceCount;
+
+    if (!changed)
+        return;
+
+    std::wstring message =
+        L"DXR scene stats: draws=" +
+        std::to_wstring(m_rtSceneStats.drawCount) +
+        L", importedDraws=" +
+        std::to_wstring(m_rtSceneStats.importedDrawCount) +
+        L", materials=" +
+        std::to_wstring(m_rtSceneStats.materialCount) +
+        L", importedBLAS=" +
+        std::to_wstring(m_rtSceneStats.importedBlasCount) +
+        L", tlasInstances=" +
+        std::to_wstring(m_rtSceneStats.tlasInstanceCount) +
+        L", srvTableDescriptors=" +
+        std::to_wstring(m_rtSceneStats.srvTableCount) +
+        L"\n";
+
+    OutputDebugStringW(message.c_str());
+
+    m_rtSceneStatsLogged = m_rtSceneStats;
+    m_rtSceneStatsEverLogged = true;
+}
+
+bool Renderer::ValidateRtSceneContract() const
+{
+    if (m_rtDrawItems.empty())
+        return false;
+
+    if (m_rtMaterialTable.empty())
+        return false;
+
+    if (m_rtMaterialTable.size() > kRtMaxMaterials)
+        return false;
+
+    for (const DrawItem* item : m_rtDrawItems)
+    {
+        if (!item || !item->mesh || !item->material)
+            return false;
+
+        const uint32_t meshType =
+            GetRtMeshTypeForDrawItem(*item);
+
+        if (meshType == UINT32_MAX)
+            return false;
+
+        const AccelerationStructure* blas =
+            GetBlasForDrawItem(*item);
+
+        if (!blas || blas->GpuAddress() == 0)
+            return false;
+
+        const uint32_t materialId =
+            ResolveRtMaterialId(item->material);
+
+        if (materialId >= kRtMaxMaterials)
+            return false;
+    }
+
+    return true;
+}

@@ -205,6 +205,16 @@ private:
         MisTwoSampleReference = 3
     };
 
+    struct RtSceneStats
+    {
+        uint32_t drawCount = 0;
+        uint32_t importedDrawCount = 0;
+        uint32_t materialCount = 0;
+        uint32_t importedBlasCount = 0;
+        uint32_t srvTableCount = 0;
+        uint32_t tlasInstanceCount = 0;
+    };
+
     struct RtTemporalConstants
     {
         DirectX::XMFLOAT4X4 currInvViewProj{};
@@ -1441,6 +1451,9 @@ private:
 
     bool IsImportedModelMesh(const Mesh* mesh) const;
 
+    void AdoptImportedModelBounds();
+    void LogImportedModelSummary() const;
+
     const AccelerationStructure* GetBlasForDrawItem(
         const DrawItem& item) const;
 
@@ -1454,6 +1467,10 @@ private:
 
     uint32_t ResolveRtMaterialId(
         const Material* material) const;
+
+    void UpdateRtSceneStats();
+    void LogRtSceneStatsIfChanged();
+    bool ValidateRtSceneContract() const;
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -1807,6 +1824,8 @@ private:
     bool m_importedModelLoadAttempted = false;
     std::vector<AccelerationStructure> m_importedModelBlas;
     bool m_importedModelBlasBuilt = false;
+
+    bool m_importedModelSummaryLogged = false;
 
     std::vector<const DrawItem*> m_rtDrawItems;
 
@@ -2376,6 +2395,12 @@ private:
     RtRestirSpatialPass m_rtRestirSpatialPass;
     RtRestirApplyPass m_rtRestirApplyPass; //validation additive apply, not final production integration
 
+    RtSceneStats m_rtSceneStats{};
+    RtSceneStats m_rtSceneStatsLogged{};
+    bool m_rtSceneStatsEverLogged = false;
+
+    uint32_t m_rtPreviewSamplesPerFrame = 2;
+    bool m_rtDispatchUsesAccumulationPath = false;
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

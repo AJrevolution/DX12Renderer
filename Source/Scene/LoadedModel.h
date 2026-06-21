@@ -23,6 +23,26 @@ public:
         uint32_t materialIndex = 0;
     };
 
+    struct Bounds
+    {
+        DirectX::XMFLOAT3 min = { 0.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT3 max = { 0.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT3 center = { 0.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT3 extent = { 0.0f, 0.0f, 0.0f };
+        bool valid = false;
+    };
+
+    struct Stats
+    {
+        uint32_t vertexCount = 0;
+        uint32_t indexCount = 0;
+        uint32_t triangleCount = 0;
+        uint32_t submeshCount = 0;
+        uint32_t drawCount = 0;
+        uint32_t materialCount = 0;
+        uint32_t textureCount = 0;
+    };
+
     bool LoadGltf(
         ID3D12Device* device,
         CommandList& cl,
@@ -42,6 +62,10 @@ public:
 
     const std::vector<Draw>& Draws() const { return m_draws; }
 
+    bool HasBounds() const { return m_bounds.valid; }
+    const Bounds& GetBounds() const { return m_bounds; }
+    const Stats& GetStats() const { return m_stats; }
+
     const std::wstring& LastError() const { return m_lastError; }
 
     void Clear();
@@ -54,4 +78,7 @@ private:
 
     std::wstring m_lastError;
     bool m_loaded = false;
+    
+    Bounds m_bounds{};
+    Stats m_stats{};
 };
