@@ -6,9 +6,11 @@ void ShadowPass::Initialize(ID3D12Device* device, DXGI_FORMAT dsvFormat, const f
         return;
 
     Shader vs = Shader::LoadFromFile(shaderDir / L"Shadow_VS.cso");
+    Shader fs = Shader::LoadFromFile(shaderDir / L"Shadow_FS.cso");
 
     m_rootSig.InitializeForwardPBRV2(device);
-    m_pso.InitialiseShadow(device, m_rootSig.Get(), vs.GetBytecode(), dsvFormat);
+    m_pso.InitialiseShadow(device, m_rootSig.Get(), vs.GetBytecode(), fs.GetBytecode(), dsvFormat, D3D12_CULL_MODE_BACK);
+    m_psoNoCull.InitialiseShadow(device, m_rootSig.Get(), vs.GetBytecode(), fs.GetBytecode(), dsvFormat, D3D12_CULL_MODE_NONE);
 
     m_initialized = true;
 }
@@ -18,6 +20,7 @@ void ShadowPass::Render(
     uint32_t shadowSize,
     D3D12_GPU_VIRTUAL_ADDRESS perFrameCb,
     D3D12_GPU_VIRTUAL_ADDRESS perDrawCb,
+    const Material& material,
     const Mesh& mesh,
     const Mesh::Submesh* submesh)
 {
@@ -37,6 +40,14 @@ void ShadowPass::Render(
 
     cmd->SetGraphicsRootConstantBufferView(0, perFrameCb);
     cmd->SetGraphicsRootConstantBufferView(1, perDrawCb);
+    cmd->SetGraphicsRootDescriptorTable(3, material.GetSrvTable());
+
+    const bool doubleSided =
+        material.doubleSided != 0u;
+    cmd->SetPipelineState(
+        doubleSided
+        ? m_psoNoCull.Get()
+        : m_pso.Get());
 
     cmd->RSSetViewports(1, &vp);
     cmd->RSSetScissorRects(1, &sc);

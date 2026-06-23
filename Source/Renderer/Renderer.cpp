@@ -114,12 +114,13 @@ namespace
     constexpr uint32_t kRtMeshTypeImported = 2u;
 
     constexpr uint32_t kRtMaxMaterials = 64u;
-    constexpr uint32_t kRtTexturesPerMaterial = 4u;
+    constexpr uint32_t kRtTexturesPerMaterial = 5u;
 
     constexpr uint32_t kRtBaseColorTextureSlot = 0u;
     constexpr uint32_t kRtNormalTextureSlot = 1u;
     constexpr uint32_t kRtMetalRoughTextureSlot = 2u;
     constexpr uint32_t kRtOcclusionTextureSlot = 3u;
+    constexpr uint32_t kRtEmissiveTextureSlot = 4u;
 
     constexpr uint32_t kRtRegisterQuadVerts = 1u;
     constexpr uint32_t kRtRegisterQuadIndices = 2u;
@@ -128,14 +129,14 @@ namespace
     constexpr uint32_t kRtRegisterInstanceData = 5u;
     constexpr uint32_t kRtRegisterMaterialTextures = 6u;
 
-    constexpr uint32_t kRtRegisterImportedVerts = 270u;
-    constexpr uint32_t kRtRegisterImportedIndices = 271u;
+    constexpr uint32_t kRtRegisterImportedVerts = 330u;
+    constexpr uint32_t kRtRegisterImportedIndices = 331u;
 
-    constexpr uint32_t kRtRegisterBrdfLut = 280u;
-    constexpr uint32_t kRtRegisterIblDiffuse = 281u;
-    constexpr uint32_t kRtRegisterIblSpecular = 282u;
-    constexpr uint32_t kRtRegisterEnvAlias = 283u;
-    constexpr uint32_t kRtRegisterRestirResolveReservoir = 284u;
+    constexpr uint32_t kRtRegisterBrdfLut = 340u;
+    constexpr uint32_t kRtRegisterIblDiffuse = 341u;
+    constexpr uint32_t kRtRegisterIblSpecular = 342u;
+    constexpr uint32_t kRtRegisterEnvAlias = 343u;
+    constexpr uint32_t kRtRegisterRestirResolveReservoir = 344u;
 
     // racetrackentire.gltf currently has its lowest world-space Y around 1.772.
     // Move it down so the imported ground sits around renderer Y=0.
@@ -146,14 +147,14 @@ namespace
     constexpr uint32_t kRtHighestSrvRegister =
         kRtRegisterRestirResolveReservoir;
 
-    // Descriptor table starts at t1, so 284 descriptors covers t1..t284.
+    // Descriptor table starts at t1, so 344 descriptors covers t1..t344.
     constexpr uint32_t kRtSrvTableCount =
         kRtHighestSrvRegister;
 
-    static_assert(kRtSrvTableCount == 284u);
+    static_assert(kRtSrvTableCount == 344u);
     static_assert(
         kRtRegisterMaterialTextures +
-        kRtMaxMaterials * kRtTexturesPerMaterial - 1u == 261u);
+        kRtMaxMaterials * kRtTexturesPerMaterial - 1u == 325u);
 
     float WrapAngleRadians(float angle)
     {
@@ -1867,14 +1868,14 @@ void Renderer::RenderFrame(
 
             for (const DrawItem& item : m_draws)
             {
-                if (!item.mesh)
+                if (!item.mesh || !item.material)
                     continue;
 
                 const D3D12_GPU_VIRTUAL_ADDRESS perDrawCb = UploadPerDrawConstants(frameIndex, item);
                 const Mesh::Submesh& submesh =
                     item.mesh->GetSubmesh(item.submeshIndex);
                 
-                m_shadowPass.Render(cl, m_shadowSize, perFrameCb, perDrawCb, *item.mesh, &submesh);
+                m_shadowPass.Render(cl, m_shadowSize, perFrameCb, perDrawCb, *item.material, *item.mesh, &submesh);
             }
             CmdEndEvent(cmdList);
         }
@@ -1893,6 +1894,7 @@ void Renderer::RenderFrame(
             cl.Transition(m_gbuffer0.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
             cl.Transition(m_gbuffer1.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
             cl.Transition(m_gbuffer2.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cl.Transition(m_gbuffer3.Tex().Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
             if (m_depthReady)
                 cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
             cl.FlushBarriers();
@@ -1901,17 +1903,19 @@ void Renderer::RenderFrame(
             cmdList->ClearRenderTargetView(m_gbuffer0.RTV(), m_gbuffer0.ClearColor(), 0, nullptr);
             cmdList->ClearRenderTargetView(m_gbuffer1.RTV(), m_gbuffer1.ClearColor(), 0, nullptr);
             cmdList->ClearRenderTargetView(m_gbuffer2.RTV(), m_gbuffer2.ClearColor(), 0, nullptr);
+            cmdList->ClearRenderTargetView(m_gbuffer3.RTV(), m_gbuffer3.ClearColor(), 0, nullptr);
             if (m_depthReady)
                 cmdList->ClearDepthStencilView(m_depthDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
             // Bind MRTs (Multiple Render Targets)
-            D3D12_CPU_DESCRIPTOR_HANDLE mrt[3] =
+            D3D12_CPU_DESCRIPTOR_HANDLE mrt[4] =
             {
                 m_gbuffer0.RTV(),
                 m_gbuffer1.RTV(),
-                m_gbuffer2.RTV()
+                m_gbuffer2.RTV(),
+				m_gbuffer3.RTV()
             };
-            cmdList->OMSetRenderTargets(3, mrt, FALSE, m_depthReady ? &m_depthDsv : nullptr);
+            cmdList->OMSetRenderTargets(4, mrt, FALSE, m_depthReady ? &m_depthDsv : nullptr);
 
             CmdBeginEvent(cmdList, "GBufferPass");
 
@@ -1946,6 +1950,7 @@ void Renderer::RenderFrame(
             cl.Transition(m_gbuffer0.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_gbuffer1.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             cl.Transition(m_gbuffer2.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cl.Transition(m_gbuffer3.Tex().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             if (m_depthReady)
                 cl.Transition(m_depth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             cl.FlushBarriers();
@@ -2400,7 +2405,8 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         DXGI_FORMAT_R8G8B8A8_UNORM,
         DXGI_FORMAT_R16G16B16A16_FLOAT,
         DXGI_FORMAT_R8G8B8A8_UNORM,
-        DXGI_FORMAT_D32_FLOAT,
+        DXGI_FORMAT_R16G16B16A16_FLOAT, 
+        DXGI_FORMAT_D32_FLOAT,        
         Paths::ShaderDir());
 
     m_deferredLightPass.Initialize(
@@ -2562,20 +2568,26 @@ void Renderer::CreateOrResizeGBuffers(ID3D12Device* device, uint32_t w, uint32_t
     const float c0[4] = { 0, 0, 0, 0 };
     const float c1[4] = { 0, 0, 0, 0 };
     const float c2[4] = { 0, 0, 0, 0 };
+    const float c3[4] = { 0, 0, 0, 1 };
 
-    // NOTE: Deferred pass reuses Scene SRV slots for GBuffer binding:
-    // t0 (BRDF_LUT)      > GBuffer0 (BaseColor)
-    // t1 (IBL_DIFFUSE)   > GBuffer1 (Normal)
-    // t2 (IBL_SPECULAR)  > GBuffer2 (MRAO)
-    // This avoids needing a separate root signature   
+    // Deferred lighting uses a dedicated deferred input SRV table in space1:
+    // t0 = GBuffer0 base color / alpha
+    // t1 = GBuffer1 normal
+    // t2 = GBuffer2 metallic / roughness / AO
+    // t3 = depth
+    // t4 = GBuffer3 emissive / alpha
+    //
+    // The normal scene table remains bound separately for BRDF LUT, IBL, shadows, etc.
 
     m_gbuffer0.Create(device, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, c0, L"GBuffer0 BaseColor");
     m_gbuffer1.Create(device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, c1, L"GBuffer1 Normal");
     m_gbuffer2.Create(device, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, c2, L"GBuffer2 MRAO");
+    m_gbuffer3.Create(device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, c3, L"GBuffer3 EmissiveAlpha");
 
     m_gbuffer0.CreateRTV(device, m_rtvHeap, L"GBuffer0 RTV");
     m_gbuffer1.CreateRTV(device, m_rtvHeap, L"GBuffer1 RTV");
     m_gbuffer2.CreateRTV(device, m_rtvHeap, L"GBuffer2 RTV");
+    m_gbuffer3.CreateRTV(device, m_rtvHeap, L"GBuffer3 RTV");
 
     if (m_deferredInputTableReady)
     {
@@ -2651,6 +2663,17 @@ void Renderer::UpdateDeferredInputTable(ID3D12Device* device)
     {
         srv.Format = m_depth.SrvFormat(); // DXGI_FORMAT_R32_FLOAT
         device->CreateShaderResourceView(m_depth.Get(), &srv, DeferredCpuHandle(3));
+    }
+
+    // t4 = GBuffer3: emissive / alpha
+    if (m_gbuffer3.Tex().IsValid())
+    {
+        srv.Format = m_gbuffer3.Tex().SrvFormat();
+
+        device->CreateShaderResourceView(
+            m_gbuffer3.Tex().Get(),
+            &srv,
+            DeferredCpuHandle(4));
     }
 }
 
@@ -2758,12 +2781,20 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UploadPerDrawConstants(
     *dc = {};
 
     dc->world = item.world;
-    dc->materialIndex = 0;
 
     const Material* material = item.material;
 
     dc->baseColorFactor =
         material ? material->baseColorFactor : DirectX::XMFLOAT4(1, 1, 1, 1);
+
+    dc->emissiveFactorAndAlphaCutoff =
+        material
+        ? DirectX::XMFLOAT4(
+            material->emissiveFactor.x,
+            material->emissiveFactor.y,
+            material->emissiveFactor.z,
+            material->alphaCutoff)
+        : DirectX::XMFLOAT4(0, 0, 0, 0.5f);
 
     dc->metallicFactor =
         material ? material->metallicFactor : 0.0f;
@@ -2776,6 +2807,37 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UploadPerDrawConstants(
 
     dc->hasOcclusionTexture =
         material ? material->hasOcclusionTexture : 0u;
+
+    dc->normalScale = material ? material->normalScale : 1.0f;
+
+    dc->alphaMode =
+        material ? static_cast<uint32_t>(material->alphaMode) : 0u;
+
+    dc->doubleSided =
+        material ? material->doubleSided : 0u;
+
+    dc->hasEmissiveTexture =
+        material ? material->hasEmissiveTexture : 0u;
+
+    dc->baseColorTexCoord =
+        material ? material->baseColorTexCoord : 0u;
+
+    dc->normalTexCoord =
+        material ? material->normalTexCoord : 0u;
+
+    dc->metalRoughTexCoord =
+        material ? material->metalRoughTexCoord : 0u;
+
+    dc->occlusionTexCoord =
+        material ? material->occlusionTexCoord : 0u;
+
+    dc->emissiveTexCoord =
+        material ? material->emissiveTexCoord : 0u;
+
+    dc->hasNormalTexture =
+        material ? material->hasNormalTexture : 0u;
+
+    dc->materialIndex = 0u;
 
     return alloc.gpu;
 }
@@ -3232,6 +3294,48 @@ void Renderer::EnsureRtInstanceData(uint32_t frameIndex)
             ? m_prevRtMotionWorlds[instanceIndex]
             : item.world;
 
+        data.emissiveFactorAndAlphaCutoff =
+            material
+            ? DirectX::XMFLOAT4(
+                material->emissiveFactor.x,
+                material->emissiveFactor.y,
+                material->emissiveFactor.z,
+                material->alphaCutoff)
+            : DirectX::XMFLOAT4(0.0f, 0.0f, 0.0f, 0.5f);
+
+        data.normalScale =
+            material ? material->normalScale : 1.0f;
+
+        data.alphaMode =
+            material ? static_cast<uint32_t>(material->alphaMode) : 0u;
+
+        data.doubleSided =
+            material ? material->doubleSided : 0u;
+
+        data.hasOcclusionTexture =
+            material ? material->hasOcclusionTexture : 0u;
+
+        data.hasEmissiveTexture =
+            material ? material->hasEmissiveTexture : 0u;
+
+        data.hasNormalTexture =
+            material ? material->hasNormalTexture : 0u;
+
+        data.baseColorTexCoord =
+            material ? material->baseColorTexCoord : 0u;
+
+        data.normalTexCoord =
+            material ? material->normalTexCoord : 0u;
+
+        data.metalRoughTexCoord =
+            material ? material->metalRoughTexCoord : 0u;
+
+        data.occlusionTexCoord =
+            material ? material->occlusionTexCoord : 0u;
+
+        data.emissiveTexCoord =
+            material ? material->emissiveTexCoord : 0u;
+
         dst[instanceIndex] = data;
     }
 
@@ -3468,8 +3572,8 @@ void Renderer::UpdateRtGeometryTable(
 
     // t6..t261 = material texture table.
     //
-    // 64 materials × 4 textures:
-    // base color, normal, metallic/roughness, occlusion.
+    // 64 materials × 5 textures:
+    // base color, normal, metallic/roughness, occlusion, emissive.
     for (uint32_t materialIndex = 0u;
         materialIndex < kRtMaxMaterials;
         ++materialIndex)
@@ -3502,9 +3606,14 @@ void Renderer::UpdateRtGeometryTable(
             material ? material->occlusionTexture : nullptr,
             baseRegister + kRtOcclusionTextureSlot,
             &m_rtFallbackWhiteTex);
+
+        CreateTextureSrv(
+            material ? material->emissiveTexture : nullptr,
+            baseRegister + kRtEmissiveTextureSlot,
+            &m_rtFallbackBlackTex);
     }
 
-    // t270/t271 = imported glTF combined mesh buffers.
+    // t330/t331 = imported glTF combined mesh buffers.
     if (m_importedModel.IsLoaded())
     {
         Mesh& importedMesh =
@@ -3636,6 +3745,22 @@ void Renderer::CreateRtFallbackTextures(
             kOrm,
             false,
             L"RT Fallback ORM");
+    }
+
+    if (!m_rtFallbackBlackTex.IsValid())
+    {
+        static const uint8_t kBlack[4] = { 0, 0, 0, 255 };
+
+        m_rtFallbackBlackTex.CreateFromRGBA8Data(
+            device,
+            cl,
+            m_upload,
+            frameIndex,
+            1,
+            1,
+            kBlack,
+            true,
+            L"RT Fallback Black");
     }
 }
 
@@ -10417,6 +10542,13 @@ void Renderer::BuildImportedModelBlas(
         const Mesh::Submesh& submesh =
             mesh.GetSubmesh(submeshIndex);
 
+        const Material* material =
+            m_importedModel.GetMaterial(submesh.materialIndex);
+
+        const bool requiresAnyHit =
+            material &&
+            material->alphaMode == MaterialAlphaMode::Mask;
+
         if (submesh.indexCount == 0)
             continue;
 
@@ -10429,6 +10561,8 @@ void Renderer::BuildImportedModelBlas(
             mesh.VertexStride();
         geom.vertexFormat =
             DXGI_FORMAT_R32G32B32_FLOAT;
+
+        geom.opaque = !requiresAnyHit;
 
         geom.indexBuffer =
             mesh.IndexBufferResource()->GetGPUVirtualAddress();

@@ -1,22 +1,13 @@
+#include "MaterialSampling.hlsli"
+
 Texture2D g_BaseColor : register(t0, space1);
 Texture2D g_NormalMap : register(t1, space1);
 Texture2D g_MetalRough : register(t2, space1);
 Texture2D g_OcclusionMap : register(t3, space1);
+Texture2D g_EmissiveMap : register(t4, space1);
 
 SamplerState g_LinearWrap : register(s0);
 
-cbuffer PerDrawConstants : register(b1)
-{
-    row_major float4x4 World;
-    uint MaterialIndex;
-    uint3 _padA;
-
-    float4 BaseColorFactor;
-    float MetallicFactor;
-    float RoughnessFactor;
-    float OcclusionStrength;
-    uint HasOcclusionTexture;
-};
 
 struct PSIn
 {
@@ -24,62 +15,153 @@ struct PSIn
     float3 worldPos : TEXCOORD0;
     float3 worldN : TEXCOORD1;
     float4 worldT : TEXCOORD2;
-    float2 uv : TEXCOORD3;
+    float2 uv0 : TEXCOORD3;
+    float2 uv1 : TEXCOORD4;
     float4 color : COLOR;
 };
 
 struct PSOut
 {
-    float4 rt0 : SV_Target0; // baseColor
+    float4 rt0 : SV_Target0; // baseColor / alpha
     float4 rt1 : SV_Target1; // normal
     float4 rt2 : SV_Target2; // metal / rough / ao
+    float4 rt3 : SV_Target3; // emissive / alpha
 };
 
-float3 DecodeNormal(float3 n)
-{
-    return normalize(n * 2.0f - 1.0f);
-}
-
-float ComputeMaterialOcclusion(float2 uv)
-{
-    if (HasOcclusionTexture == 0u)
-    {
-        return 1.0f;
-    }
-
-    float occlusionTexel =
-        g_OcclusionMap.Sample(g_LinearWrap, uv).r;
-
-    return saturate(
-        1.0f +
-        saturate(OcclusionStrength) *
-        (occlusionTexel - 1.0f));
-}
-
-PSOut main(PSIn i)
+PSOut main(PSIn i, bool isFrontFace : SV_IsFrontFace)
 {
     PSOut o;
 
-    float3 base = g_BaseColor.Sample(g_LinearWrap, i.uv).rgb;
-    base *= BaseColorFactor.rgb;
-    base *= i.color.rgb;
+    // -------------------------------------------------------------------------
+    // Base color + alpha mask
+    // -------------------------------------------------------------------------
 
-    float3 tangentNormal = DecodeNormal(g_NormalMap.Sample(g_LinearWrap, i.uv).xyz);
+    float2 baseUv =
+        SelectUv(BaseColorTexCoord, i.uv0, i.uv1);
 
-    float3 N = normalize(i.worldN);
-    float3 T = normalize(i.worldT.xyz);
-    float3 B = normalize(cross(N, T)) * i.worldT.w;
-    float3x3 TBN = float3x3(T, B, N);
-    float3 worldNormal = normalize(mul(tangentNormal, TBN));
+    float4 baseSample =
+        g_BaseColor.Sample(g_LinearWrap, baseUv);
 
-    float2 mr = g_MetalRough.Sample(g_LinearWrap, i.uv).gb;
-    float roughness = saturate(mr.x * RoughnessFactor);
-    float metallic = saturate(mr.y * MetallicFactor);
-    float ao = ComputeMaterialOcclusion(i.uv);
+    float alpha =
+        baseSample.a * BaseColorFactor.a;
 
-    o.rt0 = float4(base, 1.0f);
+    ApplyAlphaMask(
+        AlphaMode,
+        alpha,
+        EmissiveFactorAndAlphaCutoff.a);
+
+    float3 base =
+        baseSample.rgb *
+        BaseColorFactor.rgb *
+        i.color.rgb;
+
+    // -------------------------------------------------------------------------
+    // Double-sided geometry normal
+    // -------------------------------------------------------------------------
+
+    float faceSign =
+        (DoubleSided != 0u && !isFrontFace) ? -1.0f : 1.0f;
+
+    float3 N =
+        normalize(i.worldN) * faceSign;
+
+    float3 T =
+        normalize(i.worldT.xyz);
+
+    float3 B =
+        normalize(cross(N, T)) * i.worldT.w;
+
+    // -------------------------------------------------------------------------
+    // Normal map
+    // -------------------------------------------------------------------------
+
+    float3 tangentNormal =
+        float3(0.0f, 0.0f, 1.0f);
+
+    if (HasNormalTexture != 0u)
+    {
+        float2 normalUv =
+            SelectUv(NormalTexCoord, i.uv0, i.uv1);
+
+        tangentNormal =
+            DecodeNormalScaled(
+                g_NormalMap.Sample(g_LinearWrap, normalUv).xyz,
+                NormalScale);
+    }
+
+    float3x3 TBN =
+        float3x3(T, B, N);
+
+    float3 worldNormal =
+        normalize(mul(tangentNormal, TBN));
+
+    // -------------------------------------------------------------------------
+    // Metallic / roughness
+    // -------------------------------------------------------------------------
+
+    float2 mrUv =
+        SelectUv(MetalRoughTexCoord, i.uv0, i.uv1);
+
+    float2 mr =
+        g_MetalRough.Sample(g_LinearWrap, mrUv).gb;
+
+    float roughness =
+        saturate(mr.x * RoughnessFactor);
+
+    float metallic =
+        saturate(mr.y * MetallicFactor);
+
+    // -------------------------------------------------------------------------
+    // Occlusion
+    // -------------------------------------------------------------------------
+
+    float ao =
+        1.0f;
+
+    if (HasOcclusionTexture != 0u)
+    {
+        float2 aoUv =
+            SelectUv(OcclusionTexCoord, i.uv0, i.uv1);
+
+        float occlusionTexel =
+            g_OcclusionMap.Sample(g_LinearWrap, aoUv).r;
+
+        ao =
+            ComputeMaterialOcclusion(
+                occlusionTexel,
+                OcclusionStrength);
+    }
+
+    // -------------------------------------------------------------------------
+    // Emissive
+    // -------------------------------------------------------------------------
+
+    float3 emissiveTexel =
+        1.0f.xxx;
+
+    if (HasEmissiveTexture != 0u)
+    {
+        float2 emissiveUv =
+            SelectUv(EmissiveTexCoord, i.uv0, i.uv1);
+
+        emissiveTexel =
+            g_EmissiveMap.Sample(g_LinearWrap, emissiveUv).rgb;
+    }
+
+    float3 emissive =
+        ComputeEmissive(
+            EmissiveFactorAndAlphaCutoff.rgb,
+            HasEmissiveTexture,
+            emissiveTexel);
+
+    // -------------------------------------------------------------------------
+    // GBuffer outputs
+    // -------------------------------------------------------------------------
+
+    o.rt0 = float4(base, alpha);
     o.rt1 = float4(worldNormal, 1.0f);
-    o.rt2 = float4(metallic, roughness, ao, 1.0f); // x=M, y=R, z=AO, w=1
+    o.rt2 = float4(metallic, roughness, ao, 1.0f);
+    o.rt3 = float4(emissive, alpha);
 
     return o;
 }

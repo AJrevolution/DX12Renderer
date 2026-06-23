@@ -17,6 +17,7 @@ public:
         float tx, ty, tz, tw;    // Tangent.xyz + handedness.w
         float r, g, b, a;    // Color
         float u, v;          // UV
+        float u1, v1;
     };
 
     struct Submesh

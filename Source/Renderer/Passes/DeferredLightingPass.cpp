@@ -32,7 +32,13 @@ void DeferredLightingPass::Render(
     // RootSig v2:
     // 0 = b0 per-frame
     // 2 = scene table (space0)
-    // 3 = deferred input table (space1)
+    // 3 = space1 SRV table.
+    //     In deferred lighting this is the deferred input table:
+    //     t0 = GBuffer0 base color / alpha
+    //     t1 = GBuffer1 normal
+    //     t2 = GBuffer2 metallic / roughness / AO
+    //     t3 = depth
+    //     t4 = GBuffer3 emissive / alpha
 
     cmd->SetGraphicsRootConstantBufferView(0, perFrameCb);
     cmd->SetGraphicsRootDescriptorTable(2, sceneTable);

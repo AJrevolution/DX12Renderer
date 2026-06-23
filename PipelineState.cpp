@@ -1,5 +1,7 @@
 #include "PipelineState.h"
 #include "ThirdParty/DirectX-Headers/include/directx/d3dx12.h"
+#include <cstddef>
+#include "Source/Scene/Mesh.h"
 
 void PipelineState::InitialiseTriangle(
     ID3D12Device* device,
@@ -50,14 +52,16 @@ void PipelineState::InitialiseForwardPBR(
     D3D12_SHADER_BYTECODE vs,
     D3D12_SHADER_BYTECODE ps,
     DXGI_FORMAT rtvFormat,
-    DXGI_FORMAT dsvFormat)
+    DXGI_FORMAT dsvFormat,
+    D3D12_CULL_MODE cullMode)
 {
     D3D12_INPUT_ELEMENT_DESC layout[] = {
-     { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,       0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-     { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,       0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-     { "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-     { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT,    0, 40, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-     { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,          0, 56, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, offsetof(Mesh::Vertex, px), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, offsetof(Mesh::Vertex, nx), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Mesh::Vertex, tx), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Mesh::Vertex, r),  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, offsetof(Mesh::Vertex, u),  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT,       0, offsetof(Mesh::Vertex, u1), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
@@ -66,6 +70,7 @@ void PipelineState::InitialiseForwardPBR(
     desc.VS = vs;
     desc.PS = ps;
     desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    desc.RasterizerState.CullMode = cullMode;
     desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
 
     // Depth Stencil Setup
@@ -91,14 +96,17 @@ void PipelineState::InitialiseGBuffer(
     DXGI_FORMAT rt0,
     DXGI_FORMAT rt1,
     DXGI_FORMAT rt2,
-    DXGI_FORMAT dsvFormat)
+    DXGI_FORMAT rt3,
+    DXGI_FORMAT dsvFormat,
+    D3D12_CULL_MODE cullMode)
 {
     D3D12_INPUT_ELEMENT_DESC layout[] = {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 40, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, 56, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, offsetof(Mesh::Vertex, px), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, offsetof(Mesh::Vertex, nx), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Mesh::Vertex, tx), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Mesh::Vertex, r),  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, offsetof(Mesh::Vertex, u),  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT,       0, offsetof(Mesh::Vertex, u1), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
@@ -108,7 +116,7 @@ void PipelineState::InitialiseGBuffer(
     desc.PS = ps;
     desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-
+    desc.RasterizerState.CullMode = cullMode;
     desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     desc.DepthStencilState.DepthEnable = TRUE;
     desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
@@ -116,10 +124,11 @@ void PipelineState::InitialiseGBuffer(
 
     desc.SampleMask = UINT_MAX;
     desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    desc.NumRenderTargets = 3;
+    desc.NumRenderTargets = 4;
     desc.RTVFormats[0] = rt0;
     desc.RTVFormats[1] = rt1;
     desc.RTVFormats[2] = rt2;
+    desc.RTVFormats[3] = rt3;
     desc.SampleDesc.Count = 1;
 
     ThrowIfFailed(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&m_pso)), "CreateGraphicsPipelineState(GBuffer)");
@@ -160,27 +169,30 @@ void PipelineState::InitialiseShadow(
     ID3D12Device* device,
     ID3D12RootSignature* rootSig,
     D3D12_SHADER_BYTECODE vs,
-    DXGI_FORMAT dsvFormat)
+    D3D12_SHADER_BYTECODE ps,
+    DXGI_FORMAT dsvFormat,
+    D3D12_CULL_MODE cullMode)
 {
     D3D12_INPUT_ELEMENT_DESC layout[] = {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,       0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,       0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT,    0, 40, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,          0, 56, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, offsetof(Mesh::Vertex, px), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, offsetof(Mesh::Vertex, nx), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Mesh::Vertex, tx), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Mesh::Vertex, r),  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, offsetof(Mesh::Vertex, u),  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT,       0, offsetof(Mesh::Vertex, u1), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
     desc.InputLayout = { layout, _countof(layout) };
     desc.pRootSignature = rootSig;
     desc.VS = vs;
-    desc.PS = { nullptr, 0 };
+    desc.PS = ps;
     desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     desc.RasterizerState.DepthBias = 1000;
     desc.RasterizerState.SlopeScaledDepthBias = 1.0f;
     desc.RasterizerState.DepthBiasClamp = 0.0f;
     desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-
+    desc.RasterizerState.CullMode = cullMode;
     desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     desc.DepthStencilState.DepthEnable = TRUE;
     desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;

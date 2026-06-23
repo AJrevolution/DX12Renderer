@@ -15,6 +15,7 @@ Texture2D g_GBuffer0 : register(t0, space1); // baseColor
 Texture2D g_GBuffer1 : register(t1, space1); // normal
 Texture2D g_GBuffer2 : register(t2, space1); // M/R/Ao
 Texture2D g_Depth    : register(t3, space1); // depth SRV (R32_FLOAT)
+Texture2D g_GBuffer3 : register(t4, space1); // emissive / alpha
 
 SamplerState g_LinearClamp : register(s1);
 SamplerState g_AnisoWrap : register(s2);
@@ -120,6 +121,7 @@ float4 main(PSIn i) : SV_Target
     float metallic = saturate(mrao.x);
     float roughness = saturate(mrao.y);
     float ao = saturate(mrao.z);
+    float3 emissive = g_GBuffer3.Sample(g_LinearClamp, i.uv).rgb;
     
     float depth = g_Depth.Sample(g_LinearClamp, i.uv).r;
     float3 worldPos = ReconstructWorldPos(i.uv, depth);
@@ -195,7 +197,7 @@ float4 main(PSIn i) : SV_Target
     float3 iblDiffuse = kd * base * diffuseEnv * ao;
     float3 iblSpec = specularEnv * (F0 * brdf.x + brdf.y);
 
-    float3 lit = direct + iblDiffuse + iblSpec;
+    float3 lit = direct + iblDiffuse + iblSpec + emissive;
     
     #if DEBUG_VIEW == 1
         return float4(N * 0.5f + 0.5f, 1.0f);

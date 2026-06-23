@@ -1744,6 +1744,7 @@ private:
     RenderTarget m_gbuffer0;
     RenderTarget m_gbuffer1;
     RenderTarget m_gbuffer2;
+    RenderTarget m_gbuffer3;
     bool m_gbufferReady = false;
 
     bool m_resourcesReady = false;
@@ -1772,6 +1773,7 @@ private:
     Texture m_rtFallbackWhiteTex;
     Texture m_rtFallbackFlatNormalTex;
     Texture m_rtFallbackOrmTex;
+    Texture m_rtFallbackBlackTex;
 
     bool     m_rtEnableIndirect = true;  // 1-bounce diffuse GI
     float    m_rtIndirectScale = 1.0f;   // tuning knob

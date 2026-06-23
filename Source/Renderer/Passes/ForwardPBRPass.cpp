@@ -9,8 +9,8 @@ void ForwardPBRPass::Initialize(ID3D12Device* device, DXGI_FORMAT rtvFormat, DXG
 
     m_rootSig.InitializeForwardPBRV2(device);
 
-    m_pso.InitialiseForwardPBR(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rtvFormat, dsvFormat);
-
+    m_pso.InitialiseForwardPBR(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rtvFormat, dsvFormat, D3D12_CULL_MODE_BACK);
+    m_psoNoCull.InitialiseForwardPBR(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rtvFormat, dsvFormat, D3D12_CULL_MODE_NONE);
     m_initialized = true;
 }
 
@@ -36,7 +36,13 @@ void ForwardPBRPass::Render(
     if (drawRange.indexCount == 0)
         return;
 
-    cmd->SetPipelineState(m_pso.Get());
+    const bool doubleSided =
+        material.doubleSided != 0u;
+
+    cmd->SetPipelineState(
+        doubleSided
+            ? m_psoNoCull.Get()
+            : m_pso.Get());
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
 
     cmd->SetGraphicsRootConstantBufferView(0, perFrameCb);

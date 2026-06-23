@@ -18,6 +18,7 @@ public:
         DXGI_FORMAT rt0,
         DXGI_FORMAT rt1,
         DXGI_FORMAT rt2,
+        DXGI_FORMAT rt3,
         DXGI_FORMAT dsv,
         const fs::path& shaderDir);
 
@@ -36,4 +37,5 @@ private:
     bool m_initialized = false;
     RootSignature m_rootSig;
     PipelineState m_pso;
+    PipelineState m_psoNoCull;
 };

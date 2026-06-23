@@ -5,6 +5,7 @@ void GBufferPass::Initialize(
     DXGI_FORMAT rt0,
     DXGI_FORMAT rt1,
     DXGI_FORMAT rt2,
+    DXGI_FORMAT rt3,
     DXGI_FORMAT dsv,
     const fs::path& shaderDir)
 {
@@ -14,8 +15,8 @@ void GBufferPass::Initialize(
     Shader ps = Shader::LoadFromFile(shaderDir / L"GBuffer_PS.cso");
 
     m_rootSig.InitializeForwardPBRV2(device);
-    m_pso.InitialiseGBuffer(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rt0, rt1, rt2, dsv);
-
+    m_pso.InitialiseGBuffer(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rt0, rt1, rt2, rt3, dsv, D3D12_CULL_MODE_BACK);
+    m_psoNoCull.InitialiseGBuffer(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rt0, rt1, rt2, rt3, dsv, D3D12_CULL_MODE_NONE);
     m_initialized = true;
 }
 
@@ -46,10 +47,19 @@ void GBufferPass::Render(
 
     cmd->SetGraphicsRootConstantBufferView(0, perFrameCb);
     cmd->SetGraphicsRootConstantBufferView(1, perDrawCb);
+    
+    const bool doubleSided =
+        material.doubleSided != 0u;
+    cmd->SetPipelineState(
+        doubleSided
+        ? m_psoNoCull.Get()
+        : m_pso.Get());
 
     // RootSig v2 contract:
-    //  param 2 = scene table (space0)
-    //  param 3 = material table (space1)
+    //  param 0 = b0 per-frame
+    //  param 1 = b1 per-draw
+    //  param 2 = scene table (space0), unused by shadow shaders
+    //  param 3 = material table (space1), used by Shadow_FS for base-color alpha
     cmd->SetGraphicsRootDescriptorTable(2, sceneTableGpu);
     cmd->SetGraphicsRootDescriptorTable(3, material.table.gpu);
 

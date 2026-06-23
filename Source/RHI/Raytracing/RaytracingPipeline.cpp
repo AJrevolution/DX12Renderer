@@ -12,31 +12,30 @@ namespace
     // t4   = floor indices
     // t5   = RT instance data
     //
-    // t6..t261 = material textures
-    //            64 materials * 4 textures:
-    //            base color, normal, metallic/roughness, occlusion
+    // t6..t325 = material textures
+    //            64 materials * 5 textures:
+    //            base color, normal, metallic/roughness, occlusion, emissive
     //
-    // t270 = imported glTF vertices
-    // t271 = imported glTF indices
+    // t330 = imported glTF vertices
+    // t331 = imported glTF indices
     //
-    // t280 = BRDF LUT
-    // t281 = IBL diffuse
-    // t282 = IBL specular
-    // t283 = environment alias table
-    // t284 = ReSTIR resolve reservoir
-
+    // t340 = BRDF LUT
+    // t341 = IBL diffuse
+    // t342 = IBL specular
+    // t343 = environment alias table
+    // t344 = ReSTIR resolve reservoir
     static constexpr uint32_t kRtMaxMaterials = 64;
-    static constexpr uint32_t kRtTexturesPerMaterial = 4;
+    static constexpr uint32_t kRtTexturesPerMaterial = 5;
 
     static constexpr uint32_t kRtRegisterFirstSrv = 1;
     static constexpr uint32_t kRtRegisterMaterialTextures = 6;
-    static constexpr uint32_t kRtRegisterImportedVerts = 270;
-    static constexpr uint32_t kRtRegisterImportedIndices = 271;
-    static constexpr uint32_t kRtRegisterBrdfLut = 280;
-    static constexpr uint32_t kRtRegisterIblDiffuse = 281;
-    static constexpr uint32_t kRtRegisterIblSpecular = 282;
-    static constexpr uint32_t kRtRegisterEnvAlias = 283;
-    static constexpr uint32_t kRtRegisterRestirResolveReservoir = 284;
+    static constexpr uint32_t kRtRegisterImportedVerts = 330;
+    static constexpr uint32_t kRtRegisterImportedIndices = 331;
+    static constexpr uint32_t kRtRegisterBrdfLut = 340;
+    static constexpr uint32_t kRtRegisterIblDiffuse = 341;
+    static constexpr uint32_t kRtRegisterIblSpecular = 342;
+    static constexpr uint32_t kRtRegisterEnvAlias = 343;
+    static constexpr uint32_t kRtRegisterRestirResolveReservoir = 344;
 
     static constexpr uint32_t kRtMaterialTextureCount =
         kRtMaxMaterials * kRtTexturesPerMaterial;
@@ -48,13 +47,13 @@ namespace
         kRtRegisterRestirResolveReservoir;
 
     // Descriptor range starts at t1.
-    // NumDescriptors = 284 covers t1 through t284 inclusive.
+    // NumDescriptors = 344 covers t1 through t344 inclusive.
     static constexpr uint32_t kRtSrvTableCount =
         kRtHighestSrvRegister - kRtRegisterFirstSrv + 1;
 
-    static_assert(kRtLastMaterialTextureRegister == 261);
+    static_assert(kRtLastMaterialTextureRegister == 325);
     static_assert(kRtRegisterImportedVerts > kRtLastMaterialTextureRegister);
-    static_assert(kRtSrvTableCount == 284);
+    static_assert(kRtSrvTableCount == 344);
 }
 
 static std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path)
@@ -141,6 +140,7 @@ void RaytracingPipeline::BuildStateObject(ID3D12Device5* device, const std::file
         { L"RayGen", nullptr, D3D12_EXPORT_FLAG_NONE },
         { L"Miss", nullptr, D3D12_EXPORT_FLAG_NONE },
         { L"ClosestHit", nullptr, D3D12_EXPORT_FLAG_NONE },
+        { L"AnyHit", nullptr, D3D12_EXPORT_FLAG_NONE },
     };
 
     D3D12_DXIL_LIBRARY_DESC dxil{};
@@ -155,6 +155,7 @@ void RaytracingPipeline::BuildStateObject(ID3D12Device5* device, const std::file
     hitGroup.HitGroupExport = L"HitGroup";
     hitGroup.ClosestHitShaderImport = L"ClosestHit";
     hitGroup.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
+    hitGroup.AnyHitShaderImport = L"AnyHit";
 
     D3D12_RAYTRACING_SHADER_CONFIG shaderConfig{};
     shaderConfig.MaxPayloadSizeInBytes = 24; // float3 color + uint rayType + uint occluded + uint rng

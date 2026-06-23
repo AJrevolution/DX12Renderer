@@ -1,4 +1,5 @@
 #include "Common.hlsli"
+#include "MaterialConstants.hlsli"
 
 cbuffer PerFrameConstants : register(b0)
 {
@@ -27,26 +28,14 @@ cbuffer PerFrameConstants : register(b0)
     float RtIndirectScale;
 };
 
-cbuffer PerDrawConstants : register(b1)
-{
-    row_major float4x4 World;
-    uint MaterialIndex;
-    uint3 _padA;
-
-    float4 BaseColorFactor;
-    float MetallicFactor;
-    float RoughnessFactor;
-    float OcclusionStrength;
-    uint HasOcclusionTexture;
-};
-
 struct VSIn
 {
     float3 pos : POSITION;
     float3 nrm : NORMAL;
     float4 tan : TANGENT;
     float4 col : COLOR;
-    float2 uv : TEXCOORD;
+    float2 uv0 : TEXCOORD0;
+    float2 uv1 : TEXCOORD1;
 };
 
 struct VSOut
@@ -55,7 +44,8 @@ struct VSOut
     float3 worldPos : TEXCOORD0;
     float3 worldN : TEXCOORD1;
     float4 worldT : TEXCOORD2;
-    float2 uv : TEXCOORD3;
+    float2 uv0 : TEXCOORD3;
+    float2 uv1 : TEXCOORD4;
     float4 color : COLOR;
 };
 
@@ -71,7 +61,8 @@ VSOut main(VSIn i)
     o.worldT.w = i.tan.w;
 
     o.pos = mul(wpos, ViewProj);
-    o.uv = i.uv;
+    o.uv0 = i.uv0;
+    o.uv1 = i.uv1;
     o.color = i.col;
     return o;
 }

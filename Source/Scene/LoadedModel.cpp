@@ -751,6 +751,7 @@ bool LoadedModel::LoadGltf(
             const int tangentAccessor = FindAttribute(primitive, "TANGENT");
             const int uvAccessor = FindAttribute(primitive, "TEXCOORD_0");
             const int colourAccessor = FindAttribute(primitive, "COLOR_0");
+            const int texCoord1Accessor = FindAttribute(primitive, "TEXCOORD_1");
 
             if (positionAccessor < 0)
             {
@@ -859,6 +860,25 @@ bool LoadedModel::LoadGltf(
                     v.g = values[1];
                     v.b = values[2];
                     v.a = values[3] == 0.0f ? 1.0f : values[3];
+                }
+
+                v.u1 = v.u;
+                v.v1 = v.v;
+
+                if (texCoord1Accessor >= 0)
+                {
+                    float uv1[4] = {};
+
+                    if (!ReadAccessorElement(model, texCoord1Accessor, vertexIndex, uv1, 4))
+                    {
+                        m_lastError =
+                            L"LoadedModel::LoadGltf failed while reading TEXCOORD_1.";
+
+                        return false;
+                    }
+
+                    v.u1 = uv1[0];
+                    v.v1 = uv1[1];
                 }
             }
 
@@ -1104,6 +1124,7 @@ bool LoadedModel::LoadGltf(
         int32_t normal = -1;
         int32_t metallicRoughness = -1;
         int32_t occlusion = -1;
+        int32_t emissive = -1;
     };
 
     const size_t materialCount =
@@ -1164,6 +1185,57 @@ bool LoadedModel::LoadGltf(
                 0.0f,
                 1.0f);
 
+        material.normalScale =
+            static_cast<float>(gltfMaterial.normalTexture.scale);
+
+        material.occlusionStrength =
+            std::clamp(
+                static_cast<float>(gltfMaterial.occlusionTexture.strength),
+                0.0f,
+                1.0f);
+
+        material.alphaCutoff =
+            static_cast<float>(
+                gltfMaterial.alphaCutoff > 0.0
+                ? gltfMaterial.alphaCutoff
+                : 0.5);
+
+        material.doubleSided =
+            gltfMaterial.doubleSided ? 1u : 0u;
+
+        material.emissiveFactor = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+        if (gltfMaterial.emissiveFactor.size() >= 3)
+        {
+            material.emissiveFactor =
+            {
+                static_cast<float>(gltfMaterial.emissiveFactor[0]),
+                static_cast<float>(gltfMaterial.emissiveFactor[1]),
+                static_cast<float>(gltfMaterial.emissiveFactor[2]),
+                0.0f
+            };
+        }
+
+        material.baseColorTexCoord =
+            static_cast<uint32_t>(
+                std::max(0, pbr.baseColorTexture.texCoord));
+
+        material.metalRoughTexCoord =
+            static_cast<uint32_t>(
+                std::max(0, pbr.metallicRoughnessTexture.texCoord));
+
+        material.normalTexCoord =
+            static_cast<uint32_t>(
+                std::max(0, gltfMaterial.normalTexture.texCoord));
+
+        material.occlusionTexCoord =
+            static_cast<uint32_t>(
+                std::max(0, gltfMaterial.occlusionTexture.texCoord));
+
+        material.emissiveTexCoord =
+            static_cast<uint32_t>(
+                std::max(0, gltfMaterial.emissiveTexture.texCoord));
+
         std::wstring materialLabel =
             L"material[" +
             std::to_wstring(materialIndex) +
@@ -1174,6 +1246,47 @@ bool LoadedModel::LoadGltf(
             materialLabel += L" ";
             materialLabel += ToWide(gltfMaterial.name);
         }
+
+        if (gltfMaterial.alphaMode == "MASK")
+        {
+            material.alphaMode = MaterialAlphaMode::Mask;
+        }
+        else if (gltfMaterial.alphaMode == "BLEND")
+        {
+            material.alphaMode = MaterialAlphaMode::Blend;
+
+            OutputDebugStringW(
+                (L"glTF material " +
+                    materialLabel +
+                    L" uses alphaMode=BLEND; Phase 3E records it but renders it as opaque until sorted transparency is implemented.\n").c_str());
+        }
+        else
+        {
+            material.alphaMode = MaterialAlphaMode::Opaque;
+        }
+
+        auto ClampTexCoordSet = [&](uint32_t& set, const wchar_t* usage)
+        {
+            if (set > 1u)
+            {
+                OutputDebugStringW(
+                    (L"glTF material " +
+                        materialLabel +
+                        L" uses unsupported " +
+                        usage +
+                        L" TEXCOORD_" +
+                        std::to_wstring(set) +
+                        L"; clamping to TEXCOORD_1.\n").c_str());
+
+                set = 1u;
+            }
+        };
+
+        ClampTexCoordSet(material.baseColorTexCoord, L"baseColor");
+        ClampTexCoordSet(material.normalTexCoord, L"normal");
+        ClampTexCoordSet(material.metalRoughTexCoord, L"metallicRoughness");
+        ClampTexCoordSet(material.occlusionTexCoord, L"occlusion");
+        ClampTexCoordSet(material.emissiveTexCoord, L"emissive");
 
         refs.baseColor =
             LoadTexture(
@@ -1201,7 +1314,7 @@ bool LoadedModel::LoadGltf(
                     materialLabel +
                     L" uses TEXCOORD_" +
                     std::to_wstring(gltfMaterial.occlusionTexture.texCoord) +
-                    L"; Phase 3C.1 samples TEXCOORD_0.\n").c_str());
+                    L"; using declared TEXCOORD set where supported.\n").c_str());
         }
 
         refs.occlusion =
@@ -1209,6 +1322,12 @@ bool LoadedModel::LoadGltf(
                 gltfMaterial.occlusionTexture.index,
                 false,
                 materialLabel + L" occlusion");
+
+        refs.emissive =
+            LoadTexture(
+                gltfMaterial.emissiveTexture.index,
+                true,
+                materialLabel + L" emissive");
     }
 
     auto TexturePtr = [&](int32_t textureIndex) -> const Texture*
@@ -1233,7 +1352,8 @@ bool LoadedModel::LoadGltf(
             TexturePtr(refs.baseColor),
             TexturePtr(refs.normal),
             TexturePtr(refs.metallicRoughness),
-            TexturePtr(refs.occlusion));
+            TexturePtr(refs.occlusion),
+            TexturePtr(refs.emissive));
     }
 
     const int sceneIndex =

@@ -5,6 +5,7 @@
 #include "PipelineState.h"
 #include "Source/RHI/CommandList/CommandList.h"
 #include "Source/Scene/Mesh.h"
+#include "Source/Scene/Material.h"
 
 #include <filesystem>
 namespace fs = std::filesystem;
@@ -19,6 +20,7 @@ public:
         uint32_t shadowSize,
         D3D12_GPU_VIRTUAL_ADDRESS perFrameCb,
         D3D12_GPU_VIRTUAL_ADDRESS perDrawCb,
+        const Material& material,
         const Mesh& mesh,
         const Mesh::Submesh* submesh = nullptr);
 
@@ -26,4 +28,5 @@ private:
     bool m_initialized = false;
     RootSignature m_rootSig;
     PipelineState m_pso;
+    PipelineState m_psoNoCull;
 };

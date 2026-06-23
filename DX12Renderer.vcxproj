@@ -246,6 +246,8 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="Assets\Shaders\HLSL\Common.hlsli" />
+    <None Include="Assets\Shaders\HLSL\MaterialConstants.hlsli" />
+    <None Include="Assets\Shaders\HLSL\MaterialSampling.hlsli" />
     <None Include="Assets\Shaders\HLSL\PBR.hlsli" />
     <None Include="Assets\Shaders\HLSL\RtReservoir.hlsli" />
     <None Include="Assets\Shaders\HLSL\RtSampling.hlsli" />
@@ -523,6 +525,17 @@ if /I "$(Configuration)"=="Debug" (
  dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirApply_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirApply_CS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtRestirApply_CS.cso</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="Assets\Shaders\HLSL\Shadow_FS.hlsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if "$(Configuration)"=="Debug" (
+  dxc.exe -T ps_6_0 -E main -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Shadow_FS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Shadow_FS.hlsl"
+) else (
+  dxc.exe -T ps_6_0 -E main -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Shadow_FS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Shadow_FS.hlsl"
+)</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\Shadow_FS.cso;%(Outputs)</Outputs>
     </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
