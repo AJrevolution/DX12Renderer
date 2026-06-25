@@ -183,6 +183,9 @@
     <ClInclude Include="ThirdParty\tinygltf\tiny_gltf.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Scene\SceneManifest.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -317,6 +320,9 @@
     <ClCompile Include="Source\Scene\LoadedModel.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Scene\SceneManifest.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -326,6 +332,7 @@
     <None Include="Assets\Shaders\HLSL\RtReservoir.hlsli" />
     <None Include="Assets\Shaders\HLSL\MaterialSampling.hlsli" />
     <None Include="Assets\Shaders\HLSL\MaterialConstants.hlsli" />
+    <None Include="Assets\Scenes\default_scene.json" />
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="Assets\Shaders\HLSL\Triangle_VS.hlsl">

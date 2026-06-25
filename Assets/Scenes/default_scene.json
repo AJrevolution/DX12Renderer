@@ -1,0 +1,38 @@
+{
+  "name": "default_scene",
+  "models": [
+    {
+      "name": "racetrack_base",
+      "path": "Models/Racetrack/racetrackentire.gltf",
+      "enabled": true,
+
+      "translation": [ 0.0, -1.77210808, 0.0 ],
+      "rotationDegrees": [ 0.0, 0.0, 0.0 ],
+      "scale": [ 1.0, 1.0, 1.0 ],
+
+      "rasterEnabled": true,
+      "dxrEnabled": true,
+      "castShadows": true,
+
+      "objectIdBase": 1000
+    }
+  ],
+
+  "sun": {
+    "enabled": true,
+    "direction": [ -0.75, -0.45, -0.55 ],
+    "color": [ 1.0, 0.95, 0.88 ],
+    "intensity": 2.0
+  },
+
+  "pointLights": [
+    {
+      "name": "warm_track_light",
+      "enabled": true,
+      "position": [ 0.0, 3.0, 0.0 ],
+      "color": [ 1.0, 0.78, 0.52 ],
+      "intensity": 20.0,
+      "range": 8.0
+    }
+  ]
+}

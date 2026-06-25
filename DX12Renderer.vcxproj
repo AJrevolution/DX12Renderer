@@ -189,6 +189,7 @@
     <ClInclude Include="Source\Scene\LoadedModel.h" />
     <ClInclude Include="Source\Scene\Material.h" />
     <ClInclude Include="Source\Scene\Mesh.h" />
+    <ClInclude Include="Source\Scene\SceneManifest.h" />
     <ClInclude Include="SwapChain.h" />
     <ClInclude Include="ThirdParty\directx\d3d12.h" />
     <ClInclude Include="Source\RHI\Memory\UploadArena.h" />
@@ -238,6 +239,7 @@
     <ClCompile Include="Source\Scene\LoadedModel.cpp" />
     <ClCompile Include="Source\Scene\Material.cpp" />
     <ClCompile Include="Source\Scene\Mesh.cpp" />
+    <ClCompile Include="Source\Scene\SceneManifest.cpp" />
     <ClCompile Include="SwapChain.cpp" />
     <ClCompile Include="Source\RHI\Resources\Texture.cpp" />
     <ClCompile Include="TrianglePass.cpp" />
@@ -245,6 +247,7 @@
     <ClCompile Include="Window.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="Assets\Scenes\default_scene.json" />
     <None Include="Assets\Shaders\HLSL\Common.hlsli" />
     <None Include="Assets\Shaders\HLSL\MaterialConstants.hlsli" />
     <None Include="Assets\Shaders\HLSL\MaterialSampling.hlsli" />

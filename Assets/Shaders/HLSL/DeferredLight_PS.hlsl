@@ -81,21 +81,37 @@ float2 DirToLatLongUV(float3 d)
 
 float ComputeShadowFactor(float3 worldPos, float3 worldNormal, float3 lightDir)
 {
-    float4 shadowClip = mul(float4(worldPos, 1.0f), LightViewProj);
+    float4 shadowClip =
+        mul(float4(worldPos, 1.0f), LightViewProj);
 
-    float3 shadowNdc = shadowClip.xyz / shadowClip.w;
+    if (abs(shadowClip.w) < 1e-6f)
+        return 1.0f;
+
+    float3 shadowNdc =
+        shadowClip.xyz / shadowClip.w;
+
     float2 shadowUV = float2(
         shadowNdc.x * 0.5f + 0.5f,
         1.0f - (shadowNdc.y * 0.5f + 0.5f));
 
-    float shadowDepth = shadowNdc.z;
+    float shadowDepth =
+        shadowNdc.z;
 
-    if (shadowUV.x < 0.0f || shadowUV.x > 1.0f || shadowUV.y < 0.0f || shadowUV.y > 1.0f)
+    if (shadowUV.x < 0.0f || shadowUV.x > 1.0f ||
+        shadowUV.y < 0.0f || shadowUV.y > 1.0f ||
+        shadowDepth < 0.0f || shadowDepth > 1.0f)
+    {
         return 1.0f;
+    }
 
-    float bias = max(0.0005f, 0.002f * (1.0f - saturate(dot(worldNormal, -lightDir))));
+    float ndotl =
+        saturate(dot(worldNormal, -lightDir));
+
+    float bias =
+        max(0.0005f, 0.002f * (1.0f - ndotl));
 
     float visibility = 0.0f;
+    float tapCount = 0.0f;
 
     [unroll]
     for (int y = -1; y <= 1; ++y)
@@ -103,27 +119,56 @@ float ComputeShadowFactor(float3 worldPos, float3 worldNormal, float3 lightDir)
         [unroll]
         for (int x = -1; x <= 1; ++x)
         {
-            float2 uv = shadowUV + float2(x, y) * ShadowInvSize;
-            float mapDepth = g_ShadowMap.Sample(g_PointClamp, uv).r;
-            visibility += ((shadowDepth - bias) <= mapDepth) ? 1.0f : 0.0f;
+            float2 uv =
+                shadowUV + float2(x, y) * ShadowInvSize;
+
+            if (uv.x < 0.0f || uv.x > 1.0f ||
+                uv.y < 0.0f || uv.y > 1.0f)
+            {
+                visibility += 1.0f;
+                tapCount += 1.0f;
+                continue;
+            }
+
+            float mapDepth =
+                g_ShadowMap.Sample(g_PointClamp, uv).r;
+
+            visibility +=
+                ((shadowDepth - bias) <= mapDepth) ? 1.0f : 0.0f;
+
+            tapCount += 1.0f;
         }
     }
 
-    return visibility / 9.0f;
+    return visibility / max(tapCount, 1.0f);
 }
 
 float4 main(PSIn i) : SV_Target
 {
-    float3 base = g_GBuffer0.Sample(g_LinearClamp, i.uv).rgb;
-    float3 N = normalize(g_GBuffer1.Sample(g_LinearClamp, i.uv).xyz);
+    // GBuffer2.a is the deferred surface-valid flag.
+    // It is cleared to 0 and written as 1 by GBuffer_PS for real geometry.
+    float4 mrao = g_GBuffer2.SampleLevel(g_PointClamp, i.uv, 0.0f);
+    
+    float depth = g_Depth.SampleLevel(g_PointClamp, i.uv, 0.0f).r;
+          
+    // The deferred light pass is fullscreen. Pixels not touched by the GBuffer
+    // should preserve the already-cleared backbuffer background.
+    float validSurface =
+        mrao.a;
+            
+    if (validSurface < 0.5f || depth >= 0.9999f)
+    {
+        discard;
+    }
+    
+    float3 base = g_GBuffer0.SampleLevel(g_PointClamp, i.uv, 0.0f).rgb;
+    float3 N = SafeNormalize(g_GBuffer1.SampleLevel(g_PointClamp, i.uv, 0.0f).xyz);
 
-    float4 mrao = g_GBuffer2.Sample(g_LinearClamp, i.uv);
     float metallic = saturate(mrao.x);
     float roughness = saturate(mrao.y);
     float ao = saturate(mrao.z);
-    float3 emissive = g_GBuffer3.Sample(g_LinearClamp, i.uv).rgb;
+    float3 emissive = g_GBuffer3.SampleLevel(g_PointClamp, i.uv, 0.0f).rgb;
     
-    float depth = g_Depth.Sample(g_LinearClamp, i.uv).r;
     float3 worldPos = ReconstructWorldPos(i.uv, depth);
     
     float3 V = SafeNormalize(CameraPos - worldPos);

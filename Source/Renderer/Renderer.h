@@ -38,6 +38,7 @@
 #include "Source/Renderer/Passes/RtRestirSpatialPass.h"
 #include "Source/Renderer/Passes/RtRestirApplyPass.h"
 #include "Source/Scene/LoadedModel.h"
+#include "Source/Scene/SceneManifest.h"
 
 enum class DebugViewDomain : uint8_t
 {
@@ -449,10 +450,42 @@ private:
         Mesh* mesh = nullptr;
         Material* material = nullptr;
         DirectX::XMFLOAT4X4 world{};
-        uint32_t rtObjectId = 0;
 
         uint32_t submeshIndex = 0;
+        uint32_t rtObjectId = 0;
+
+        uint32_t sceneModelIndex = UINT32_MAX;
+        uint32_t sceneModelRtBufferIndex = UINT32_MAX;
+
+        bool rasterEnabled = true;
+        bool dxrEnabled = true;
+        bool castShadows = true;
+
+        // True when this draw's world transform reverses triangle handedness.
+        // This is geometry/draw state, not material state.
+        bool reversesWinding = false;
     };
+
+    struct SceneModelInstance
+    {
+        SceneModelDesc desc;
+
+        LoadedModel model;
+
+        std::vector<AccelerationStructure> blas;
+
+        bool blasBuilt = false;
+        bool dxrBufferAssigned = false;
+
+        uint32_t rtBufferIndex = UINT32_MAX;
+        uint32_t resolvedObjectIdBase = 0;
+    };
+
+    SceneManifest m_sceneManifest;
+    std::vector<SceneModelInstance> m_sceneModels;
+
+    bool m_sceneManifestLoaded = false;
+    bool m_sceneModelSummaryLogged = false;
 
     struct RtHistorySelectConstants
     {
@@ -1438,21 +1471,7 @@ private:
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRestirApplyConstants(uint32_t frameIndex);
 
-    void LoadDefaultGltfScene(
-        ID3D12Device* device,
-        CommandList& cl,
-        uint32_t frameIndex);
-
-    void AppendLoadedModelDraws();
-
-    void BuildImportedModelBlas(ID3D12Device* device, CommandList& cl);
-
     void BuildRtDrawItems();
-
-    bool IsImportedModelMesh(const Mesh* mesh) const;
-
-    void AdoptImportedModelBounds();
-    void LogImportedModelSummary() const;
 
     const AccelerationStructure* GetBlasForDrawItem(
         const DrawItem& item) const;
@@ -1468,9 +1487,39 @@ private:
     uint32_t ResolveRtMaterialId(
         const Material* material) const;
 
-    void UpdateRtSceneStats();
     void LogRtSceneStatsIfChanged();
     bool ValidateRtSceneContract() const;
+
+    void LoadSceneFromManifest(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex);
+
+    void LoadFallbackImportedScene(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex);
+
+    void ApplyManifestLights();
+
+    void AppendSceneModelDraws();
+
+    void BuildSceneModelBlas(
+        ID3D12Device* device,
+        CommandList& cl);
+
+    void UpdateRtSceneStats();  
+
+    void AssignSceneModelRtBufferIndices();
+
+    void AdoptSceneModelBounds();
+
+    void LogSceneModelSummary() const;
+
+    bool IsSceneModelMesh(const Mesh* mesh) const;
+
+    const AccelerationStructure* GetSceneModelBlasForDrawItem(
+        const DrawItem& item) const;
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -1820,14 +1869,6 @@ private:
 
     Mesh m_floor;
     Material m_floorMaterial;
-    
-    LoadedModel m_importedModel;
-    bool m_importedModelEnabled = true;
-    bool m_importedModelLoadAttempted = false;
-    std::vector<AccelerationStructure> m_importedModelBlas;
-    bool m_importedModelBlasBuilt = false;
-
-    bool m_importedModelSummaryLogged = false;
 
     std::vector<const DrawItem*> m_rtDrawItems;
 
@@ -2188,6 +2229,7 @@ private:
     static constexpr uint32_t kRtRestirSpatialUavCount = 2;
     static constexpr uint32_t kRtRestirApplySrvCount = 4;
     static constexpr uint32_t kRtRestirApplyUavCount = 2;
+
 
     RtDiffuseDemodulatePass m_rtDiffuseDemodulatePass;
 

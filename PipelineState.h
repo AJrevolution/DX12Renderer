@@ -19,7 +19,8 @@ public:
         D3D12_SHADER_BYTECODE ps,
         DXGI_FORMAT rtvFormat,
         DXGI_FORMAT dsvFormat,
-        D3D12_CULL_MODE cullMode
+        D3D12_CULL_MODE cullMode,
+        bool frontCounterClockwise = false
     );
 
     void InitialiseGBuffer(
@@ -32,7 +33,8 @@ public:
         DXGI_FORMAT rt2,
         DXGI_FORMAT rt3,
         DXGI_FORMAT dsvFormat,
-        D3D12_CULL_MODE cullMode
+        D3D12_CULL_MODE cullMode,
+        bool frontCounterClockwise = false
     );
 
     void InitialiseDeferredLight(
@@ -49,7 +51,8 @@ public:
         D3D12_SHADER_BYTECODE vs,
         D3D12_SHADER_BYTECODE ps,
         DXGI_FORMAT dsvFormat,
-        D3D12_CULL_MODE cullMode);
+        D3D12_CULL_MODE cullMode,
+        bool frontCounterClockwise = false);
 
     ID3D12PipelineState* Get() const { return m_pso.Get(); }
 

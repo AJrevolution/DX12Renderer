@@ -34,6 +34,10 @@ struct RTInstanceData
     // Index into the DXR material texture table.
     uint32_t materialId = 0;
 
+    // Index into the imported DXR mesh-buffer arrays.
+    // Procedural floor/quad use 0.
+    uint32_t meshBufferId = 0;
+
     // Stable object id for SurfaceId generation.
     uint32_t objectId = 0;
 
@@ -41,9 +45,8 @@ struct RTInstanceData
     // Procedural floor/quad use 0. Imported glTF submeshes use Mesh::Submesh::indexStart.
     uint32_t indexStart = 0;
 
-    uint32_t _pad0[2] = {};
+    uint32_t _pad0 = 0;
 
     DirectX::XMFLOAT4X4 prevObjectToWorld{};
 };
-
 static_assert((sizeof(RTInstanceData) % 16) == 0);

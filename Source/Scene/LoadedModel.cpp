@@ -598,6 +598,14 @@ namespace
         FinaliseBounds(worldBounds);
         return worldBounds;
     }
+
+    bool MatrixReversesWinding(DirectX::FXMMATRIX m)
+    {
+        using namespace DirectX;
+
+        const XMVECTOR det = XMMatrixDeterminant(m);
+        return XMVectorGetX(det) < -1.0e-6f;
+    }
 }
 
 void LoadedModel::Clear()
@@ -989,6 +997,111 @@ bool LoadedModel::LoadGltf(
         return false;
     }
 
+    std::vector<Draw> loadedDraws;
+    Bounds loadedBounds = MakeInvalidBounds();
+
+    const int sceneIndex =
+        (model.defaultScene >= 0 &&
+            model.defaultScene < static_cast<int>(model.scenes.size()))
+        ? model.defaultScene
+        : 0;
+
+    if (sceneIndex < 0 ||
+        sceneIndex >= static_cast<int>(model.scenes.size()))
+    {
+        m_lastError =
+            L"LoadedModel::LoadGltf failed: model has no valid scene.";
+
+        return false;
+    }
+
+    const tinygltf::Scene& scene =
+        model.scenes[sceneIndex];
+
+    std::function<void(int, XMMATRIX)> TraverseNode;
+
+    TraverseNode = [&](int nodeIndex, XMMATRIX parentWorld)
+    {
+        if (nodeIndex < 0 ||
+            nodeIndex >= static_cast<int>(model.nodes.size()))
+        {
+            return;
+        }
+
+        const tinygltf::Node& node =
+            model.nodes[nodeIndex];
+
+        const XMMATRIX local =
+            ReadNodeLocalTransform(node);
+
+        const XMMATRIX world =
+            local * parentWorld;
+
+        if (node.mesh >= 0 &&
+            node.mesh < static_cast<int>(model.meshes.size()))
+        {
+            const tinygltf::Mesh& gltfMesh =
+                model.meshes[node.mesh];
+
+            for (size_t primitiveIndex = 0;
+                primitiveIndex < gltfMesh.primitives.size();
+                ++primitiveIndex)
+            {
+                const uint32_t submeshIndex =
+                    meshPrimitiveToSubmesh[node.mesh][primitiveIndex];
+
+                if (submeshIndex == UINT32_MAX ||
+                    submeshIndex >= submeshes.size())
+                {
+                    continue;
+                }
+
+                const XMMATRIX drawWorld =
+                    world * importTransform;
+
+                Draw draw{};
+                draw.submeshIndex = submeshIndex;
+                draw.materialIndex = submeshes[submeshIndex].materialIndex;
+                draw.reversesWinding = MatrixReversesWinding(drawWorld);
+
+                XMStoreFloat4x4(
+                    &draw.world,
+                    drawWorld);
+
+                loadedDraws.push_back(draw);
+
+                const Bounds worldSubmeshBounds =
+                    TransformBounds(
+                        submeshLocalBounds[submeshIndex],
+                        world * importTransform);
+
+                IncludeBounds(
+                    loadedBounds,
+                    worldSubmeshBounds);
+            }
+        }
+
+        for (int childIndex : node.children)
+        {
+            TraverseNode(childIndex, world);
+        }
+    };
+
+    for (int rootNode : scene.nodes)
+    {
+        TraverseNode(rootNode, XMMatrixIdentity());
+    }
+
+    if (loadedDraws.empty())
+    {
+        m_lastError =
+            L"LoadedModel::LoadGltf failed: scene produced no draw items.";
+
+        return false;
+    }
+
+    FinaliseBounds(loadedBounds);
+
     m_mesh.CreateFromData(
         device,
         cl,
@@ -1355,102 +1468,10 @@ bool LoadedModel::LoadGltf(
             TexturePtr(refs.occlusion),
             TexturePtr(refs.emissive));
     }
+ 
 
-    const int sceneIndex =
-        (model.defaultScene >= 0 &&
-            model.defaultScene < static_cast<int>(model.scenes.size()))
-        ? model.defaultScene
-        : 0;
-
-    if (sceneIndex < 0 ||
-        sceneIndex >= static_cast<int>(model.scenes.size()))
-    {
-        m_lastError =
-            L"LoadedModel::LoadGltf failed: model has no valid scene.";
-
-        return false;
-    }
-
-    const tinygltf::Scene& scene =
-        model.scenes[sceneIndex];
-
-    std::function<void(int, XMMATRIX)> TraverseNode;
-
-    TraverseNode = [&](int nodeIndex, XMMATRIX parentWorld)
-    {
-        if (nodeIndex < 0 ||
-            nodeIndex >= static_cast<int>(model.nodes.size()))
-        {
-            return;
-        }
-
-        const tinygltf::Node& node =
-            model.nodes[nodeIndex];
-
-        const XMMATRIX local =
-            ReadNodeLocalTransform(node);
-
-        const XMMATRIX world =
-            local * parentWorld;
-
-        if (node.mesh >= 0 &&
-            node.mesh < static_cast<int>(model.meshes.size()))
-        {
-            const tinygltf::Mesh& gltfMesh =
-                model.meshes[node.mesh];
-
-            for (size_t primitiveIndex = 0; primitiveIndex < gltfMesh.primitives.size(); ++primitiveIndex)
-            {
-                const uint32_t submeshIndex =
-                    meshPrimitiveToSubmesh[node.mesh][primitiveIndex];
-
-                if (submeshIndex == UINT32_MAX ||
-                    submeshIndex >= submeshes.size())
-                {
-                    continue;
-                }
-
-                Draw draw{};
-                draw.submeshIndex = submeshIndex;
-                draw.materialIndex = submeshes[submeshIndex].materialIndex;
-
-                XMStoreFloat4x4(
-                    &draw.world,
-                    world * importTransform);
-
-                m_draws.push_back(draw);
-
-                const Bounds worldSubmeshBounds =
-                    TransformBounds(
-                        submeshLocalBounds[submeshIndex],
-                        world * importTransform);
-
-                IncludeBounds(
-                    m_bounds,
-                    worldSubmeshBounds);
-            }
-        }
-
-        for (int childIndex : node.children)
-        {
-            TraverseNode(childIndex, world);
-        }
-    };
-
-    for (int rootNode : scene.nodes)
-    {
-        TraverseNode(rootNode, XMMatrixIdentity());
-    }
-
-    if (m_draws.empty())
-    {
-        m_lastError =
-            L"LoadedModel::LoadGltf failed: scene produced no draw items.";
-
-        return false;
-    }
-
-    FinaliseBounds(m_bounds);
+    m_draws = std::move(loadedDraws);
+    m_bounds = loadedBounds;
 
     m_stats.vertexCount =
         static_cast<uint32_t>(vertices.size());

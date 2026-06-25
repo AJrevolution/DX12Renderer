@@ -21,6 +21,8 @@
 #define RT_MESH_QUAD 1
 #define RT_MESH_IMPORTED 2
 
+#define RT_MAX_IMPORTED_MODEL_BUFFERS 16
+
 struct VertexRT
 {
     float3 pos;
@@ -57,12 +59,14 @@ struct RTInstanceData
     uint meshType;
 
     uint materialId;
+    
+    uint meshBufferId;
 
     uint objectId;
 
     uint indexStart;
 
-    uint2 _pad0;
+    uint _pad0;
 
     row_major float4x4 prevObjectToWorld;
 };
@@ -210,18 +214,17 @@ ByteAddressBuffer                   g_FloorIndices : register(t4);
 StructuredBuffer<RTInstanceData>    g_InstanceData : register(t5);
 
 // t6..t325 = material texture table:
-// 64 materials × 4 textures:
+// 64 materials × 5 textures:
 // [baseColor, normal, metallicRoughness, occlusion, emissive]
 Texture2D<float4>                   g_RtMaterialTextures[RT_TEXTURE_COUNT] : register(t6);
-StructuredBuffer<VertexRT>          g_ImportedVerts : register(t330);
-ByteAddressBuffer                   g_ImportedIndices : register(t331);
+StructuredBuffer<VertexRT>          g_ImportedVerts[RT_MAX_IMPORTED_MODEL_BUFFERS] : register(t330);
+ByteAddressBuffer                   g_ImportedIndices[RT_MAX_IMPORTED_MODEL_BUFFERS] : register(t346);
 
-Texture2D<float4>                   g_BRDFLut : register(t340);
-Texture2D<float4>                   g_IBLDiffuse : register(t341);
-Texture2D<float4>                   g_IBLSpecular : register(t342);
-
-StructuredBuffer<RtEnvAliasEntry>   g_EnvAlias : register(t343);
-StructuredBuffer<RtRestirReservoir> g_RestirResolveReservoir : register(t344);
+Texture2D<float4>                   g_BRDFLut : register(t380);
+Texture2D<float4>                   g_IBLDiffuse : register(t381);
+Texture2D<float4>                   g_IBLSpecular : register(t382); 
+StructuredBuffer<RtEnvAliasEntry>   g_EnvAlias : register(t383);
+StructuredBuffer<RtRestirReservoir> g_RestirResolveReservoir : register(t384);
 SamplerState                        g_LinearWrap : register(s0);
 SamplerState                        g_LinearClamp : register(s1);
 
@@ -285,34 +288,35 @@ float2 SelectRtUv(uint texCoord, float2 uv0, float2 uv1)
     return texCoord == 1u ? uv1 : uv0;
 }
 
-VertexRT LoadVertex(uint meshType, uint vertexIndex)
+uint LoadImportedIndex32(
+    RTInstanceData instanceData,
+    uint localIndex)
 {
-    if (meshType == RT_MESH_FLOOR)
+    const uint bufferId =
+        min(instanceData.meshBufferId, RT_MAX_IMPORTED_MODEL_BUFFERS - 1u);
+
+    return g_ImportedIndices[NonUniformResourceIndex(bufferId)].Load(
+        (instanceData.indexStart + localIndex) * 4u);
+}
+
+VertexRT LoadVertex(
+    RTInstanceData instanceData,
+    uint vertexIndex)
+{
+    if (instanceData.meshType == RT_MESH_FLOOR)
     {
         return g_FloorVerts[vertexIndex];
     }
 
-    if (meshType == RT_MESH_QUAD)
+    if (instanceData.meshType == RT_MESH_QUAD)
     {
         return g_QuadVerts[vertexIndex];
     }
 
-    return g_ImportedVerts[vertexIndex];
-}
+    const uint bufferId =
+        min(instanceData.meshBufferId, RT_MAX_IMPORTED_MODEL_BUFFERS - 1u);
 
-uint LoadMeshIndex(uint meshType, uint indexIndex)
-{
-    if (meshType == RT_MESH_FLOOR)
-    {
-        return LoadIndex16(g_FloorIndices, indexIndex);
-    }
-
-    if (meshType == RT_MESH_QUAD)
-    {
-        return LoadIndex16(g_QuadIndices, indexIndex);
-    }
-
-    return LoadIndex32(g_ImportedIndices, indexIndex);
+    return g_ImportedVerts[NonUniformResourceIndex(bufferId)][vertexIndex];
 }
 
 void LoadTriangleVertices(
@@ -322,21 +326,36 @@ void LoadTriangleVertices(
     out VertexRT v1,
     out VertexRT v2)
 {
-    const uint baseIndex =
-        instanceData.indexStart + primitiveIndex * 3u;
+    const uint i0Local = primitiveIndex * 3u + 0u;
+    const uint i1Local = primitiveIndex * 3u + 1u;
+    const uint i2Local = primitiveIndex * 3u + 2u;
 
-    const uint i0 =
-        LoadMeshIndex(instanceData.meshType, baseIndex + 0u);
+    uint i0 = 0u;
+    uint i1 = 0u;
+    uint i2 = 0u;
 
-    const uint i1 =
-        LoadMeshIndex(instanceData.meshType, baseIndex + 1u);
+    if (instanceData.meshType == RT_MESH_FLOOR)
+    {
+        i0 = LoadIndex16(g_FloorIndices, i0Local);
+        i1 = LoadIndex16(g_FloorIndices, i1Local);
+        i2 = LoadIndex16(g_FloorIndices, i2Local);
+    }
+    else if (instanceData.meshType == RT_MESH_QUAD)
+    {
+        i0 = LoadIndex16(g_QuadIndices, i0Local);
+        i1 = LoadIndex16(g_QuadIndices, i1Local);
+        i2 = LoadIndex16(g_QuadIndices, i2Local);
+    }
+    else
+    {
+        i0 = LoadImportedIndex32(instanceData, i0Local);
+        i1 = LoadImportedIndex32(instanceData, i1Local);
+        i2 = LoadImportedIndex32(instanceData, i2Local);
+    }
 
-    const uint i2 =
-        LoadMeshIndex(instanceData.meshType, baseIndex + 2u);
-
-    v0 = LoadVertex(instanceData.meshType, i0);
-    v1 = LoadVertex(instanceData.meshType, i1);
-    v2 = LoadVertex(instanceData.meshType, i2);
+    v0 = LoadVertex(instanceData, i0);
+    v1 = LoadVertex(instanceData, i1);
+    v2 = LoadVertex(instanceData, i2);
 }
 
 struct SurfaceUvsRT
@@ -394,8 +413,8 @@ uint GetRtTextureBaseIndex(uint materialId)
 
 float4 SampleRtTexture(uint materialId, uint slot, float2 uv)
 {
-    uint texIndex = GetRtTextureBaseIndex(materialId) + slot;
-    return g_RtMaterialTextures[texIndex].SampleLevel(g_LinearWrap, uv, 0.0f);
+    const uint texIndex = GetRtTextureBaseIndex(materialId) + slot;
+    return g_RtMaterialTextures[NonUniformResourceIndex(texIndex)].SampleLevel(g_LinearWrap, uv, 0.0f);
 }
 
 float4 SampleBaseColorTex(uint materialId, float2 uv)
@@ -644,11 +663,9 @@ float3 ComputeRtEmissive(RTInstanceData data, float2 uv)
     {
         const uint textureBase = GetRtTextureBaseIndex(data.materialId);
 
-        e *= g_RtMaterialTextures[
-            textureBase + RT_TEXTURE_SLOT_EMISSIVE].SampleLevel(
-                g_LinearWrap,
-                uv,
-                0.0f).rgb;
+        const uint emissiveTexIndex = textureBase + RT_TEXTURE_SLOT_EMISSIVE;
+        
+        e *= g_RtMaterialTextures[NonUniformResourceIndex(emissiveTexIndex)].SampleLevel(g_LinearWrap, uv, 0.0f).rgb;
     }
 
     return e;

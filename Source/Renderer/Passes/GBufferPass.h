@@ -31,11 +31,14 @@ public:
         D3D12_GPU_DESCRIPTOR_HANDLE sceneTableGpu,
         const Material& material,
         const Mesh& mesh,
-        const Mesh::Submesh* submesh = nullptr);
+        const Mesh::Submesh* submesh = nullptr,
+        bool reversesWinding = false);
 
 private:
     bool m_initialized = false;
     RootSignature m_rootSig;
     PipelineState m_pso;
+    PipelineState m_psoReversed;
     PipelineState m_psoNoCull;
+    PipelineState m_psoNoCullReversed;
 };

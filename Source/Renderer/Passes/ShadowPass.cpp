@@ -9,8 +9,10 @@ void ShadowPass::Initialize(ID3D12Device* device, DXGI_FORMAT dsvFormat, const f
     Shader fs = Shader::LoadFromFile(shaderDir / L"Shadow_FS.cso");
 
     m_rootSig.InitializeForwardPBRV2(device);
-    m_pso.InitialiseShadow(device, m_rootSig.Get(), vs.GetBytecode(), fs.GetBytecode(), dsvFormat, D3D12_CULL_MODE_BACK);
-    m_psoNoCull.InitialiseShadow(device, m_rootSig.Get(), vs.GetBytecode(), fs.GetBytecode(), dsvFormat, D3D12_CULL_MODE_NONE);
+    m_pso.InitialiseShadow(device, m_rootSig.Get(), vs.GetBytecode(), fs.GetBytecode(), dsvFormat, D3D12_CULL_MODE_BACK, false);
+    m_psoReversed.InitialiseShadow(device, m_rootSig.Get(), vs.GetBytecode(), fs.GetBytecode(), dsvFormat, D3D12_CULL_MODE_BACK, true);
+    m_psoNoCull.InitialiseShadow(device, m_rootSig.Get(), vs.GetBytecode(), fs.GetBytecode(), dsvFormat, D3D12_CULL_MODE_NONE, false);
+    m_psoNoCullReversed.InitialiseShadow(device, m_rootSig.Get(), vs.GetBytecode(), fs.GetBytecode(), dsvFormat, D3D12_CULL_MODE_NONE, true);
 
     m_initialized = true;
 }
@@ -22,7 +24,8 @@ void ShadowPass::Render(
     D3D12_GPU_VIRTUAL_ADDRESS perDrawCb,
     const Material& material,
     const Mesh& mesh,
-    const Mesh::Submesh* submesh)
+    const Mesh::Submesh* submesh,
+    bool reversesWinding)
 {
     auto* cmd = cl.Get();
 
@@ -44,10 +47,23 @@ void ShadowPass::Render(
 
     const bool doubleSided =
         material.doubleSided != 0u;
-    cmd->SetPipelineState(
-        doubleSided
-        ? m_psoNoCull.Get()
-        : m_pso.Get());
+
+    ID3D12PipelineState* selectedPso = nullptr;
+
+    if (doubleSided)
+    {
+        selectedPso = reversesWinding
+            ? m_psoNoCullReversed.Get()
+            : m_psoNoCull.Get();
+    }
+    else
+    {
+        selectedPso = reversesWinding
+            ? m_psoReversed.Get()
+            : m_pso.Get();
+    }
+
+    cmd->SetPipelineState(selectedPso);
 
     cmd->RSSetViewports(1, &vp);
     cmd->RSSetScissorRects(1, &sc);

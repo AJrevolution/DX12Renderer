@@ -27,15 +27,18 @@ namespace
     static constexpr uint32_t kRtMaxMaterials = 64;
     static constexpr uint32_t kRtTexturesPerMaterial = 5;
 
+    constexpr uint32_t kRtMaxImportedModelBuffers = 16u;
+
     static constexpr uint32_t kRtRegisterFirstSrv = 1;
     static constexpr uint32_t kRtRegisterMaterialTextures = 6;
     static constexpr uint32_t kRtRegisterImportedVerts = 330;
-    static constexpr uint32_t kRtRegisterImportedIndices = 331;
-    static constexpr uint32_t kRtRegisterBrdfLut = 340;
-    static constexpr uint32_t kRtRegisterIblDiffuse = 341;
-    static constexpr uint32_t kRtRegisterIblSpecular = 342;
-    static constexpr uint32_t kRtRegisterEnvAlias = 343;
-    static constexpr uint32_t kRtRegisterRestirResolveReservoir = 344;
+    static constexpr uint32_t kRtRegisterImportedIndices =
+        kRtRegisterImportedVerts + kRtMaxImportedModelBuffers;
+    static constexpr uint32_t kRtRegisterBrdfLut = 380;
+    static constexpr uint32_t kRtRegisterIblDiffuse = 381;
+    static constexpr uint32_t kRtRegisterIblSpecular = 382;
+    static constexpr uint32_t kRtRegisterEnvAlias = 383;
+    static constexpr uint32_t kRtRegisterRestirResolveReservoir = 384;
 
     static constexpr uint32_t kRtMaterialTextureCount =
         kRtMaxMaterials * kRtTexturesPerMaterial;
@@ -47,13 +50,16 @@ namespace
         kRtRegisterRestirResolveReservoir;
 
     // Descriptor range starts at t1.
-    // NumDescriptors = 344 covers t1 through t344 inclusive.
+    // NumDescriptors = 384 covers t1 through t384 inclusive.
     static constexpr uint32_t kRtSrvTableCount =
         kRtHighestSrvRegister - kRtRegisterFirstSrv + 1;
 
     static_assert(kRtLastMaterialTextureRegister == 325);
     static_assert(kRtRegisterImportedVerts > kRtLastMaterialTextureRegister);
-    static_assert(kRtSrvTableCount == 344);
+    static_assert(kRtRegisterImportedVerts == 330);
+    static_assert(kRtRegisterImportedIndices == 346);
+    static_assert(kRtRegisterBrdfLut == 380);
+    static_assert(kRtSrvTableCount == 384);
 }
 
 static std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path)

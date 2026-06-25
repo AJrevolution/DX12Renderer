@@ -21,6 +21,8 @@ public:
         DirectX::XMFLOAT4X4 world{};
         uint32_t submeshIndex = 0;
         uint32_t materialIndex = 0;
+        
+        bool reversesWinding = false;
     };
 
     struct Bounds

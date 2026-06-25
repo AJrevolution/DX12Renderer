@@ -31,18 +31,20 @@ cbuffer PerFrameConstants : register(b0)
     float Time;
     
     uint FrameIndex;
-    uint HasBRDFLut;    // Mapping to C++ hasBRDFLut
-    uint HasIBL;        // Mapping to C++ hasIBL
+    uint HasBRDFLut;
+    uint HasIBL;
     uint _pad0;
 
     float3 LightDir;
     float _pad1;
+
     float3 LightColor;
     float _pad2;
     
     float2 ShadowInvSize;
     uint DebugView;
     uint RtSampleIndex;
+
     uint RtResetId;
     uint RtAccumulate;
     uint RtEnableIndirect;
@@ -78,21 +80,39 @@ float2 DirToLatLongUV(float3 d)
 
 float ComputeShadowFactor(float3 worldPos, float3 worldNormal, float3 lightDir)
 {
-    float4 shadowClip = mul(float4(worldPos, 1.0f), LightViewProj);
+    float4 shadowClip =
+        mul(float4(worldPos, 1.0f), LightViewProj);
 
-    float3 shadowNdc = shadowClip.xyz / shadowClip.w;
+    if (abs(shadowClip.w) < 1e-6f)
+        return 1.0f;
+
+    float3 shadowNdc =
+        shadowClip.xyz / shadowClip.w;
+
     float2 shadowUV = float2(
         shadowNdc.x * 0.5f + 0.5f,
         1.0f - (shadowNdc.y * 0.5f + 0.5f));
 
-    float shadowDepth = shadowNdc.z;
+    float shadowDepth =
+        shadowNdc.z;
 
-    if (shadowUV.x < 0.0f || shadowUV.x > 1.0f || shadowUV.y < 0.0f || shadowUV.y > 1.0f)
+    // Outside the light projection should be lit, not clamped to the edge
+    // of the shadow map.
+    if (shadowUV.x < 0.0f || shadowUV.x > 1.0f ||
+        shadowUV.y < 0.0f || shadowUV.y > 1.0f ||
+        shadowDepth < 0.0f || shadowDepth > 1.0f)
+    {
         return 1.0f;
+    }
 
-    float bias = max(0.0005f, 0.002f * (1.0f - saturate(dot(worldNormal, -lightDir))));
+    float ndotl =
+        saturate(dot(worldNormal, -lightDir));
+
+    float bias =
+        max(0.0005f, 0.002f * (1.0f - ndotl));
 
     float visibility = 0.0f;
+    float tapCount = 0.0f;
 
     [unroll]
     for (int y = -1; y <= 1; ++y)
@@ -100,13 +120,31 @@ float ComputeShadowFactor(float3 worldPos, float3 worldNormal, float3 lightDir)
         [unroll]
         for (int x = -1; x <= 1; ++x)
         {
-            float2 uv = shadowUV + float2(x, y) * ShadowInvSize;
-            float mapDepth = g_ShadowMap.Sample(g_PointClamp, uv).r;
-            visibility += ((shadowDepth - bias) <= mapDepth) ? 1.0f : 0.0f;
+            float2 uv =
+                shadowUV + float2(x, y) * ShadowInvSize;
+
+            // Important: PCF taps outside the map should also be treated as lit.
+            // Otherwise g_PointClamp samples the shadow map edge and creates
+            // rectangular/blocky border artifacts.
+            if (uv.x < 0.0f || uv.x > 1.0f ||
+                uv.y < 0.0f || uv.y > 1.0f)
+            {
+                visibility += 1.0f;
+                tapCount += 1.0f;
+                continue;
+            }
+
+            float mapDepth =
+                g_ShadowMap.Sample(g_PointClamp, uv).r;
+
+            visibility +=
+                ((shadowDepth - bias) <= mapDepth) ? 1.0f : 0.0f;
+
+            tapCount += 1.0f;
         }
     }
 
-    return visibility / 9.0f;
+    return visibility / max(tapCount, 1.0f);
 }
 
 float4 main(PSIn i, bool isFrontFace : SV_IsFrontFace) : SV_Target

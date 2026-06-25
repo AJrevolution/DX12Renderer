@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <filesystem>
+#include <cfloat>
 
 namespace
 {
@@ -129,14 +131,17 @@ namespace
     constexpr uint32_t kRtRegisterInstanceData = 5u;
     constexpr uint32_t kRtRegisterMaterialTextures = 6u;
 
-    constexpr uint32_t kRtRegisterImportedVerts = 330u;
-    constexpr uint32_t kRtRegisterImportedIndices = 331u;
+    constexpr uint32_t kRtMaxImportedModelBuffers = 16u;
 
-    constexpr uint32_t kRtRegisterBrdfLut = 340u;
-    constexpr uint32_t kRtRegisterIblDiffuse = 341u;
-    constexpr uint32_t kRtRegisterIblSpecular = 342u;
-    constexpr uint32_t kRtRegisterEnvAlias = 343u;
-    constexpr uint32_t kRtRegisterRestirResolveReservoir = 344u;
+    constexpr uint32_t kRtRegisterImportedVerts = 330u;
+    constexpr uint32_t kRtRegisterImportedIndices =
+        kRtRegisterImportedVerts + kRtMaxImportedModelBuffers; // 346
+
+    constexpr uint32_t kRtRegisterBrdfLut = 380u;
+    constexpr uint32_t kRtRegisterIblDiffuse = 381u;
+    constexpr uint32_t kRtRegisterIblSpecular = 382u;
+    constexpr uint32_t kRtRegisterEnvAlias = 383u;
+    constexpr uint32_t kRtRegisterRestirResolveReservoir = 384u;
 
     // racetrackentire.gltf currently has its lowest world-space Y around 1.772.
     // Move it down so the imported ground sits around renderer Y=0.
@@ -147,11 +152,14 @@ namespace
     constexpr uint32_t kRtHighestSrvRegister =
         kRtRegisterRestirResolveReservoir;
 
-    // Descriptor table starts at t1, so 344 descriptors covers t1..t344.
+    // Descriptor table starts at t1, so 384 descriptors covers t1..t384.
     constexpr uint32_t kRtSrvTableCount =
         kRtHighestSrvRegister;
 
-    static_assert(kRtSrvTableCount == 344u);
+    static_assert(kRtRegisterImportedVerts == 330u);
+    static_assert(kRtRegisterImportedIndices == 346u);
+    static_assert(kRtRegisterBrdfLut == 380u);
+    static_assert(kRtSrvTableCount == 384u);
     static_assert(
         kRtRegisterMaterialTextures +
         kRtMaxMaterials * kRtTexturesPerMaterial - 1u == 325u);
@@ -187,6 +195,21 @@ namespace
 
         return DirectX::XMVector3Normalize(
             DirectX::XMVector3Cross(forward, up));
+    }
+
+    std::filesystem::path ResolveContentRelativePath(
+        const std::filesystem::path& contentRoot,
+        const std::filesystem::path& path)
+    {
+        if (path.is_absolute())
+            return path;
+
+        return contentRoot / path;
+    }
+
+    uint32_t DefaultObjectIdBaseForModel(uint32_t modelIndex)
+    {
+        return kImportedModelRtObjectIdBase + modelIndex * 10000u;
     }
 
     bool HasDebugViewRequirement(const DebugViewDesc& desc, uint32_t requirement)
@@ -1868,6 +1891,8 @@ void Renderer::RenderFrame(
 
             for (const DrawItem& item : m_draws)
             {
+                if (!item.rasterEnabled || !item.castShadows)
+                    continue;
                 if (!item.mesh || !item.material)
                     continue;
 
@@ -1875,7 +1900,7 @@ void Renderer::RenderFrame(
                 const Mesh::Submesh& submesh =
                     item.mesh->GetSubmesh(item.submeshIndex);
                 
-                m_shadowPass.Render(cl, m_shadowSize, perFrameCb, perDrawCb, *item.material, *item.mesh, &submesh);
+                m_shadowPass.Render(cl, m_shadowSize, perFrameCb, perDrawCb, *item.material, *item.mesh, &submesh, item.reversesWinding);
             }
             CmdEndEvent(cmdList);
         }
@@ -1921,6 +1946,8 @@ void Renderer::RenderFrame(
 
             for (const DrawItem& item : m_draws)
             {
+                if (!item.rasterEnabled)
+                    continue;
                 if (!item.mesh || !item.material)
                     continue;
 
@@ -1936,7 +1963,8 @@ void Renderer::RenderFrame(
                     m_scene.table.gpu,
                     *item.material,
                     *item.mesh,
-                    &submesh);
+                    &submesh,
+                    item.reversesWinding);
             }
             CmdEndEvent(cmdList);
 
@@ -1993,6 +2021,8 @@ void Renderer::RenderFrame(
 
             for (const DrawItem& item : m_draws)
             {
+                if (!item.rasterEnabled)
+                    continue;
                 if (!item.mesh || !item.material)
                     continue;
 
@@ -2008,7 +2038,8 @@ void Renderer::RenderFrame(
                     m_scene.table.gpu,
                     *item.material,
                     *item.mesh,
-                    &submesh);
+                    &submesh,
+                    item.reversesWinding);
             }
             CmdEndEvent(cmdList);
             CmdEndEvent(cmdList);
@@ -2153,19 +2184,74 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
     XMVECTOR lightDir = XMVector3Normalize(XMLoadFloat3(&sun.direction));
     XMVECTOR sceneCenter = XMLoadFloat3(&m_sceneBoundsCenter);
 
+    const XMFLOAT3 c = m_sceneBoundsCenter;
+    const XMFLOAT3 e = m_sceneBoundsExtent;
 
-    XMVECTOR lightPos = sceneCenter - lightDir * 8.0f;
+    const float sceneRadius =
+        std::max(
+            1.0f,
+            XMVectorGetX(XMVector3Length(XMLoadFloat3(&m_sceneBoundsExtent))));
+
+    // Avoid a degenerate LookAt up vector if the sun becomes almost vertical.
+    XMVECTOR lightUp = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+    if (std::abs(XMVectorGetX(XMVector3Dot(lightDir, lightUp))) > 0.95f)
+    {
+        lightUp = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+    }
+
+    const float lightDistance = sceneRadius + 20.0f;
+
+    XMVECTOR lightPos =
+        sceneCenter - lightDir * lightDistance;
 
     XMMATRIX lightView = XMMatrixLookAtLH(
         lightPos,
         sceneCenter,
-        XMVectorSet(0, 1, 0, 0));
+        lightUp);
 
-    XMMATRIX lightProj = XMMatrixOrthographicLH(
-        m_sceneBoundsExtent.x * 2.0f,
-        m_sceneBoundsExtent.y * 2.0f,
-        0.1f,
-        20.0f);
+    XMVECTOR corners[8] =
+    {
+        XMVectorSet(c.x - e.x, c.y - e.y, c.z - e.z, 1.0f),
+        XMVectorSet(c.x + e.x, c.y - e.y, c.z - e.z, 1.0f),
+        XMVectorSet(c.x - e.x, c.y + e.y, c.z - e.z, 1.0f),
+        XMVectorSet(c.x + e.x, c.y + e.y, c.z - e.z, 1.0f),
+        XMVectorSet(c.x - e.x, c.y - e.y, c.z + e.z, 1.0f),
+        XMVectorSet(c.x + e.x, c.y - e.y, c.z + e.z, 1.0f),
+        XMVectorSet(c.x - e.x, c.y + e.y, c.z + e.z, 1.0f),
+        XMVectorSet(c.x + e.x, c.y + e.y, c.z + e.z, 1.0f),
+    };
+
+    float minX = FLT_MAX;
+    float minY = FLT_MAX;
+    float minZ = FLT_MAX;
+    float maxX = -FLT_MAX;
+    float maxY = -FLT_MAX;
+    float maxZ = -FLT_MAX;
+
+    for (XMVECTOR corner : corners)
+    {
+        XMVECTOR p = XMVector4Transform(corner, lightView);
+
+        minX = std::min(minX, XMVectorGetX(p));
+        minY = std::min(minY, XMVectorGetY(p));
+        minZ = std::min(minZ, XMVectorGetZ(p));
+
+        maxX = std::max(maxX, XMVectorGetX(p));
+        maxY = std::max(maxY, XMVectorGetY(p));
+        maxZ = std::max(maxZ, XMVectorGetZ(p));
+    }
+
+    const float xyMargin = 2.0f;
+    const float zMargin = 20.0f;
+
+    XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(
+        minX - xyMargin,
+        maxX + xyMargin,
+        minY - xyMargin,
+        maxY + xyMargin,
+        std::max(0.01f, minZ - zMargin),
+        maxZ + zMargin);
 
     XMMATRIX lightViewProj = lightView * lightProj;
 
@@ -2473,13 +2559,11 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         CreateRtFallbackTextures(device, cl, frameIndex);
     }
 
-    LoadDefaultGltfScene(device, cl, frameIndex);
+    LoadSceneFromManifest(device, cl, frameIndex);
 
-    if (m_dxrAvailable &&
-        m_device5 &&
-        m_importedModel.IsLoaded())
+    if (m_dxrAvailable && m_device5)
     {
-        BuildImportedModelBlas(device, cl);
+        BuildSceneModelBlas(device, cl);
     }
 }
 
@@ -2568,7 +2652,7 @@ void Renderer::CreateOrResizeGBuffers(ID3D12Device* device, uint32_t w, uint32_t
     const float c0[4] = { 0, 0, 0, 0 };
     const float c1[4] = { 0, 0, 0, 0 };
     const float c2[4] = { 0, 0, 0, 0 };
-    const float c3[4] = { 0, 0, 0, 1 };
+    const float c3[4] = { 0, 0, 0, 0 };
 
     // Deferred lighting uses a dedicated deferred input SRV table in space1:
     // t0 = GBuffer0 base color / alpha
@@ -2769,7 +2853,7 @@ void Renderer::BuildDrawList(float time)
         m_draws.push_back(item);
     }
 
-    AppendLoadedModelDraws();
+    AppendSceneModelDraws();
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS Renderer::UploadPerDrawConstants(
@@ -3000,27 +3084,22 @@ void Renderer::BuildTlasForDrawList(
         const DirectX::XMFLOAT4X4& world =
             drawItem->world;
 
-        // Preserve your existing transform packing convention.
-        // Your current code stores a 3x4 DXR instance transform as:
-        //
-        // [ _11 _12 _13 _41 ]
-        // [ _21 _22 _23 _42 ]
-        // [ _31 _32 _33 _43 ]
-        //
-        // Do not change this unless your AccelerationStructure wrapper
-        // explicitly expects the transposed convention.
+        // D3D12_RAYTRACING_INSTANCE_DESC::Transform is a 3x4 object-to-world matrix.
+        // Our XMFLOAT4X4 world matrices use DirectXMath row-vector convention with
+        // translation in _41/_42/_43. Pack the transposed 3x3 basis and translation
+        // into DXR's 3x4 layout.
         inst.transform[0] = world._11;
-        inst.transform[1] = world._12;
-        inst.transform[2] = world._13;
+        inst.transform[1] = world._21;
+        inst.transform[2] = world._31;
         inst.transform[3] = world._41;
 
-        inst.transform[4] = world._21;
+        inst.transform[4] = world._12;
         inst.transform[5] = world._22;
-        inst.transform[6] = world._23;
+        inst.transform[6] = world._32;
         inst.transform[7] = world._42;
 
-        inst.transform[8] = world._31;
-        inst.transform[9] = world._32;
+        inst.transform[8] = world._13;
+        inst.transform[9] = world._23;
         inst.transform[10] = world._33;
         inst.transform[11] = world._43;
 
@@ -3336,6 +3415,11 @@ void Renderer::EnsureRtInstanceData(uint32_t frameIndex)
         data.emissiveTexCoord =
             material ? material->emissiveTexCoord : 0u;
 
+        data.meshBufferId =
+            item.sceneModelRtBufferIndex != UINT32_MAX
+            ? item.sceneModelRtBufferIndex
+            : 0u;
+
         dst[instanceIndex] = data;
     }
 
@@ -3613,49 +3697,70 @@ void Renderer::UpdateRtGeometryTable(
             &m_rtFallbackBlackTex);
     }
 
-    // t330/t331 = imported glTF combined mesh buffers.
-    if (m_importedModel.IsLoaded())
+    for (uint32_t bufferIndex = 0;
+        bufferIndex < kRtMaxImportedModelBuffers;
+        ++bufferIndex)
     {
-        Mesh& importedMesh =
-            m_importedModel.GetMesh();
+        const SceneModelInstance* sceneModel = nullptr;
 
-        CreateStructuredBufferSrv(
-            importedMesh.VertexBufferResource(),
-            kRtRegisterImportedVerts,
-            importedMesh.VertexCount(),
-            importedMesh.VertexStride());
+        for (const SceneModelInstance& candidate : m_sceneModels)
+        {
+            if (candidate.dxrBufferAssigned &&
+                candidate.rtBufferIndex == bufferIndex)
+            {
+                sceneModel = &candidate;
+                break;
+            }
+        }
 
-        CreateRawBufferSrv(
-            importedMesh.IndexBufferResource(),
-            kRtRegisterImportedIndices,
-            importedMesh.IndexBufferByteSize());
+        const uint32_t vertexRegister =
+            kRtRegisterImportedVerts + bufferIndex;
+
+        const uint32_t indexRegister =
+            kRtRegisterImportedIndices + bufferIndex;
+
+        if (sceneModel &&
+            sceneModel->model.IsLoaded())
+        {
+            const Mesh& importedMesh = sceneModel->model.GetMesh();
+
+            CreateStructuredBufferSrv(
+                importedMesh.VertexBufferResource(),
+                vertexRegister,
+                importedMesh.VertexCount(),
+                importedMesh.VertexStride());
+
+            CreateRawBufferSrv(
+                importedMesh.IndexBufferResource(),
+                indexRegister,
+                importedMesh.IndexBufferByteSize());
+        }
+        else
+        {
+            CreateNullStructuredBufferSrv(
+                vertexRegister,
+                sizeof(Mesh::Vertex));
+
+            CreateNullRawBufferSrv(indexRegister);
+        }
     }
-    else
-    {
-        CreateNullStructuredBufferSrv(
-            kRtRegisterImportedVerts,
-            sizeof(Mesh::Vertex));
 
-        CreateNullRawBufferSrv(
-            kRtRegisterImportedIndices);
-    }
-
-    // t280 = BRDF LUT
+    // t380 = BRDF LUT
     CreateTextureSrv(
         m_brdfLutTex.IsValid() ? &m_brdfLutTex : nullptr,
         kRtRegisterBrdfLut);
 
-    // t281 = IBL diffuse
+    // t381 = IBL diffuse
     CreateTextureSrv(
         m_iblDiffuseTex.IsValid() ? &m_iblDiffuseTex : nullptr,
         kRtRegisterIblDiffuse);
 
-    // t282 = IBL specular
+    // t382 = IBL specular
     CreateTextureSrv(
         m_iblSpecularTex.IsValid() ? &m_iblSpecularTex : nullptr,
         kRtRegisterIblSpecular);
 
-    // t283 = environment alias table.
+    // t383 = environment alias table.
     //
     // Write a valid null first, then let the real helper overwrite it if the
     // environment alias resource exists.
@@ -3665,7 +3770,7 @@ void Renderer::UpdateRtGeometryTable(
     WriteRtEnvAliasSrv(
         CpuForRegister(kRtRegisterEnvAlias));
 
-    // t284 = selected ReSTIR reservoir for DXR resolve.
+    // t384 = selected ReSTIR reservoir for DXR resolve.
     const uint32_t pixelCount =
         std::max(1u, m_widthCached * m_heightCached);
 
@@ -10351,254 +10456,6 @@ void Renderer::ConfigureDefaultPointLights()
     }
 }
 
-void Renderer::LoadDefaultGltfScene(
-    ID3D12Device* device,
-    CommandList& cl,
-    uint32_t frameIndex)
-{
-    if (m_importedModelLoadAttempted ||
-        m_importedModel.IsLoaded())
-    {
-        return;
-    }
-
-    m_importedModelLoadAttempted = true;
-
-    const std::filesystem::path contentDir =
-        Paths::ContentDir_DevOnly();
-
-    if (contentDir.empty())
-    {
-        OutputDebugStringW(L"glTF scene skipped: content dir is empty.\n");
-        return;
-    }
-
-    const std::filesystem::path modelPath =
-        contentDir /
-        L"Models" /
-        L"Racetrack" /
-        L"racetrackentire.gltf";
-
-    if (!std::filesystem::exists(modelPath))
-    {
-        OutputDebugStringW(
-            (L"glTF scene not found: " + modelPath.wstring() + L"\n").c_str());
-
-        return;
-    }
-
-    OutputDebugStringW(
-        (L"Loading glTF scene: " + modelPath.wstring() + L"\n").c_str());
-
-    const DirectX::XMMATRIX importTransform =
-        DirectX::XMMatrixTranslation(
-            0.0f,
-            kDefaultImportedModelYOffset,
-            0.0f);
-
-
-    try
-    {
-        if (!m_importedModel.LoadGltf(
-            device,
-            cl,
-            m_assetUpload,
-            m_srvHeap,
-            frameIndex,
-            modelPath,
-            importTransform))
-        {
-            OutputDebugStringW(
-                (L"glTF scene load failed: " +
-                    m_importedModel.LastError() +
-                    L"\n").c_str());
-
-            return;
-        }
-
-        AdoptImportedModelBounds();
-
-        if (!m_importedModelSummaryLogged)
-        {
-            LogImportedModelSummary();
-            m_importedModelSummaryLogged = true;
-        }
-
-        OutputDebugStringW(L"glTF scene loaded successfully.\n");
-    }
-    catch (const std::exception& e)
-    {
-        // Do not call m_importedModel.Clear() here.
-        // The loader may have recorded copy commands referencing partially
-        // created resources. Keeping the object alive avoids releasing those
-        // resources before the command list has finished executing.
-        OutputDebugStringA("glTF scene load threw std::exception: ");
-        OutputDebugStringA(e.what());
-        OutputDebugStringA("\n");
-    }
-    catch (...)
-    {
-        // Same reason: do not Clear() here.
-        OutputDebugStringW(L"glTF scene load threw unknown exception.\n");
-    }
-}
-
-void Renderer::AppendLoadedModelDraws()
-{
-    if (!m_importedModelEnabled ||
-        !m_importedModel.IsLoaded())
-    {
-        return;
-    }
-
-    Mesh& mesh =
-        m_importedModel.GetMesh();
-
-    const std::vector<LoadedModel::Draw>& modelDraws =
-        m_importedModel.Draws();
-
-    for (size_t drawIndex = 0; drawIndex < modelDraws.size(); ++drawIndex)
-    {
-        const LoadedModel::Draw& modelDraw =
-            modelDraws[drawIndex];
-
-        Material* material =
-            m_importedModel.GetMaterial(modelDraw.materialIndex);
-
-        if (!material)
-            continue;
-
-        DrawItem item{};
-        item.mesh = &mesh;
-        item.material = material;
-        item.world = modelDraw.world;
-        item.submeshIndex = modelDraw.submeshIndex;
-        item.rtObjectId =
-            kImportedModelRtObjectIdBase +
-            static_cast<uint32_t>(drawIndex);
-
-        m_draws.push_back(item);
-    }
-}
-
-void Renderer::BuildImportedModelBlas(
-    ID3D12Device* device,
-    CommandList& cl)
-{
-    if (!device ||
-        !m_device5 ||
-        m_importedModelBlasBuilt ||
-        !m_importedModel.IsLoaded())
-    {
-        return;
-    }
-
-    auto cmd4 =
-        GetCommandList4(cl);
-
-    if (!cmd4)
-        return;
-
-    Mesh& mesh =
-        m_importedModel.GetMesh();
-
-    const uint32_t submeshCount =
-        mesh.SubmeshCount();
-
-    if (submeshCount == 0 ||
-        !mesh.VertexBufferResource() ||
-        !mesh.IndexBufferResource())
-    {
-        return;
-    }
-
-    if (mesh.IndexFormat() != DXGI_FORMAT_R32_UINT)
-    {
-        OutputDebugStringW(
-            L"Imported glTF DXR BLAS skipped: expected R32 index buffer.\n");
-
-        return;
-    }
-
-    cl.Transition(
-        mesh.VertexBufferResource(),
-        D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-    cl.Transition(
-        mesh.IndexBufferResource(),
-        D3D12_RESOURCE_STATE_INDEX_BUFFER |
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-    cl.FlushBarriers();
-
-    m_importedModelBlas.clear();
-    m_importedModelBlas.resize(submeshCount);
-
-    for (uint32_t submeshIndex = 0;
-        submeshIndex < submeshCount;
-        ++submeshIndex)
-    {
-        const Mesh::Submesh& submesh =
-            mesh.GetSubmesh(submeshIndex);
-
-        const Material* material =
-            m_importedModel.GetMaterial(submesh.materialIndex);
-
-        const bool requiresAnyHit =
-            material &&
-            material->alphaMode == MaterialAlphaMode::Mask;
-
-        if (submesh.indexCount == 0)
-            continue;
-
-        AccelerationStructure::GeometryDesc geom{};
-        geom.vertexBuffer =
-            mesh.VertexBufferResource()->GetGPUVirtualAddress();
-        geom.vertexCount =
-            mesh.VertexCount();
-        geom.vertexStride =
-            mesh.VertexStride();
-        geom.vertexFormat =
-            DXGI_FORMAT_R32G32B32_FLOAT;
-
-        geom.opaque = !requiresAnyHit;
-
-        geom.indexBuffer =
-            mesh.IndexBufferResource()->GetGPUVirtualAddress();
-        geom.indexCount =
-            submesh.indexCount;
-        geom.indexFormat =
-            mesh.IndexFormat();
-        geom.indexBufferOffsetBytes =
-            static_cast<uint64_t>(submesh.indexStart) *
-            sizeof(uint32_t);
-
-        geom.opaque = true;
-
-        std::wstring blasName =
-            L"BLAS Imported glTF Submesh " +
-            std::to_wstring(submeshIndex);
-
-        m_importedModelBlas[submeshIndex].BuildBottomLevel(
-            m_device5.Get(),
-            cmd4.Get(),
-            geom,
-            blasName.c_str());
-    }
-
-    m_importedModelBlasBuilt = true;
-
-    OutputDebugStringW(L"Imported glTF BLAS built for DXR.\n");
-}
-
-bool Renderer::IsImportedModelMesh(const Mesh* mesh) const
-{
-    return
-        m_importedModel.IsLoaded() &&
-        mesh == &m_importedModel.GetMesh();
-}
-
 uint32_t Renderer::GetRtMeshTypeForDrawItem(
     const DrawItem& item) const
 {
@@ -10608,10 +10465,52 @@ uint32_t Renderer::GetRtMeshTypeForDrawItem(
     if (item.mesh == &m_quad)
         return kRtMeshTypeQuad;
 
-    if (IsImportedModelMesh(item.mesh))
+    if (IsSceneModelMesh(item.mesh))
         return kRtMeshTypeImported;
 
     return UINT32_MAX;
+}
+
+void Renderer::UpdateRtSceneStats()
+{
+    RtSceneStats stats{};
+
+    stats.drawCount =
+        static_cast<uint32_t>(m_rtDrawItems.size());
+
+    stats.materialCount =
+        static_cast<uint32_t>(
+            std::min<size_t>(
+                m_rtMaterialTable.size(),
+                kRtMaxMaterials));
+
+    stats.srvTableCount =
+        kRtSrvTableCount;
+
+    stats.tlasInstanceCount =
+        static_cast<uint32_t>(m_rtDrawItems.size());
+
+    for (const DrawItem* item : m_rtDrawItems)
+    {
+        if (!item)
+            continue;
+
+        if (IsSceneModelMesh(item->mesh))
+        {
+            ++stats.importedDrawCount;
+        }
+    }
+
+    for (const SceneModelInstance& sceneModel : m_sceneModels)
+    {
+        if (sceneModel.blasBuilt)
+        {
+            stats.importedBlasCount +=
+                static_cast<uint32_t>(sceneModel.blas.size());
+        }
+    }
+
+    m_rtSceneStats = stats;
 }
 
 uint32_t Renderer::GetRtIndexStartForDrawItem(
@@ -10620,10 +10519,13 @@ uint32_t Renderer::GetRtIndexStartForDrawItem(
     if (!item.mesh)
         return 0u;
 
-    if (!IsImportedModelMesh(item.mesh))
+    if (!IsSceneModelMesh(item.mesh))
         return 0u;
 
-    return item.mesh->GetSubmesh(item.submeshIndex).indexStart;
+    const Mesh::Submesh& submesh =
+        item.mesh->GetSubmesh(item.submeshIndex);
+
+    return submesh.indexStart;
 }
 
 const AccelerationStructure* Renderer::GetBlasForDrawItem(
@@ -10635,16 +10537,8 @@ const AccelerationStructure* Renderer::GetBlasForDrawItem(
     if (item.mesh == &m_quad)
         return &m_blasQuad;
 
-    if (IsImportedModelMesh(item.mesh))
-    {
-        if (!m_importedModelBlasBuilt)
-            return nullptr;
-
-        if (item.submeshIndex >= m_importedModelBlas.size())
-            return nullptr;
-
-        return &m_importedModelBlas[item.submeshIndex];
-    }
+    if (IsSceneModelMesh(item.mesh))
+        return GetSceneModelBlasForDrawItem(item);
 
     return nullptr;
 }
@@ -10656,6 +10550,9 @@ void Renderer::BuildRtDrawItems()
     for (const DrawItem& item : m_draws)
     {
         if (!item.mesh || !item.material)
+            continue;
+
+        if (!item.dxrEnabled)
             continue;
 
         if (GetRtMeshTypeForDrawItem(item) == UINT32_MAX)
@@ -10719,114 +10616,6 @@ uint32_t Renderer::ResolveRtMaterialId(
         return 0u;
 
     return it->second;
-}
-
-void Renderer::AdoptImportedModelBounds()
-{
-    if (!m_importedModel.IsLoaded() ||
-        !m_importedModel.HasBounds())
-    {
-        return;
-    }
-
-    const LoadedModel::Bounds& importedBounds =
-        m_importedModel.GetBounds();
-
-    DirectX::XMFLOAT3 currentMin =
-        SubFloat3(m_sceneBoundsCenter, m_sceneBoundsExtent);
-
-    DirectX::XMFLOAT3 currentMax =
-        AddFloat3(m_sceneBoundsCenter, m_sceneBoundsExtent);
-
-    const DirectX::XMFLOAT3 mergedMin =
-        MinFloat3(currentMin, importedBounds.min);
-
-    const DirectX::XMFLOAT3 mergedMax =
-        MaxFloat3(currentMax, importedBounds.max);
-
-    m_sceneBoundsCenter =
-        MulFloat3(
-            AddFloat3(mergedMin, mergedMax),
-            0.5f);
-
-    m_sceneBoundsExtent =
-        MulFloat3(
-            SubFloat3(mergedMax, mergedMin),
-            0.5f);
-
-    OutputDebugStringW(
-        (L"Scene bounds updated from imported glTF. Center=(" +
-            std::to_wstring(m_sceneBoundsCenter.x) + L", " +
-            std::to_wstring(m_sceneBoundsCenter.y) + L", " +
-            std::to_wstring(m_sceneBoundsCenter.z) + L") Extent=(" +
-            std::to_wstring(m_sceneBoundsExtent.x) + L", " +
-            std::to_wstring(m_sceneBoundsExtent.y) + L", " +
-            std::to_wstring(m_sceneBoundsExtent.z) + L")\n").c_str());
-}
-
-void Renderer::LogImportedModelSummary() const
-{
-    if (!m_importedModel.IsLoaded())
-        return;
-
-    const LoadedModel::Stats& stats =
-        m_importedModel.GetStats();
-
-    std::wstring message =
-        L"Imported glTF summary: vertices=" +
-        std::to_wstring(stats.vertexCount) +
-        L", indices=" +
-        std::to_wstring(stats.indexCount) +
-        L", triangles=" +
-        std::to_wstring(stats.triangleCount) +
-        L", submeshes=" +
-        std::to_wstring(stats.submeshCount) +
-        L", draws=" +
-        std::to_wstring(stats.drawCount) +
-        L", materials=" +
-        std::to_wstring(stats.materialCount) +
-        L", textures=" +
-        std::to_wstring(stats.textureCount) +
-        L"\n";
-
-    OutputDebugStringW(message.c_str());
-}
-
-void Renderer::UpdateRtSceneStats()
-{
-    RtSceneStats stats{};
-    stats.drawCount =
-        static_cast<uint32_t>(m_rtDrawItems.size());
-
-    stats.materialCount =
-        static_cast<uint32_t>(
-            std::min<size_t>(
-                m_rtMaterialTable.size(),
-                kRtMaxMaterials));
-
-    stats.importedBlasCount =
-        m_importedModelBlasBuilt
-        ? static_cast<uint32_t>(m_importedModelBlas.size())
-        : 0u;
-
-    stats.srvTableCount =
-        kRtSrvTableCount;
-
-    stats.tlasInstanceCount =
-        static_cast<uint32_t>(m_rtDrawItems.size());
-
-    for (const DrawItem* item : m_rtDrawItems)
-    {
-        if (!item)
-            continue;
-
-        if (IsImportedModelMesh(item->mesh))
-        {
-            ++stats.importedDrawCount;
-        }
-    }
-
-    m_rtSceneStats = stats;
 }
 
 void Renderer::LogRtSceneStatsIfChanged()
@@ -10901,3 +10690,596 @@ bool Renderer::ValidateRtSceneContract() const
 
     return true;
 }
+
+void Renderer::LoadSceneFromManifest(
+    ID3D12Device* device,
+    CommandList& cl,
+    uint32_t frameIndex)
+{
+    m_sceneModels.clear();
+    m_sceneManifest = {};
+    m_sceneManifestLoaded = false;
+    m_sceneModelSummaryLogged = false;
+
+    const std::filesystem::path content =
+        Paths::ContentDir_DevOnly();
+
+    if (content.empty())
+    {
+        OutputDebugStringW(
+            L"Renderer::LoadSceneFromManifest: ContentDir not found; using procedural-only scene.\n");
+
+        ConfigureDefaultPointLights();
+        return;
+    }
+
+    const std::filesystem::path manifestPath =
+        content / L"Scenes" / L"default_scene.json";
+
+    if (!std::filesystem::exists(manifestPath))
+    {
+        OutputDebugStringW(
+            L"default_scene.json not found; loading fallback racetrack scene.\n");
+
+        LoadFallbackImportedScene(device, cl, frameIndex);
+        return;
+    }
+
+    if (!m_sceneManifest.LoadFromFile(manifestPath))
+    {
+        OutputDebugStringW(
+            (L"Scene manifest load failed: " +
+                m_sceneManifest.lastError +
+                L"\nLoading fallback racetrack scene.\n").c_str());
+
+        LoadFallbackImportedScene(device, cl, frameIndex);
+        return;
+    }
+
+    ApplyManifestLights();
+
+    uint32_t loadedCount = 0;
+
+    m_sceneModels.reserve(m_sceneManifest.models.size());
+
+    for (uint32_t modelIndex = 0;
+        modelIndex < static_cast<uint32_t>(m_sceneManifest.models.size());
+        ++modelIndex)
+    {
+        const SceneModelDesc& desc =
+            m_sceneManifest.models[modelIndex];
+
+        if (!desc.enabled)
+            continue;
+
+        SceneModelInstance& instance =
+            m_sceneModels.emplace_back();
+
+        instance.desc = desc;
+
+        instance.resolvedObjectIdBase =
+            desc.objectIdBase != 0u
+            ? desc.objectIdBase
+            : DefaultObjectIdBaseForModel(modelIndex);
+
+        const DirectX::XMMATRIX importTransform =
+            desc.BuildTransformMatrix();
+
+        const std::filesystem::path modelPath =
+            ResolveContentRelativePath(content, desc.path);
+
+        if (!instance.model.LoadGltf(
+            device,
+            cl,
+            m_assetUpload,
+            m_srvHeap,
+            frameIndex,
+            modelPath,
+            importTransform))
+        {
+            OutputDebugStringW(
+                (L"Scene model load failed: " +
+                    modelPath.wstring() +
+                    L" : " +
+                    instance.model.LastError() +
+                    L"\n").c_str());
+
+            // Do not erase/pop here if LoadGltf may have recorded GPU upload work.
+            // Leave it inert; AppendSceneModelDraws skips !IsLoaded().
+            instance.desc.enabled = false;
+            instance.desc.rasterEnabled = false;
+            instance.desc.dxrEnabled = false;
+            instance.desc.castShadows = false;
+
+            continue;
+        }
+
+        ++loadedCount;
+    }
+
+    AssignSceneModelRtBufferIndices();
+    AdoptSceneModelBounds();
+
+    if (!m_sceneModelSummaryLogged)
+    {
+        LogSceneModelSummary();
+        m_sceneModelSummaryLogged = true;
+    }
+
+    m_sceneManifestLoaded = true;
+
+    OutputDebugStringW(
+        (L"Scene manifest loaded. Models=" +
+            std::to_wstring(loadedCount) +
+            L"\n").c_str());
+}
+
+void Renderer::LoadFallbackImportedScene(
+    ID3D12Device* device,
+    CommandList& cl,
+    uint32_t frameIndex)
+{
+    ConfigureDefaultPointLights();
+
+    const std::filesystem::path content =
+        Paths::ContentDir_DevOnly();
+
+    if (content.empty())
+        return;
+
+    SceneModelDesc desc{};
+    desc.name = "fallback_racetrack";
+    desc.path = std::filesystem::path(L"Models/Racetrack/racetrackentire.gltf");
+    desc.enabled = true;
+    desc.rasterEnabled = true;
+    desc.dxrEnabled = true;
+    desc.castShadows = true;
+    desc.translation = { 0.0f, kDefaultImportedModelYOffset, 0.0f };
+    desc.objectIdBase = kImportedModelRtObjectIdBase;
+
+    m_sceneModels.reserve(1);
+
+    SceneModelInstance& instance =
+        m_sceneModels.emplace_back();
+    instance.desc = desc;
+    instance.resolvedObjectIdBase = desc.objectIdBase;
+
+    const DirectX::XMMATRIX importTransform =
+        desc.BuildTransformMatrix();
+
+    const std::filesystem::path modelPath =
+        ResolveContentRelativePath(content, desc.path);
+
+    if (!instance.model.LoadGltf(
+        device,
+        cl,
+        m_assetUpload,
+        m_srvHeap,
+        frameIndex,
+        modelPath,
+        importTransform))
+    {
+        OutputDebugStringW(
+            (L"Fallback glTF scene load failed: " +
+                instance.model.LastError() +
+                L"\n").c_str());
+
+        instance.desc.enabled = false;
+        instance.desc.rasterEnabled = false;
+        instance.desc.dxrEnabled = false;
+        instance.desc.castShadows = false;
+        return;
+    }
+
+    AssignSceneModelRtBufferIndices();
+    AdoptSceneModelBounds();
+    LogSceneModelSummary();
+}
+
+void Renderer::ApplyManifestLights()
+{
+    if (m_sceneManifest.hasSun)
+    {
+        m_sceneData.sun.direction =
+            m_sceneManifest.sun.direction;
+
+        m_sceneData.sun.color =
+            m_sceneManifest.sun.color;
+
+        m_sceneData.sun.intensity =
+            m_sceneManifest.sun.intensity;
+    }
+
+    if (!m_sceneManifest.pointLights.empty())
+    {
+        m_sceneData.pointLightCount = 0;
+
+        for (const ScenePointLightDesc& src : m_sceneManifest.pointLights)
+        {
+            if (!src.enabled)
+                continue;
+
+            if (m_sceneData.pointLightCount >= kMaxPointLights)
+            {
+                OutputDebugStringW(
+                    L"Scene manifest has more point lights than kMaxPointLights; extra lights ignored.\n");
+
+                break;
+            }
+
+            PointLight& dst =
+                m_sceneData.pointLights[m_sceneData.pointLightCount++];
+
+            dst.position = src.position;
+            dst.range = std::max(0.001f, src.range);
+
+            dst.color = src.color;
+            dst.intensity = std::max(0.0f, src.intensity);
+        }
+
+        for (uint32_t i = m_sceneData.pointLightCount;
+            i < kMaxPointLights;
+            ++i)
+        {
+            m_sceneData.pointLights[i] = {};
+        }
+    }
+    else
+    {
+        ConfigureDefaultPointLights();
+    }
+}
+
+void Renderer::AssignSceneModelRtBufferIndices()
+{
+    uint32_t nextRtBufferIndex = 0;
+
+    for (SceneModelInstance& model : m_sceneModels)
+    {
+        model.dxrBufferAssigned = false;
+        model.rtBufferIndex = UINT32_MAX;
+
+        if (!model.desc.enabled ||
+            !model.desc.dxrEnabled ||
+            !model.model.IsLoaded())
+        {
+            continue;
+        }
+
+        if (nextRtBufferIndex >= kRtMaxImportedModelBuffers)
+        {
+            OutputDebugStringW(
+                (L"Scene model '" +
+                    std::wstring(model.desc.name.begin(), model.desc.name.end()) +
+                    L"' exceeds kRtMaxImportedModelBuffers; it will be raster-only this phase.\n").c_str());
+
+            model.desc.dxrEnabled = false;
+            continue;
+        }
+
+        model.rtBufferIndex = nextRtBufferIndex++;
+        model.dxrBufferAssigned = true;
+    }
+}
+
+void Renderer::AppendSceneModelDraws()
+{
+    for (uint32_t modelIndex = 0;
+        modelIndex < static_cast<uint32_t>(m_sceneModels.size());
+        ++modelIndex)
+    {
+        SceneModelInstance& sceneModel =
+            m_sceneModels[modelIndex];
+
+        if (!sceneModel.desc.enabled ||
+            !sceneModel.model.IsLoaded())
+        {
+            continue;
+        }
+
+        Mesh& mesh =
+            sceneModel.model.GetMesh();
+
+        const std::vector<LoadedModel::Draw>& draws =
+            sceneModel.model.Draws();
+
+
+        for (uint32_t drawIndex = 0;
+            drawIndex < static_cast<uint32_t>(draws.size());
+            ++drawIndex)
+        {
+            const LoadedModel::Draw& src =
+                draws[drawIndex];
+
+            Material* material =
+                sceneModel.model.GetMaterial(src.materialIndex);
+
+            if (!material)
+                continue;
+
+            DrawItem item{};
+            item.mesh = &mesh;
+            item.material = material;
+            item.world = src.world;
+            item.submeshIndex = src.submeshIndex;
+            item.reversesWinding = src.reversesWinding;
+
+            item.sceneModelIndex = modelIndex;
+            item.sceneModelRtBufferIndex = sceneModel.rtBufferIndex;
+
+            item.rasterEnabled = sceneModel.desc.rasterEnabled;
+            item.dxrEnabled =
+                sceneModel.desc.dxrEnabled &&
+                sceneModel.dxrBufferAssigned;
+
+            item.castShadows = sceneModel.desc.castShadows;
+
+            item.rtObjectId =
+                sceneModel.resolvedObjectIdBase + drawIndex + 1u;
+
+            m_draws.push_back(item);
+        }
+    }
+}
+
+void Renderer::BuildSceneModelBlas(
+    ID3D12Device* device,
+    CommandList& cl)
+{
+    if (!device ||
+        !m_device5)
+    {
+        return;
+    }
+
+    auto cmd4 =
+        GetCommandList4(cl);
+
+    if (!cmd4)
+        return;
+
+    for (SceneModelInstance& sceneModel : m_sceneModels)
+    {
+        sceneModel.blas.clear();
+        sceneModel.blasBuilt = false;
+
+        if (!sceneModel.desc.enabled ||
+            !sceneModel.desc.dxrEnabled ||
+            !sceneModel.dxrBufferAssigned ||
+            !sceneModel.model.IsLoaded())
+        {
+            continue;
+        }
+
+        Mesh& mesh =
+            sceneModel.model.GetMesh();
+
+        const uint32_t submeshCount =
+            mesh.SubmeshCount();
+
+        if (submeshCount == 0 ||
+            !mesh.VertexBufferResource() ||
+            !mesh.IndexBufferResource())
+        {
+            continue;
+        }
+
+        if (mesh.IndexFormat() != DXGI_FORMAT_R32_UINT)
+        {
+            OutputDebugStringW(
+                L"Scene model DXR BLAS skipped: expected R32 index buffer.\n");
+
+            continue;
+        }
+
+        cl.Transition(
+            mesh.VertexBufferResource(),
+            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        cl.Transition(
+            mesh.IndexBufferResource(),
+            D3D12_RESOURCE_STATE_INDEX_BUFFER |
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        cl.FlushBarriers();
+
+        sceneModel.blas.resize(submeshCount);
+
+        for (uint32_t submeshIndex = 0;
+            submeshIndex < submeshCount;
+            ++submeshIndex)
+        {
+            const Mesh::Submesh& submesh =
+                mesh.GetSubmesh(submeshIndex);
+
+            if (submesh.indexCount == 0)
+                continue;
+
+            const Material* material =
+                sceneModel.model.GetMaterial(submesh.materialIndex);
+
+            const bool requiresAnyHit =
+                material &&
+                material->alphaMode == MaterialAlphaMode::Mask;
+
+            AccelerationStructure::GeometryDesc geom{};
+            geom.vertexBuffer =
+                mesh.VertexBufferResource()->GetGPUVirtualAddress();
+            geom.vertexCount =
+                mesh.VertexCount();
+            geom.vertexStride =
+                mesh.VertexStride();
+            geom.vertexFormat =
+                DXGI_FORMAT_R32G32B32_FLOAT;
+
+            geom.indexBuffer =
+                mesh.IndexBufferResource()->GetGPUVirtualAddress();
+            geom.indexBufferOffsetBytes =
+                static_cast<uint64_t>(submesh.indexStart) *
+                sizeof(uint32_t);
+            geom.indexCount =
+                submesh.indexCount;
+            geom.indexFormat =
+                mesh.IndexFormat();
+
+            geom.opaque = !requiresAnyHit;
+
+            const std::wstring blasName =
+                L"BLAS SceneModel " +
+                std::wstring(
+                    sceneModel.desc.name.begin(),
+                    sceneModel.desc.name.end()) +
+                L" Submesh " +
+                std::to_wstring(submeshIndex);
+
+            sceneModel.blas[submeshIndex].BuildBottomLevel(
+                m_device5.Get(),
+                cmd4.Get(),
+                geom,
+                blasName.c_str());
+        }
+
+        sceneModel.blasBuilt = true;
+    }
+}
+
+bool Renderer::IsSceneModelMesh(const Mesh* mesh) const
+{
+    if (!mesh)
+        return false;
+
+    for (const SceneModelInstance& sceneModel : m_sceneModels)
+    {
+        if (sceneModel.model.IsLoaded() &&
+            &sceneModel.model.GetMesh() == mesh)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+const AccelerationStructure* Renderer::GetSceneModelBlasForDrawItem(
+    const DrawItem& item) const
+{
+    if (item.sceneModelIndex >= m_sceneModels.size())
+        return nullptr;
+
+    const SceneModelInstance& sceneModel =
+        m_sceneModels[item.sceneModelIndex];
+
+    if (!sceneModel.blasBuilt ||
+        item.submeshIndex >= sceneModel.blas.size())
+    {
+        return nullptr;
+    }
+
+    return &sceneModel.blas[item.submeshIndex];
+}
+
+void Renderer::AdoptSceneModelBounds()
+{
+    // Preserve procedural scene fallback bounds first.
+    DirectX::XMFLOAT3 mergedMin =
+        SubFloat3(m_sceneBoundsCenter, m_sceneBoundsExtent);
+
+    DirectX::XMFLOAT3 mergedMax =
+        AddFloat3(m_sceneBoundsCenter, m_sceneBoundsExtent);
+
+    bool hasAnyModelBounds = false;
+
+    for (const SceneModelInstance& sceneModel : m_sceneModels)
+    {
+        if (!sceneModel.model.IsLoaded() ||
+            !sceneModel.model.HasBounds())
+        {
+            continue;
+        }
+
+        const LoadedModel::Bounds& b =
+            sceneModel.model.GetBounds();
+
+        mergedMin = MinFloat3(mergedMin, b.min);
+        mergedMax = MaxFloat3(mergedMax, b.max);
+        hasAnyModelBounds = true;
+    }
+
+    if (!hasAnyModelBounds)
+        return;
+
+    m_sceneBoundsCenter =
+        MulFloat3(
+            AddFloat3(mergedMin, mergedMax),
+            0.5f);
+
+    m_sceneBoundsExtent =
+        MulFloat3(
+            SubFloat3(mergedMax, mergedMin),
+            0.5f);
+
+    OutputDebugStringW(
+        (L"Scene bounds updated from scene models. Center=(" +
+            std::to_wstring(m_sceneBoundsCenter.x) + L", " +
+            std::to_wstring(m_sceneBoundsCenter.y) + L", " +
+            std::to_wstring(m_sceneBoundsCenter.z) + L") Extent=(" +
+            std::to_wstring(m_sceneBoundsExtent.x) + L", " +
+            std::to_wstring(m_sceneBoundsExtent.y) + L", " +
+            std::to_wstring(m_sceneBoundsExtent.z) + L")\n").c_str());
+}
+
+void Renderer::LogSceneModelSummary() const
+{
+    OutputDebugStringW(
+        (L"Scene model summary: modelCount=" +
+            std::to_wstring(m_sceneModels.size()) +
+            L"\n").c_str());
+
+    for (uint32_t i = 0;
+        i < static_cast<uint32_t>(m_sceneModels.size());
+        ++i)
+    {
+        const SceneModelInstance& sceneModel =
+            m_sceneModels[i];
+
+        if (!sceneModel.model.IsLoaded())
+            continue;
+
+        const LoadedModel::Stats& stats =
+            sceneModel.model.GetStats();
+
+        std::wstring name =
+            std::wstring(
+                sceneModel.desc.name.begin(),
+                sceneModel.desc.name.end());
+
+        OutputDebugStringW(
+            (L"  [" +
+                std::to_wstring(i) +
+                L"] " +
+                name +
+                L": vertices=" +
+                std::to_wstring(stats.vertexCount) +
+                L", indices=" +
+                std::to_wstring(stats.indexCount) +
+                L", triangles=" +
+                std::to_wstring(stats.triangleCount) +
+                L", submeshes=" +
+                std::to_wstring(stats.submeshCount) +
+                L", draws=" +
+                std::to_wstring(stats.drawCount) +
+                L", materials=" +
+                std::to_wstring(stats.materialCount) +
+                L", textures=" +
+                std::to_wstring(stats.textureCount) +
+                L", dxrBuffer=" +
+                (sceneModel.dxrBufferAssigned
+                    ? std::to_wstring(sceneModel.rtBufferIndex)
+                    : L"none") +
+                L"\n").c_str());
+    }
+}
+
+
+

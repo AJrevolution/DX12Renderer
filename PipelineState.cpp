@@ -53,7 +53,8 @@ void PipelineState::InitialiseForwardPBR(
     D3D12_SHADER_BYTECODE ps,
     DXGI_FORMAT rtvFormat,
     DXGI_FORMAT dsvFormat,
-    D3D12_CULL_MODE cullMode)
+    D3D12_CULL_MODE cullMode,
+    bool frontCounterClockwise)
 {
     D3D12_INPUT_ELEMENT_DESC layout[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, offsetof(Mesh::Vertex, px), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -71,6 +72,8 @@ void PipelineState::InitialiseForwardPBR(
     desc.PS = ps;
     desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     desc.RasterizerState.CullMode = cullMode;
+    desc.RasterizerState.FrontCounterClockwise =
+        frontCounterClockwise ? TRUE : FALSE;
     desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
 
     // Depth Stencil Setup
@@ -98,7 +101,8 @@ void PipelineState::InitialiseGBuffer(
     DXGI_FORMAT rt2,
     DXGI_FORMAT rt3,
     DXGI_FORMAT dsvFormat,
-    D3D12_CULL_MODE cullMode)
+    D3D12_CULL_MODE cullMode,
+    bool frontCounterClockwise)
 {
     D3D12_INPUT_ELEMENT_DESC layout[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, offsetof(Mesh::Vertex, px), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -117,6 +121,8 @@ void PipelineState::InitialiseGBuffer(
     desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     desc.RasterizerState.CullMode = cullMode;
+    desc.RasterizerState.FrontCounterClockwise =
+        frontCounterClockwise ? TRUE : FALSE;
     desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     desc.DepthStencilState.DepthEnable = TRUE;
     desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
@@ -171,7 +177,8 @@ void PipelineState::InitialiseShadow(
     D3D12_SHADER_BYTECODE vs,
     D3D12_SHADER_BYTECODE ps,
     DXGI_FORMAT dsvFormat,
-    D3D12_CULL_MODE cullMode)
+    D3D12_CULL_MODE cullMode,
+    bool frontCounterClockwise)
 {
     D3D12_INPUT_ELEMENT_DESC layout[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, offsetof(Mesh::Vertex, px), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -188,11 +195,14 @@ void PipelineState::InitialiseShadow(
     desc.VS = vs;
     desc.PS = ps;
     desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-    desc.RasterizerState.DepthBias = 1000;
-    desc.RasterizerState.SlopeScaledDepthBias = 1.0f;
+    desc.RasterizerState.DepthBias = 4000;
+    desc.RasterizerState.SlopeScaledDepthBias = 3.0f;
     desc.RasterizerState.DepthBiasClamp = 0.0f;
     desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     desc.RasterizerState.CullMode = cullMode;
+    desc.RasterizerState.FrontCounterClockwise =
+        frontCounterClockwise ? TRUE : FALSE;
+
     desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     desc.DepthStencilState.DepthEnable = TRUE;
     desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;

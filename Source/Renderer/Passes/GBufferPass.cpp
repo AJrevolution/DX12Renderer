@@ -15,8 +15,10 @@ void GBufferPass::Initialize(
     Shader ps = Shader::LoadFromFile(shaderDir / L"GBuffer_PS.cso");
 
     m_rootSig.InitializeForwardPBRV2(device);
-    m_pso.InitialiseGBuffer(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rt0, rt1, rt2, rt3, dsv, D3D12_CULL_MODE_BACK);
-    m_psoNoCull.InitialiseGBuffer(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rt0, rt1, rt2, rt3, dsv, D3D12_CULL_MODE_NONE);
+    m_pso.InitialiseGBuffer(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rt0, rt1, rt2, rt3, dsv, D3D12_CULL_MODE_BACK, false);
+    m_psoReversed.InitialiseGBuffer(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rt0, rt1, rt2, rt3, dsv, D3D12_CULL_MODE_BACK, true);
+    m_psoNoCull.InitialiseGBuffer(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rt0, rt1, rt2, rt3, dsv, D3D12_CULL_MODE_NONE, false);
+    m_psoNoCullReversed.InitialiseGBuffer(device, m_rootSig.Get(), vs.GetBytecode(), ps.GetBytecode(), rt0, rt1, rt2, rt3, dsv, D3D12_CULL_MODE_NONE, true);
     m_initialized = true;
 }
 
@@ -29,7 +31,8 @@ void GBufferPass::Render(
     D3D12_GPU_DESCRIPTOR_HANDLE sceneTableGpu,
     const Material& material,
     const Mesh& mesh,
-    const Mesh::Submesh* submesh)
+    const Mesh::Submesh* submesh,
+    bool reversesWinding)
 {
     auto* cmd = cl.Get();
 
@@ -50,10 +53,23 @@ void GBufferPass::Render(
     
     const bool doubleSided =
         material.doubleSided != 0u;
-    cmd->SetPipelineState(
-        doubleSided
-        ? m_psoNoCull.Get()
-        : m_pso.Get());
+
+    ID3D12PipelineState* selectedPso = nullptr;
+
+    if (doubleSided)
+    {
+        selectedPso = reversesWinding
+            ? m_psoNoCullReversed.Get()
+            : m_psoNoCull.Get();
+    }
+    else
+    {
+        selectedPso = reversesWinding
+            ? m_psoReversed.Get()
+            : m_pso.Get();
+    }
+
+    cmd->SetPipelineState(selectedPso);
 
     // RootSig v2 contract:
     //  param 0 = b0 per-frame
