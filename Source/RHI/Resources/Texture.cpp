@@ -34,6 +34,9 @@ void Texture::Reset()
     m_width = 0;
     m_height = 0;
     m_mipCount = 0;
+
+    m_dimension = TextureDimension::Unknown;
+    m_arraySize = 0;
 }
 
 bool Texture::TryLoadFromFile_DirectXTex(
@@ -103,6 +106,8 @@ void Texture::CreateDepth(
     m_resourceFormat = resourceFormat;
     m_dsvFormat = dsvFormat;
     m_srvFormat = DXGI_FORMAT_R32_FLOAT;
+    m_dimension = TextureDimension::Texture2D;
+    m_arraySize = 1;
 
     D3D12_CLEAR_VALUE clear{};
     clear.Format = dsvFormat;
@@ -146,6 +151,9 @@ void Texture::Create2D(ID3D12Device* device, uint32_t width, uint32_t height, DX
     m_mipCount = 1;
     m_resourceFormat = format;
     m_srvFormat = format;
+
+    m_dimension = TextureDimension::Texture2D;
+    m_arraySize = 1;
 
     D3D12_RESOURCE_DESC desc = {};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -293,6 +301,8 @@ void Texture::LoadFromFile_DirectXTex(
     m_mipCount = 1;
     m_resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     m_srvFormat = MakeSRGBIfNeeded(m_resourceFormat, treatAsSRGB);
+    m_dimension = TextureDimension::Texture2D;
+    m_arraySize = 1;
 
     // Create Default Resource
     D3D12_RESOURCE_DESC texDesc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, m_width, m_height);
@@ -354,6 +364,9 @@ void Texture::CreateRenderTarget(
     m_resourceFormat = format;
     m_srvFormat = format;
 
+    m_dimension = TextureDimension::Texture2D;
+    m_arraySize = 1;
+
     //create heap 
     CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
     D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Tex2D(format, width, height, 1, 1);
@@ -404,6 +417,9 @@ void Texture::CreateFromRGBA8Data(
     m_srvFormat = MakeSRGBIfNeeded(m_resourceFormat, treatAsSRGB);
     m_dsvFormat = DXGI_FORMAT_UNKNOWN;
 
+    m_dimension = TextureDimension::Texture2D;
+    m_arraySize = 1;
+
     D3D12_RESOURCE_DESC texDesc =
         CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, width, height);
 
@@ -450,3 +466,325 @@ void Texture::CreateFromRGBA8Data(
     cl.CopyTexture(dstLoc, 0, 0, 0, srcLoc, nullptr);
     cl.Transition(m_resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 }
+
+D3D12_SHADER_RESOURCE_VIEW_DESC Texture::MakeSrvDesc() const
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = m_srvFormat;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+    if (m_dimension == TextureDimension::TextureCube)
+    {
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        srv.TextureCube.MostDetailedMip = 0;
+        srv.TextureCube.MipLevels = m_mipCount;
+        srv.TextureCube.ResourceMinLODClamp = 0.0f;
+    }
+    else
+    {
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = m_mipCount;
+        srv.Texture2D.PlaneSlice = 0;
+        srv.Texture2D.ResourceMinLODClamp = 0.0f;
+    }
+
+    return srv;
+}
+
+D3D12_SHADER_RESOURCE_VIEW_DESC Texture::MakeCubeSrvDesc() const
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = m_srvFormat;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+    srv.TextureCube.MostDetailedMip = 0;
+    srv.TextureCube.MipLevels = m_mipCount;
+    srv.TextureCube.ResourceMinLODClamp = 0.0f;
+    return srv;
+}
+
+bool Texture::TryLoadCubeFromDDS_DirectXTex(
+    ID3D12Device* device,
+    CommandList& cl,
+    UploadArena& upload,
+    uint32_t frameIndex,
+    const std::filesystem::path& filePath,
+    bool treatAsSRGB,
+    const wchar_t* debugName,
+    std::wstring* errorOut)
+{
+    try
+    {
+        LoadCubeFromDDS_DirectXTex(
+            device,
+            cl,
+            upload,
+            frameIndex,
+            filePath,
+            treatAsSRGB,
+            debugName);
+
+        return IsValid() && IsCube();
+    }
+    catch (const std::exception& e)
+    {
+        Reset();
+
+        if (errorOut)
+        {
+            *errorOut =
+                L"Cubemap load failed: " +
+                filePath.wstring() +
+                L" : " +
+                ToWideString(e.what());
+        }
+
+        return false;
+    }
+    catch (...)
+    {
+        Reset();
+
+        if (errorOut)
+        {
+            *errorOut =
+                L"Cubemap load failed with unknown exception: " +
+                filePath.wstring();
+        }
+
+        return false;
+    }
+}
+void Texture::LoadCubeFromDDS_DirectXTex(
+    ID3D12Device* device,
+    CommandList& cl,
+    UploadArena& upload,
+    uint32_t frameIndex,
+    const std::filesystem::path& filePath,
+    bool treatAsSRGB,
+    const wchar_t* debugName)
+{
+    Reset();
+
+    if (!device)
+        throw std::runtime_error("Texture::LoadCubeFromDDS_DirectXTex: null device.");
+
+    std::error_code ec;
+
+    if (!std::filesystem::exists(filePath, ec))
+    {
+        throw std::runtime_error(
+            "Texture::LoadCubeFromDDS_DirectXTex: file does not exist: " +
+            filePath.string());
+    }
+
+    const std::wstring wpath =
+        filePath.wstring();
+
+    DirectX::ScratchImage image;
+    DirectX::TexMetadata meta{};
+
+    HRESULT hr =
+        DirectX::LoadFromDDSFile(
+            wpath.c_str(),
+            DirectX::DDS_FLAGS_NONE,
+            &meta,
+            image);
+
+    if (FAILED(hr))
+    {
+        throw std::runtime_error(
+            "DirectXTex: failed to load cubemap DDS: " +
+            filePath.string() +
+            " hr=" +
+            HResultToString(hr));
+    }
+
+    if (!meta.IsCubemap())
+    {
+        throw std::runtime_error(
+            "DirectXTex: DDS is not a cubemap: " +
+            filePath.string());
+    }
+
+    if (meta.arraySize != 6)
+    {
+        throw std::runtime_error(
+            "DirectXTex: cubemap DDS must contain exactly 6 faces for this phase: " +
+            filePath.string());
+    }
+
+    if (image.GetImageCount() == 0)
+    {
+        throw std::runtime_error(
+            "DirectXTex: cubemap has no image data: " +
+            filePath.string());
+    }
+
+    const size_t mipCount =
+        std::max<size_t>(1, meta.mipLevels);
+
+    for (size_t face = 0; face < 6; ++face)
+    {
+        for (size_t mip = 0; mip < mipCount; ++mip)
+        {
+            const DirectX::Image* src =
+                image.GetImage(
+                    mip,
+                    face,
+                    0);
+
+            if (!src || !src->pixels)
+            {
+                throw std::runtime_error(
+                    "DirectXTex: missing cubemap face/mip data before upload: " +
+                    filePath.string());
+            }
+        }
+    }
+
+    DXGI_FORMAT resourceFormat = meta.format;
+
+    if (resourceFormat == DXGI_FORMAT_UNKNOWN)
+    {
+        throw std::runtime_error(
+            "DirectXTex: cubemap has unknown format: " +
+            filePath.string());
+    }
+
+    m_width =
+        static_cast<uint32_t>(meta.width);
+
+    m_height =
+        static_cast<uint32_t>(meta.height);
+
+    m_mipCount =
+        static_cast<uint32_t>(std::max<size_t>(1, meta.mipLevels));
+
+    m_arraySize = 6;
+    m_dimension = TextureDimension::TextureCube;
+
+    m_resourceFormat = resourceFormat;
+    m_srvFormat = MakeSRGBIfNeeded(resourceFormat, treatAsSRGB);
+    m_dsvFormat = DXGI_FORMAT_UNKNOWN;
+
+    D3D12_RESOURCE_DESC texDesc{};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Alignment = 0;
+    texDesc.Width = meta.width;
+    texDesc.Height = static_cast<UINT>(meta.height);
+    texDesc.DepthOrArraySize = 6;
+    texDesc.MipLevels = static_cast<UINT16>(m_mipCount);
+    texDesc.Format = resourceFormat;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.SampleDesc.Quality = 0;
+    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    auto defaultHeap =
+        CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+
+    ThrowIfFailed(
+        device->CreateCommittedResource(
+            &defaultHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &texDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(&m_resource)),
+        "Texture::LoadCubeFromDDS_DirectXTex: CreateCommittedResource failed");
+
+    CommandList::SetGlobalState(
+        m_resource.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST);
+
+    if (debugName)
+        m_resource->SetName(debugName);
+
+    const UINT subresourceCount =
+        static_cast<UINT>(m_arraySize * m_mipCount);
+
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts(subresourceCount);
+    std::vector<UINT> numRows(subresourceCount);
+    std::vector<UINT64> rowSizes(subresourceCount);
+
+    UINT64 totalBytes = 0;
+
+    device->GetCopyableFootprints(
+        &texDesc,
+        0,
+        subresourceCount,
+        0,
+        layouts.data(),
+        numRows.data(),
+        rowSizes.data(),
+        &totalBytes);
+
+    auto uploadAlloc =
+        upload.Allocate(
+            frameIndex,
+            totalBytes,
+            D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+
+    for (UINT face = 0; face < 6; ++face)
+    {
+        for (UINT mip = 0; mip < m_mipCount; ++mip)
+        {
+            const UINT subresource =
+                mip + face * m_mipCount;
+
+            const DirectX::Image* src =
+                image.GetImage(
+                    mip,
+                    face,
+                    0);
+
+            if (!src || !src->pixels)
+            {
+                throw std::runtime_error(
+                    "DirectXTex: missing cubemap face/mip data: " +
+                    filePath.string());
+            }
+
+            const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& layout =
+                layouts[subresource];
+
+            for (UINT row = 0; row < numRows[subresource]; ++row)
+            {
+                std::memcpy(
+                    uploadAlloc.cpu +
+                    layout.Offset +
+                    static_cast<size_t>(row) * layout.Footprint.RowPitch,
+                    src->pixels +
+                    static_cast<size_t>(row) * src->rowPitch,
+                    static_cast<size_t>(rowSizes[subresource]));
+            }
+
+            D3D12_TEXTURE_COPY_LOCATION dst{};
+            dst.pResource = m_resource.Get();
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.SubresourceIndex = subresource;
+
+            D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+            srcLoc.pResource = upload.GetBuffer(frameIndex);
+            srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            srcLoc.PlacedFootprint = layout;
+            srcLoc.PlacedFootprint.Offset += uploadAlloc.offset;
+
+            cl.CopyTexture(
+                dst,
+                0,
+                0,
+                0,
+                srcLoc,
+                nullptr);
+        }
+    }
+
+    cl.Transition(
+        m_resource.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+}
+

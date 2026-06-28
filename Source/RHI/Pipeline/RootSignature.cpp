@@ -115,3 +115,70 @@ void RootSignature::InitializeForwardPBRV2(ID3D12Device* device)
     ThrowIfFailed(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&m_rootSig)));
     SetD3D12ObjectName(m_rootSig.Get(), L"RootSig: ForwardPBR v2");
 }
+
+void RootSignature::InitializeSkybox(ID3D12Device* device)
+{
+    CD3DX12_DESCRIPTOR_RANGE skyRange{};
+    skyRange.Init(
+        D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+        1,
+        0,
+        0); // t0, space0
+
+    CD3DX12_ROOT_PARAMETER params[2]{};
+    params[0].InitAsConstantBufferView(
+        0,
+        0,
+        D3D12_SHADER_VISIBILITY_ALL); // b0
+
+    params[1].InitAsDescriptorTable(
+        1,
+        &skyRange,
+        D3D12_SHADER_VISIBILITY_PIXEL);
+
+    CD3DX12_STATIC_SAMPLER_DESC sampler{};
+    sampler.Init(
+        0,
+        D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+
+    CD3DX12_ROOT_SIGNATURE_DESC desc{};
+    desc.Init(
+        _countof(params),
+        params,
+        1,
+        &sampler,
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+    ComPtr<ID3DBlob> blob;
+    ComPtr<ID3DBlob> error;
+
+    HRESULT hr =
+        D3D12SerializeRootSignature(
+            &desc,
+            D3D_ROOT_SIGNATURE_VERSION_1,
+            &blob,
+            &error);
+
+    if (FAILED(hr) && error)
+    {
+        OutputDebugStringA(
+            static_cast<const char*>(error->GetBufferPointer()));
+    }
+
+    ThrowIfFailed(hr, "D3D12SerializeRootSignature(Skybox)");
+
+    ThrowIfFailed(
+        device->CreateRootSignature(
+            0,
+            blob->GetBufferPointer(),
+            blob->GetBufferSize(),
+            IID_PPV_ARGS(&m_rootSig)),
+        "CreateRootSignature(Skybox)");
+
+    SetD3D12ObjectName(
+        m_rootSig.Get(),
+        L"RootSig: Skybox");
+}

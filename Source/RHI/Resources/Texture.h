@@ -7,6 +7,13 @@
 
 class Texture
 {
+    enum class TextureDimension : uint8_t
+    {
+        Unknown,
+        Texture2D,
+        TextureCube
+    };
+
 public:
     void CreateDepth(
         ID3D12Device* device,
@@ -62,6 +69,31 @@ public:
         const wchar_t* debugName,
         std::wstring* errorOut = nullptr);
 
+    bool TryLoadCubeFromDDS_DirectXTex(
+        ID3D12Device* device,
+        CommandList& cl,
+        UploadArena& upload,
+        uint32_t frameIndex,
+        const std::filesystem::path& filePath,
+        bool treatAsSRGB,
+        const wchar_t* debugName,
+        std::wstring* errorOut = nullptr);
+
+    void LoadCubeFromDDS_DirectXTex(
+        ID3D12Device* device,
+        CommandList& cl,
+        UploadArena& upload,
+        uint32_t frameIndex,
+        const std::filesystem::path& filePath,
+        bool treatAsSRGB,
+        const wchar_t* debugName);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC MakeSrvDesc() const;
+    D3D12_SHADER_RESOURCE_VIEW_DESC MakeCubeSrvDesc() const;
+
+    bool IsCube() const { return m_dimension == TextureDimension::TextureCube; }
+    uint32_t ArraySize() const { return m_arraySize; }
+
     ID3D12Resource* Get() const { return m_resource.Get(); }
     DXGI_FORMAT ResourceFormat() const { return m_resourceFormat; }
     DXGI_FORMAT SrvFormat() const { return m_srvFormat; }
@@ -81,4 +113,7 @@ private:
     uint32_t m_width = 0;
     uint32_t m_height = 0;
     uint32_t m_mipCount = 0;
+
+    TextureDimension m_dimension = TextureDimension::Unknown;
+    uint32_t m_arraySize = 0;
 };

@@ -39,6 +39,7 @@
 #include "Source/Renderer/Passes/RtRestirApplyPass.h"
 #include "Source/Scene/LoadedModel.h"
 #include "Source/Scene/SceneManifest.h"
+#include "Source/Renderer/Passes/SkyboxPass.h"
 
 enum class DebugViewDomain : uint8_t
 {
@@ -138,6 +139,42 @@ struct FreeRoamCameraInput
     float mouseDeltaX = 0.0f;
     float mouseDeltaY = 0.0f;
     float deltaSeconds = 0.0f;
+};
+
+struct SceneEnvironmentRuntime
+{
+    SceneEnvironmentDesc desc{};
+
+    Texture displayCube;
+
+    DescriptorAllocator::Allocation rasterSkyTable{};
+    bool displayCubeLoaded = false;
+    bool rasterSkyTableReady = false;
+
+    bool enabled = false;
+
+    float rotationRadians = 0.0f;
+    float displayIntensity = 1.0f;
+
+    bool visibleInRaster = true;
+    bool visibleInDxr = true;
+    bool specularMissUsesDisplaySky = false;
+
+    std::filesystem::path resolvedLightingDiffusePath;
+    std::filesystem::path resolvedLightingSpecularPath;
+    std::filesystem::path resolvedLightingRadiancePath;
+
+    bool lightingDiffuseLoaded = false;
+    bool lightingSpecularLoaded = false;
+    bool lightingRadianceLoaded = false;
+
+    bool displayDrivesLighting = false;
+
+    float lightingIntensity = 1.0f;
+    float lightingRotationRadians = 0.0f;
+
+    // Avoid duplicate GPU texture load when radiancePath == specularPath.
+    bool rtRadianceUsesIblSpecular = false;
 };
 
 const char* CameraControlModeName(CameraControlMode mode);
@@ -323,6 +360,37 @@ private:
     };
     static_assert((sizeof(RtRestirConstants) % 16) == 0, "RtRestirConstants must be 16-byte aligned.");
 
+    struct RtSkyConstants
+    {
+        uint32_t enabled = 0;
+        uint32_t hasDisplaySky = 0;
+        uint32_t visibleInDxr = 1;
+        uint32_t specularMissUsesDisplaySky = 0;
+
+        float displayIntensity = 1.0f;
+        float rotationRadians = 0.0f;
+        uint32_t pad0[2] = {};
+
+        DirectX::XMFLOAT4 fallbackTopColor{};
+        DirectX::XMFLOAT4 fallbackHorizonColor{};
+        DirectX::XMFLOAT4 fallbackBottomColor{};
+    };
+
+    static_assert((sizeof(RtSkyConstants) % 16) == 0);
+
+    struct RtEnvironmentLightingConstants
+    {
+        uint32_t hasRadianceTexture = 0;
+        uint32_t hasLightingEnvironment = 0; //redundant due to HasIBL
+        uint32_t pad0[2] = {};
+
+        float lightingIntensity = 1.0f;
+        float lightingRotationRadians = 0.0f;
+        uint32_t pad1[2] = {};
+    };
+
+    static_assert((sizeof(RtEnvironmentLightingConstants) % 16) == 0);
+
     struct RtRayGenConstants
     {
         DirectX::XMFLOAT4X4 prevViewProj{};
@@ -335,6 +403,8 @@ private:
 
         RtSamplingConstants sampling{};
         RtRestirConstants restir{};
+        RtSkyConstants sky{};
+        RtEnvironmentLightingConstants environment{};
     };
     static_assert((sizeof(RtRayGenConstants) % 16) == 0, "RtRayGenConstants must be 16-byte aligned.");
 
@@ -558,6 +628,29 @@ private:
         uint32_t pad0[2] = {};
     };
     static_assert((sizeof(RtOutlierClampConstants) % 16) == 0, "RtOutlierClampConstants must be 16-byte aligned.");
+
+    struct SkyConstants
+    {
+        DirectX::XMFLOAT4X4 invViewProj{};
+
+        DirectX::XMFLOAT3 cameraPos{};
+        float displayIntensity = 1.0f;
+
+        float rotationRadians = 0.0f;
+        uint32_t hasDisplaySky = 0;
+        uint32_t pad0 = 0;
+        uint32_t pad1 = 0;
+
+        DirectX::XMFLOAT3 fallbackTopColor{};
+        float pad2 = 0.0f;
+
+        DirectX::XMFLOAT3 fallbackHorizonColor{};
+        float pad3 = 0.0f;
+
+        DirectX::XMFLOAT3 fallbackBottomColor{};
+        float pad4 = 0.0f;
+    };
+    static_assert((sizeof(SkyConstants) % 16) == 0);
 
     enum class RtSignal : uint32_t
     {
@@ -1520,6 +1613,40 @@ private:
 
     const AccelerationStructure* GetSceneModelBlasForDrawItem(
         const DrawItem& item) const;
+    
+    void LoadSceneEnvironment(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex);
+
+    void UpdateSkyboxDescriptorTable(ID3D12Device* device);
+
+    D3D12_GPU_VIRTUAL_ADDRESS UploadSkyboxConstants(
+        uint32_t frameIndex);
+
+    bool ShouldRenderRasterSkybox() const;
+
+    void UseProceduralSkyFallback(ID3D12Device* device);
+
+    void CreateNullCubeSrv(
+        ID3D12Device* device,
+        D3D12_CPU_DESCRIPTOR_HANDLE dst,
+        DXGI_FORMAT format) const;
+
+    void ResolveLightingEnvironmentSources(
+        const std::filesystem::path& contentRoot);
+
+    void LoadLightingEnvironment(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex);
+
+    void LoadDefaultLightingEnvironment(
+        ID3D12Device* device,
+        CommandList& cl,
+        uint32_t frameIndex);
+
+    void LogEnvironmentContract() const;
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -1849,7 +1976,7 @@ private:
     bool m_rtUseEnvImportanceSampling = true;
     bool m_rtUseEnvMIS = false;
     float m_rtEnvMISPower = 2.0f;
-    float m_rtEnvIntensity = 1.0f;
+    float m_rtEnvIntensity = 1.0f; //redunant 
     float m_rtEnvPdfEpsilon = 1e-6f;
     float m_rtEnvDeltaRoughnessCutoff = 0.04f;
     bool m_rtUseEnvNeeForFinal = false;
@@ -2445,6 +2572,11 @@ private:
 
     uint32_t m_rtPreviewSamplesPerFrame = 2;
     bool m_rtDispatchUsesAccumulationPath = false;
+
+    SceneEnvironmentRuntime m_environment;
+    SkyboxPass m_skyboxPass;
+
+    Texture m_rtEnvironmentRadianceTex;
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

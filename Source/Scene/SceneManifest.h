@@ -46,6 +46,37 @@ struct ScenePointLightDesc
     float range = 5.0f;
 };
 
+
+struct SceneEnvironmentDesc
+{
+    bool enabled = false;
+
+    std::filesystem::path displayPath;
+    std::filesystem::path lightingPath;
+
+    //explicit precomputed lighting assets.
+    std::filesystem::path lightingDiffusePath;
+    std::filesystem::path lightingSpecularPath;
+    std::filesystem::path lightingRadiancePath;
+
+    bool useDisplayForLighting = false;
+
+    float displayIntensity = 1.0f;
+    float lightingIntensity = 1.0f;
+    float rotationDegrees = 0.0f;
+
+    // Optional lighting rotation. Defaults to rotationDegrees while parsing.
+    float lightingRotationDegrees = 0.0f;
+
+    bool visibleInRaster = true;
+    bool visibleInDxr = true;
+    bool specularMissUsesDisplaySky = false;
+
+    DirectX::XMFLOAT3 fallbackTopColor = { 0.20f, 0.36f, 0.62f };
+    DirectX::XMFLOAT3 fallbackHorizonColor = { 0.76f, 0.80f, 0.86f };
+    DirectX::XMFLOAT3 fallbackBottomColor = { 0.42f, 0.45f, 0.50f };
+};
+
 struct SceneManifest
 {
     std::string name;
@@ -57,6 +88,9 @@ struct SceneManifest
     bool hasSun = false;
 
     std::wstring lastError;
+
+    SceneEnvironmentDesc environment;
+    bool hasEnvironment = false;
 
     bool LoadFromFile(const std::filesystem::path& path);
 };

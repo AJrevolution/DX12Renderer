@@ -5,6 +5,7 @@
 #include <DirectXMath.h>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 #include <exception>
 
 using json = nlohmann::json;
@@ -158,6 +159,8 @@ bool SceneManifest::LoadFromFile(const std::filesystem::path& path)
     pointLights.clear();
     hasSun = false;
     sun = {};
+    environment = {};
+    hasEnvironment = false;
     lastError.clear();
 
     std::string text;
@@ -307,6 +310,121 @@ bool SceneManifest::LoadFromFile(const std::filesystem::path& path)
 
             if (light.enabled)
                 pointLights.push_back(light);
+        }
+    }
+
+    if (root.contains("environment") &&
+        root["environment"].is_object())
+    {
+        const json& e = root["environment"];
+
+        environment = {};
+        environment.enabled =
+            JsonBool(e, "enabled", true);
+
+        if (environment.enabled)
+        {
+            hasEnvironment = true;
+
+            const std::string displayPath =
+                JsonString(e, "displayPath");
+
+            const std::string lightingPath =
+                JsonString(e, "lightingPath");
+
+            const std::string lightingDiffusePath =
+                JsonString(e, "lightingDiffusePath");
+
+            const std::string lightingSpecularPath =
+                JsonString(e, "lightingSpecularPath");
+
+            const std::string lightingRadiancePath =
+                JsonString(e, "lightingRadiancePath");
+
+            environment.displayPath =
+                std::filesystem::path(displayPath);
+
+            environment.lightingPath =
+                std::filesystem::path(lightingPath);
+
+            environment.lightingDiffusePath =
+                std::filesystem::path(lightingDiffusePath);
+
+            environment.lightingSpecularPath =
+                std::filesystem::path(lightingSpecularPath);
+
+            environment.lightingRadiancePath =
+                std::filesystem::path(lightingRadiancePath);
+
+            environment.useDisplayForLighting =
+                JsonBool(
+                    e,
+                    "useDisplayForLighting",
+                    environment.useDisplayForLighting);
+
+            environment.displayIntensity =
+                std::max(
+                    0.0f,
+                    JsonFloat(
+                        e,
+                        "displayIntensity",
+                        environment.displayIntensity));
+
+            environment.lightingIntensity =
+                std::max(
+                    0.0f,
+                    JsonFloat(
+                        e,
+                        "lightingIntensity",
+                        environment.lightingIntensity));
+
+            environment.rotationDegrees =
+                JsonFloat(
+                    e,
+                    "rotationDegrees",
+                    environment.rotationDegrees);
+
+            environment.lightingRotationDegrees =
+                JsonFloat(
+                    e,
+                    "lightingRotationDegrees",
+                    environment.rotationDegrees);
+
+            environment.visibleInRaster =
+                JsonBool(
+                    e,
+                    "visibleInRaster",
+                    environment.visibleInRaster);
+
+            environment.visibleInDxr =
+                JsonBool(
+                    e,
+                    "visibleInDxr",
+                    environment.visibleInDxr);
+
+            environment.specularMissUsesDisplaySky =
+                JsonBool(
+                    e,
+                    "specularMissUsesDisplaySky",
+                    environment.specularMissUsesDisplaySky);
+
+            environment.fallbackTopColor =
+                JsonFloat3(
+                    e,
+                    "fallbackTopColor",
+                    environment.fallbackTopColor);
+
+            environment.fallbackHorizonColor =
+                JsonFloat3(
+                    e,
+                    "fallbackHorizonColor",
+                    environment.fallbackHorizonColor);
+
+            environment.fallbackBottomColor =
+                JsonFloat3(
+                    e,
+                    "fallbackBottomColor",
+                    environment.fallbackBottomColor);
         }
     }
 

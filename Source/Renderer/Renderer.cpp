@@ -142,6 +142,8 @@ namespace
     constexpr uint32_t kRtRegisterIblSpecular = 382u;
     constexpr uint32_t kRtRegisterEnvAlias = 383u;
     constexpr uint32_t kRtRegisterRestirResolveReservoir = 384u;
+    constexpr uint32_t kRtRegisterDisplaySky = 385u;
+    constexpr uint32_t kRtRegisterEnvironmentRadiance = 386u;
 
     // racetrackentire.gltf currently has its lowest world-space Y around 1.772.
     // Move it down so the imported ground sits around renderer Y=0.
@@ -150,16 +152,16 @@ namespace
     constexpr float kDefaultImportedModelYOffset = -1.77210808f;
 
     constexpr uint32_t kRtHighestSrvRegister =
-        kRtRegisterRestirResolveReservoir;
+        kRtRegisterEnvironmentRadiance;
 
-    // Descriptor table starts at t1, so 384 descriptors covers t1..t384.
+    // Descriptor table starts at t1, so 386 descriptors covers t1..t386.
     constexpr uint32_t kRtSrvTableCount =
         kRtHighestSrvRegister;
 
     static_assert(kRtRegisterImportedVerts == 330u);
     static_assert(kRtRegisterImportedIndices == 346u);
     static_assert(kRtRegisterBrdfLut == 380u);
-    static_assert(kRtSrvTableCount == 384u);
+    static_assert(kRtSrvTableCount == 386u);
     static_assert(
         kRtRegisterMaterialTextures +
         kRtMaxMaterials * kRtTexturesPerMaterial - 1u == 325u);
@@ -1877,6 +1879,38 @@ void Renderer::RenderFrame(
         m_rtDispatchSampleIndex = 0;
         m_rtAccumulateThisFrame = false;
 
+        auto RenderRasterSkybox = [&]()
+        {
+            if (!ShouldRenderRasterSkybox() || !m_depthReady)
+                return;
+
+            CmdBeginEvent(cmdList, "Skybox");
+
+            cl.Transition(
+                m_depth.Get(),
+                D3D12_RESOURCE_STATE_DEPTH_READ);
+
+            cl.FlushBarriers();
+
+            const D3D12_GPU_VIRTUAL_ADDRESS skyCb =
+                UploadSkyboxConstants(frameIndex);
+
+            cmdList->OMSetRenderTargets(
+                1,
+                &backbufferRtv,
+                FALSE,
+                &m_depthDsv);
+
+            m_skyboxPass.Render(
+                cl,
+                width,
+                height,
+                skyCb,
+                m_environment.rasterSkyTable.gpu);
+
+            CmdEndEvent(cmdList);
+        };
+
         const D3D12_GPU_VIRTUAL_ADDRESS perFrameCb =
             UpdateGlobalConstants(frameIndex, width, height, sceneTime);
         if (m_enableShadows && m_shadowReady)
@@ -1991,6 +2025,8 @@ void Renderer::RenderFrame(
             m_deferredLightPass.Render(cl, width, height, perFrameCb, m_scene.table.gpu, m_deferredInputTable.gpu);
             CmdEndEvent(cmdList);
 
+            RenderRasterSkybox();
+
             CmdEndEvent(cmdList);
         }
         else
@@ -2017,7 +2053,6 @@ void Renderer::RenderFrame(
             {
                 cmdList->OMSetRenderTargets(1, &backbufferRtv, FALSE, nullptr);
             }
-            CmdEndEvent(cmdList);
 
             for (const DrawItem& item : m_draws)
             {
@@ -2041,7 +2076,7 @@ void Renderer::RenderFrame(
                     &submesh,
                     item.reversesWinding);
             }
-            CmdEndEvent(cmdList);
+            RenderRasterSkybox();
             CmdEndEvent(cmdList);
         }
     }
@@ -2307,6 +2342,17 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
             : PointLight{};
     }
 
+    cb->iblIntensity =
+        m_environment.lightingIntensity;
+
+    cb->iblRotationRadians =
+        m_environment.lightingRotationRadians;
+
+    cb->hasLightingEnvironment =
+        (m_iblDiffuseTex.IsValid() && m_iblSpecularTex.IsValid())
+        ? 1u
+        : 0u;
+
     return alloc.gpu;
 }
 
@@ -2385,6 +2431,8 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         m_rtRestirApplyPass.Initialize(device, Paths::ShaderDir());
     }
 
+    m_skyboxPass.Initialize(device, m_backbufferFormat, DXGI_FORMAT_D32_FLOAT, Paths::ShaderDir());
+
     // Load a real texture from disk 
     const auto content = Paths::ContentDir_DevOnly();
     if (!content.empty())
@@ -2418,47 +2466,7 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
             DebugOutput("Warning: ibl_brdf_lut.png missing. PBR will look incorrect.");
         }
 
-        const std::filesystem::path iblDiffusePath =
-            content / L"Textures" / L"lilienstein_2kblurred.png";
-
-        if (std::filesystem::exists(iblDiffusePath))
-        {
-            m_iblDiffuseTex.LoadFromFile_DirectXTex(
-                device, cl, m_upload, frameIndex,
-                iblDiffusePath,
-                false,
-                L"Tex: IBL Diffuse");
-        }
-        else
-        {
-            DebugOutput("Warning: lilienstein_2kblurred.png missing. Using null scene slot.");
-        }
-
-        const std::filesystem::path envRadiancePath =
-            content / L"Textures" / L"lilienstein_2k.png";
-
-        if (std::filesystem::exists(envRadiancePath))
-        {
-            m_iblSpecularTex.LoadFromFile_DirectXTex(
-                device, cl, m_upload, frameIndex,
-                envRadiancePath,
-                false,
-                L"Tex: IBL Specular");
-
-            if (m_dxrAvailable && m_device5)
-            {
-                LoadRtEnvironmentCpuRadiance(envRadiancePath);
-            }
-        }
-        else
-        {
-            DebugOutput("Warning: lilienstein_2k.png missing. Using null scene slot.");
-
-            if (m_dxrAvailable && m_device5)
-            {
-                ClearRtEnvironmentCpuRadiance();
-            }
-        }
+       
 
         // Material handles the table allocation and SRV placement
         m_material.UpdateDescriptorTable(device, m_srvHeap, &m_albedoTex, &m_normalTex, &m_metalRoughTex);
@@ -3779,6 +3787,43 @@ void Renderer::UpdateRtGeometryTable(
         kRtRegisterRestirResolveReservoir,
         restirResolveReservoir ? pixelCount : 1u,
         sizeof(RtRestirReservoir));
+
+    // t385 = display sky cube for DXR miss / display environment.
+    if (m_environment.displayCubeLoaded &&
+        m_environment.displayCube.IsValid())
+    {
+        const D3D12_SHADER_RESOURCE_VIEW_DESC srv =
+            m_environment.displayCube.MakeCubeSrvDesc();
+
+        m_device5->CreateShaderResourceView(
+            m_environment.displayCube.Get(),
+            &srv,
+            CpuForRegister(kRtRegisterDisplaySky));
+    }
+    else
+    {
+        CreateNullCubeSrv(
+            m_device5.Get(),
+            CpuForRegister(kRtRegisterDisplaySky),
+            DXGI_FORMAT_R8G8B8A8_UNORM);
+    }
+
+    // t386 = RT lighting radiance source.
+    const Texture* rtRadianceTexture = nullptr;
+    if (m_environment.rtRadianceUsesIblSpecular &&
+        m_iblSpecularTex.IsValid())
+    {
+        rtRadianceTexture = &m_iblSpecularTex;
+    }
+
+    else if (m_rtEnvironmentRadianceTex.IsValid())
+    {
+       rtRadianceTexture = &m_rtEnvironmentRadianceTex;
+    }
+
+    CreateTextureSrv(
+        rtRadianceTexture,
+        kRtRegisterEnvironmentRadiance);
 
     m_rtMaterialCount =
         static_cast<uint32_t>(
@@ -5975,17 +6020,22 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
     cb->sampling.envSamplingMode =
         static_cast<uint32_t>(m_rtEnvSamplingMode);
 
+    const bool envAliasMatchesRadiance =
+        envAliasUsable &&
+        !m_rtEnvAliasFallback &&
+        m_rtEnvCpuRadianceReady;
+
     cb->sampling.useEnvImportanceSampling =
-        (m_rtUseEnvImportanceSampling && envAliasUsable) ? 1u : 0u;
+        (m_rtUseEnvImportanceSampling && envAliasMatchesRadiance) ? 1u : 0u;
 
     cb->sampling.useEnvMIS =
-        (m_rtUseEnvMIS && envAliasUsable) ? 1u : 0u;
+        (m_rtUseEnvMIS && envAliasMatchesRadiance) ? 1u : 0u;
 
     cb->sampling.envAliasCount =
-        envAliasUsable ? m_rtEnvAliasCount : 0u;
+        envAliasMatchesRadiance ? m_rtEnvAliasCount : 0u;
 
     cb->sampling.envFaceSize =
-        envAliasUsable ? m_rtEnvFaceSize : 0u;
+        envAliasMatchesRadiance ? m_rtEnvFaceSize : 0u;
 
     cb->sampling.envAliasFallback =
         (!envAliasUsable || m_rtEnvAliasFallback) ? 1u : 0u;
@@ -6047,6 +6097,71 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
         std::max(1.0f, m_rtRestirMaxWeight);
 
     cb->restir.restirDispatchMode = restirDispatchMode;
+    
+    cb->sky.enabled =
+        m_environment.enabled ? 1u : 0u;
+
+    cb->sky.hasDisplaySky =
+        m_environment.displayCubeLoaded ? 1u : 0u;
+
+    cb->sky.visibleInDxr =
+        m_environment.visibleInDxr ? 1u : 0u;
+
+    cb->sky.specularMissUsesDisplaySky =
+        m_environment.specularMissUsesDisplaySky ? 1u : 0u;
+
+    cb->sky.displayIntensity =
+        m_environment.displayIntensity;
+
+    cb->sky.rotationRadians =
+        m_environment.rotationRadians;
+
+    cb->sky.fallbackTopColor =
+    {
+        m_environment.desc.fallbackTopColor.x,
+        m_environment.desc.fallbackTopColor.y,
+        m_environment.desc.fallbackTopColor.z,
+        0.0f
+    };
+
+    cb->sky.fallbackHorizonColor =
+    {
+        m_environment.desc.fallbackHorizonColor.x,
+        m_environment.desc.fallbackHorizonColor.y,
+        m_environment.desc.fallbackHorizonColor.z,
+        0.0f
+    };
+
+    cb->sky.fallbackBottomColor =
+    {
+        m_environment.desc.fallbackBottomColor.x,
+        m_environment.desc.fallbackBottomColor.y,
+        m_environment.desc.fallbackBottomColor.z,
+        0.0f
+    };
+
+    const bool hasRtRadiance =
+        (m_environment.rtRadianceUsesIblSpecular &&
+            m_iblSpecularTex.IsValid()) ||
+        m_rtEnvironmentRadianceTex.IsValid();
+
+    cb->environment.hasRadianceTexture =
+        hasRtRadiance ? 1u : 0u;
+
+    cb->environment.hasLightingEnvironment =
+        m_environment.lightingRadianceLoaded ? 1u : 0u;
+
+    cb->environment.pad0[0] = 0u;
+    cb->environment.pad0[1] = 0u;
+
+    cb->environment.lightingIntensity =
+        m_environment.lightingIntensity;
+
+    cb->environment.lightingRotationRadians =
+        m_environment.lightingRotationRadians;
+
+    cb->environment.pad1[0] = 0u;
+    cb->environment.pad1[1] = 0u;
 
     return alloc.gpu;
 }
@@ -10710,6 +10825,7 @@ void Renderer::LoadSceneFromManifest(
             L"Renderer::LoadSceneFromManifest: ContentDir not found; using procedural-only scene.\n");
 
         ConfigureDefaultPointLights();
+        UseProceduralSkyFallback(device);
         return;
     }
 
@@ -10808,6 +10924,8 @@ void Renderer::LoadSceneFromManifest(
 
     m_sceneManifestLoaded = true;
 
+    LoadSceneEnvironment(device, cl, frameIndex);
+
     OutputDebugStringW(
         (L"Scene manifest loaded. Models=" +
             std::to_wstring(loadedCount) +
@@ -10825,7 +10943,10 @@ void Renderer::LoadFallbackImportedScene(
         Paths::ContentDir_DevOnly();
 
     if (content.empty())
+    {
+        UseProceduralSkyFallback(device);
         return;
+    }
 
     SceneModelDesc desc{};
     desc.name = "fallback_racetrack";
@@ -10868,12 +10989,18 @@ void Renderer::LoadFallbackImportedScene(
         instance.desc.rasterEnabled = false;
         instance.desc.dxrEnabled = false;
         instance.desc.castShadows = false;
+
+        UseProceduralSkyFallback(device);
+        LoadDefaultLightingEnvironment(device, cl, frameIndex);
         return;
     }
 
     AssignSceneModelRtBufferIndices();
     AdoptSceneModelBounds();
     LogSceneModelSummary();
+
+    UseProceduralSkyFallback(device);
+    LoadDefaultLightingEnvironment(device, cl, frameIndex);
 }
 
 void Renderer::ApplyManifestLights()
@@ -11281,5 +11408,642 @@ void Renderer::LogSceneModelSummary() const
     }
 }
 
+void Renderer::UseProceduralSkyFallback(ID3D12Device* device)
+{
+    m_environment = {};
+    m_environment.enabled = true;
+    m_environment.visibleInRaster = true;
+    m_environment.visibleInDxr = true;
+    m_environment.displayIntensity = 1.0f;
+    m_environment.lightingIntensity = 1.0f;
+    m_environment.rotationRadians = 0.0f;
+    m_environment.lightingRotationRadians = 0.0f;
 
+    UpdateSkyboxDescriptorTable(device);
+}
 
+void Renderer::LoadSceneEnvironment(
+    ID3D12Device* device,
+    CommandList& cl,
+    uint32_t frameIndex)
+{
+    m_environment = {};
+
+    if (!m_sceneManifest.hasEnvironment ||
+        !m_sceneManifest.environment.enabled)
+    {
+        OutputDebugStringW(
+            L"Scene environment missing/disabled; using procedural sky fallback.\n");
+        
+        UseProceduralSkyFallback(device);
+        LoadDefaultLightingEnvironment(device, cl, frameIndex);
+        return;
+    }
+
+    m_environment.desc = m_sceneManifest.environment;
+    m_environment.enabled = true;
+
+    m_environment.visibleInRaster =
+        m_sceneManifest.environment.visibleInRaster;
+
+    m_environment.visibleInDxr =
+        m_sceneManifest.environment.visibleInDxr;
+
+    m_environment.specularMissUsesDisplaySky =
+        m_sceneManifest.environment.specularMissUsesDisplaySky;
+
+    m_environment.displayIntensity =
+        std::max(
+            0.0f,
+            m_sceneManifest.environment.displayIntensity);
+
+    m_environment.rotationRadians =
+        m_sceneManifest.environment.rotationDegrees *
+        3.14159265358979323846f /
+        180.0f;
+
+    m_environment.lightingIntensity =
+        std::max(
+            0.0f,
+            m_sceneManifest.environment.lightingIntensity);
+
+    m_environment.lightingRotationRadians =
+        m_sceneManifest.environment.lightingRotationDegrees *
+        3.14159265358979323846f /
+        180.0f;
+
+    const std::filesystem::path content =
+        Paths::ContentDir_DevOnly();
+
+    if (content.empty())
+    {
+        OutputDebugStringW(
+            L"Scene environment skipped: content dir is empty.\n");
+        UseProceduralSkyFallback(device);
+        return;
+    }
+
+    const std::filesystem::path displayPath =
+        ResolveContentRelativePath(
+            content,
+            m_sceneManifest.environment.displayPath).lexically_normal();
+
+    OutputDebugStringW(
+        (L"Trying display sky cubemap:\n  " +
+            displayPath.wstring() +
+            L"\n").c_str());
+
+    std::error_code existsError;
+
+    const bool displayExists =
+        !m_sceneManifest.environment.displayPath.empty() &&
+        std::filesystem::exists(displayPath, existsError);
+
+    OutputDebugStringW(
+        (L"Display sky exists check: " +
+            std::wstring(displayExists ? L"true" : L"false") +
+            L"\n").c_str());
+
+    if (existsError)
+    {
+        const std::string msg =
+            existsError.message();
+
+        const std::wstring wideMsg(
+            msg.begin(),
+            msg.end());
+
+        OutputDebugStringW(
+            (L"Display sky exists error: " +
+                wideMsg +
+                L"\n").c_str());
+    }
+
+    if (displayExists)
+    {
+        std::wstring error;
+
+        if (m_environment.displayCube.TryLoadCubeFromDDS_DirectXTex(
+            device,
+            cl,
+            m_assetUpload,
+            frameIndex,
+            displayPath,
+            true,
+            L"Environment Display Sky Cubemap",
+            &error))
+        {
+            m_environment.displayCubeLoaded = true;
+
+            OutputDebugStringW(
+                (L"Display sky cubemap loaded: " +
+                    displayPath.wstring() +
+                    L"\n").c_str());
+        }
+        else
+        {
+            OutputDebugStringW(
+                (L"Display sky cubemap failed; procedural fallback will be used.\n"
+                    L"  Path: " +
+                    displayPath.wstring() +
+                    L"\n  Error: " +
+                    error +
+                    L"\n").c_str());
+        }
+    }
+    else
+    {
+        OutputDebugStringW(
+            (L"Display sky cubemap not found.\n"
+                L"  Manifest path: " +
+                m_sceneManifest.environment.displayPath.wstring() +
+                L"\n  Resolved path: " +
+                displayPath.wstring() +
+                L"\n").c_str());
+    }
+
+    ResolveLightingEnvironmentSources(content);
+    LoadLightingEnvironment(device, cl, frameIndex);
+    UpdateSkyboxDescriptorTable(device);
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS Renderer::UploadSkyboxConstants(
+    uint32_t frameIndex)
+{
+    constexpr uint32_t cbSize =
+        (sizeof(SkyConstants) +
+            D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT - 1) &
+        ~(D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT - 1);
+
+    auto alloc =
+        m_upload.Allocate(
+            frameIndex,
+            cbSize,
+            D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+
+    auto* cb =
+        reinterpret_cast<SkyConstants*>(alloc.cpu);
+
+    *cb = {};
+
+    cb->invViewProj =
+        m_currInvViewProj;
+
+    cb->cameraPos =
+        m_sceneData.camera.position;
+
+    cb->displayIntensity =
+        m_environment.displayIntensity;
+
+    cb->rotationRadians =
+        m_environment.rotationRadians;
+
+    cb->hasDisplaySky =
+        m_environment.displayCubeLoaded ? 1u : 0u;
+
+    cb->fallbackTopColor =
+        m_environment.desc.fallbackTopColor;
+
+    cb->fallbackHorizonColor =
+        m_environment.desc.fallbackHorizonColor;
+
+    cb->fallbackBottomColor =
+        m_environment.desc.fallbackBottomColor;
+
+    return alloc.gpu;
+}
+
+void Renderer::CreateNullCubeSrv(
+    ID3D12Device* device,
+    D3D12_CPU_DESCRIPTOR_HANDLE dst,
+    DXGI_FORMAT format) const
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = format;
+    srv.Shader4ComponentMapping =
+        D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.ViewDimension =
+        D3D12_SRV_DIMENSION_TEXTURECUBE;
+    srv.TextureCube.MostDetailedMip = 0;
+    srv.TextureCube.MipLevels = 1;
+    srv.TextureCube.ResourceMinLODClamp = 0.0f;
+
+    device->CreateShaderResourceView(
+        nullptr,
+        &srv,
+        dst);
+}
+
+void Renderer::UpdateSkyboxDescriptorTable(
+    ID3D12Device* device)
+{
+    if (!m_environment.rasterSkyTable.IsValid())
+    {
+        m_environment.rasterSkyTable =
+            m_srvHeap.Allocate(1);
+    }
+
+    if (m_environment.displayCubeLoaded &&
+        m_environment.displayCube.IsValid())
+    {
+        const D3D12_SHADER_RESOURCE_VIEW_DESC srv =
+            m_environment.displayCube.MakeCubeSrvDesc();
+
+        device->CreateShaderResourceView(
+            m_environment.displayCube.Get(),
+            &srv,
+            m_environment.rasterSkyTable.cpu);
+    }
+    else
+    {
+        CreateNullCubeSrv(
+            device,
+            m_environment.rasterSkyTable.cpu,
+            DXGI_FORMAT_R8G8B8A8_UNORM);
+    }
+
+    m_environment.rasterSkyTableReady = true;
+}
+
+bool Renderer::ShouldRenderRasterSkybox() const
+{
+    if (!m_environment.enabled ||
+        !m_environment.visibleInRaster ||
+        !m_environment.rasterSkyTableReady)
+    {
+        return false;
+    }
+
+    // Keep debug visualisations clean.
+    return m_debugView == 0;
+}
+
+void Renderer::ResolveLightingEnvironmentSources(
+    const std::filesystem::path& contentRoot)
+{
+    const SceneEnvironmentDesc& env =
+        m_environment.desc;
+
+    const std::filesystem::path defaultDiffuse =
+        contentRoot / L"Textures" / L"lilienstein_2kblurred.png";
+
+    const std::filesystem::path defaultSpecular =
+        contentRoot / L"Textures" / L"lilienstein_2k.png";
+
+    const std::filesystem::path defaultRadiance =
+        contentRoot / L"Textures" / L"lilienstein_2k.png";
+
+    auto ResolveMaybe =
+        [&](const std::filesystem::path& p) -> std::filesystem::path
+    {
+        if (p.empty())
+            return {};
+
+        return ResolveContentRelativePath(contentRoot, p);
+    };
+
+    const std::filesystem::path explicitDiffuse =
+        ResolveMaybe(env.lightingDiffusePath);
+
+    const std::filesystem::path explicitSpecular =
+        ResolveMaybe(env.lightingSpecularPath);
+
+    const std::filesystem::path explicitRadiance =
+        ResolveMaybe(env.lightingRadiancePath);
+
+    const std::filesystem::path genericLighting =
+        ResolveMaybe(env.lightingPath);
+
+    m_environment.displayDrivesLighting = false;
+
+    if (!explicitDiffuse.empty() ||
+        !explicitSpecular.empty() ||
+        !explicitRadiance.empty())
+    {
+        m_environment.resolvedLightingDiffusePath =
+            !explicitDiffuse.empty()
+            ? explicitDiffuse
+            : defaultDiffuse;
+
+        m_environment.resolvedLightingSpecularPath =
+            !explicitSpecular.empty()
+            ? explicitSpecular
+            : !genericLighting.empty()
+            ? genericLighting
+            : defaultSpecular;
+
+        m_environment.resolvedLightingRadiancePath =
+            !explicitRadiance.empty()
+            ? explicitRadiance
+            : !explicitSpecular.empty()
+            ? explicitSpecular
+            : !genericLighting.empty()
+            ? genericLighting
+            : defaultRadiance;
+
+        return;
+    }
+
+    if (env.useDisplayForLighting)
+    {
+        OutputDebugStringW(
+            L"useDisplayForLighting=true, but Phase 3L requires explicit precomputed lightingDiffuse/specular/radiance assets. Falling back to default lighting environment.\n");
+    }
+
+    m_environment.resolvedLightingDiffusePath = defaultDiffuse;
+    m_environment.resolvedLightingSpecularPath = defaultSpecular;
+    m_environment.resolvedLightingRadiancePath = defaultRadiance;
+}
+
+void Renderer::LoadLightingEnvironment(
+    ID3D12Device* device,
+    CommandList& cl,
+    uint32_t frameIndex)
+{
+    m_environment.lightingDiffuseLoaded = false;
+    m_environment.lightingSpecularLoaded = false;
+    m_environment.lightingRadianceLoaded = false;
+    m_environment.rtRadianceUsesIblSpecular = false;
+
+    m_iblDiffuseTex.Reset();
+    m_iblSpecularTex.Reset();
+    m_rtEnvironmentRadianceTex.Reset();
+
+    const std::filesystem::path diffusePath =
+        m_environment.resolvedLightingDiffusePath;
+
+    const std::filesystem::path specularPath =
+        m_environment.resolvedLightingSpecularPath;
+
+    const std::filesystem::path radiancePath =
+        m_environment.resolvedLightingRadiancePath;
+
+    if (!diffusePath.empty() &&
+        std::filesystem::exists(diffusePath))
+    {
+        std::wstring error;
+
+        if (m_iblDiffuseTex.TryLoadFromFile_DirectXTex(
+            device,
+            cl,
+            m_upload,
+            frameIndex,
+            diffusePath,
+            false,
+            L"Tex: IBL Diffuse",
+            &error))
+        {
+            m_environment.lightingDiffuseLoaded = true;
+        }
+        else
+        {
+            OutputDebugStringW(
+                (L"Lighting diffuse IBL failed: " +
+                    error +
+                    L"\n").c_str());
+        }
+    }
+    else
+    {
+        OutputDebugStringW(
+            (L"Lighting diffuse IBL missing: " +
+                diffusePath.wstring() +
+                L"\n").c_str());
+    }
+
+    if (!specularPath.empty() &&
+        std::filesystem::exists(specularPath))
+    {
+        std::wstring error;
+
+        if (m_iblSpecularTex.TryLoadFromFile_DirectXTex(
+            device,
+            cl,
+            m_upload,
+            frameIndex,
+            specularPath,
+            false,
+            L"Tex: IBL Specular",
+            &error))
+        {
+            m_environment.lightingSpecularLoaded = true;
+        }
+        else
+        {
+            OutputDebugStringW(
+                (L"Lighting specular IBL failed: " +
+                    error +
+                    L"\n").c_str());
+        }
+    }
+    else
+    {
+        OutputDebugStringW(
+            (L"Lighting specular IBL missing: " +
+                specularPath.wstring() +
+                L"\n").c_str());
+    }
+
+    std::error_code ec;
+
+    const bool radianceSameAsSpecular =
+        !radiancePath.empty() &&
+        !specularPath.empty() &&
+        std::filesystem::equivalent(
+            radiancePath,
+            specularPath,
+            ec) &&
+        !ec;
+
+    if (radianceSameAsSpecular &&
+        m_iblSpecularTex.IsValid())
+    {
+        m_environment.rtRadianceUsesIblSpecular = true;
+        m_environment.lightingRadianceLoaded = true;
+    }
+    else if (!radiancePath.empty() &&
+        std::filesystem::exists(radiancePath))
+    {
+        std::wstring error;
+
+        if (m_rtEnvironmentRadianceTex.TryLoadFromFile_DirectXTex(
+            device,
+            cl,
+            m_upload,
+            frameIndex,
+            radiancePath,
+            false,
+            L"Tex: RT Environment Radiance",
+            &error))
+        {
+            m_environment.lightingRadianceLoaded = true;
+        }
+        else
+        {
+            OutputDebugStringW(
+                (L"RT environment radiance texture failed: " +
+                    error +
+                    L"\n").c_str());
+        }
+    }
+    else
+    {
+        OutputDebugStringW(
+            (L"RT environment radiance missing: " +
+                radiancePath.wstring() +
+                L"\n").c_str());
+    }
+
+    if (m_dxrAvailable && m_device5)
+    {
+        const bool hasValidRadiancePath =
+            m_environment.lightingRadianceLoaded &&
+            !radiancePath.empty() &&
+            std::filesystem::exists(radiancePath);
+
+        if (hasValidRadiancePath)
+        {
+            const bool cpuRadianceLoaded =
+                LoadRtEnvironmentCpuRadiance(radiancePath);
+
+            if (!cpuRadianceLoaded)
+            {
+                OutputDebugStringW(
+                    L"RT environment alias table disabled: CPU radiance source failed to load.\n");
+
+                // LoadRtEnvironmentCpuRadiance() already clears the CPU source
+                // before trying to load. This call keeps the failure path obvious.
+                ClearRtEnvironmentCpuRadiance();
+            }
+        }
+        else
+        {
+            ClearRtEnvironmentCpuRadiance();
+        }
+    }
+    else
+    {
+        ClearRtEnvironmentCpuRadiance();
+    }
+
+    if (m_scene.table.IsValid())
+    {
+        UpdateSceneTable(device);
+    }
+
+    LogEnvironmentContract();
+}
+
+void Renderer::LoadDefaultLightingEnvironment(
+    ID3D12Device* device,
+    CommandList& cl,
+    uint32_t frameIndex)
+{
+    const std::filesystem::path content =
+        Paths::ContentDir_DevOnly();
+
+    if (content.empty())
+        return;
+
+    ResolveLightingEnvironmentSources(content);
+    LoadLightingEnvironment(device, cl, frameIndex);
+}
+
+void Renderer::LogEnvironmentContract() const
+{
+    const auto BoolText =
+        [](bool v) -> const wchar_t*
+    {
+        return v ? L"true" : L"false";
+    };
+
+    OutputDebugStringW(L"Environment contract:\n");
+
+    OutputDebugStringW(
+        (L"  Display sky: " +
+            m_environment.desc.displayPath.wstring() +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  Display sky loaded: " +
+            std::wstring(BoolText(m_environment.displayCubeLoaded)) +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  Lighting diffuse: " +
+            m_environment.resolvedLightingDiffusePath.wstring() +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  Lighting specular: " +
+            m_environment.resolvedLightingSpecularPath.wstring() +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  Lighting radiance: " +
+            m_environment.resolvedLightingRadiancePath.wstring() +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  Lighting diffuse loaded: " +
+            std::wstring(BoolText(m_environment.lightingDiffuseLoaded)) +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  Lighting specular loaded: " +
+            std::wstring(BoolText(m_environment.lightingSpecularLoaded)) +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  Lighting radiance loaded: " +
+            std::wstring(BoolText(m_environment.lightingRadianceLoaded)) +
+            L"\n").c_str());
+
+    const bool invalidRadianceContract =
+        m_environment.lightingRadianceLoaded &&
+        m_environment.resolvedLightingRadiancePath.empty();
+
+    if (invalidRadianceContract)
+    {
+        OutputDebugStringW(
+            L"ERROR: Environment contract invalid: "
+            L"lightingRadianceLoaded=true but resolvedLightingRadiancePath is empty. "
+            L"RT alias table/PDF source cannot be proven to match "
+            L"LookupEnvironmentRadiance().\n");
+    }
+
+    OutputDebugStringW(
+        (L"  Display drives lighting: " +
+            std::wstring(BoolText(m_environment.displayDrivesLighting)) +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  Lighting intensity: " +
+            std::to_wstring(m_environment.lightingIntensity) +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  Display rotation radians: " +
+            std::to_wstring(m_environment.rotationRadians) +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  Lighting rotation radians: " +
+            std::to_wstring(m_environment.lightingRotationRadians) +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  Raster sky visible: " +
+            std::wstring(BoolText(m_environment.visibleInRaster)) +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  DXR sky visible: " +
+            std::wstring(BoolText(m_environment.visibleInDxr)) +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  Specular miss uses display sky: " +
+            std::wstring(BoolText(m_environment.specularMissUsesDisplaySky)) +
+            L"\n").c_str());
+}

@@ -34,5 +34,31 @@
       "intensity": 20.0,
       "range": 8.0
     }
-  ]
+  ],
+  "environment": {
+    "enabled": true,
+
+    "displayPath": "Environments/golden_bay4k.dds",
+
+    "lightingDiffusePath": "Environments/golden_bay_4k_diffuse.png",
+    "lightingSpecularPath": "Environments/golden_bay_4k_radiance.png",
+    "lightingRadiancePath": "Environments/golden_bay_4k_radiance.png",
+
+    "lightingPath": "",
+    "useDisplayForLighting": false,
+
+    "displayIntensity": 1.0,
+    "lightingIntensity": 1.0,
+
+    "rotationDegrees": 0.0,
+    "lightingRotationDegrees": 0.0,
+
+    "visibleInRaster": true,
+    "visibleInDxr": true,
+    "specularMissUsesDisplaySky": false,
+
+    "fallbackTopColor": [ 0.20, 0.36, 0.62 ],
+    "fallbackHorizonColor": [ 0.76, 0.80, 0.86 ],
+    "fallbackBottomColor": [ 0.42, 0.45, 0.50 ]
+  }
 }

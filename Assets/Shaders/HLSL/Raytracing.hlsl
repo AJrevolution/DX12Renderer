@@ -102,6 +102,38 @@ cbuffer PerFrameConstants : register(b0)
     float3 PointLightPad;
 
     PointLightData PointLights[MAX_POINT_LIGHTS];
+    
+    float IblIntensity;
+    float IblRotationRadians;
+    uint HasLightingEnvironment;
+    uint _padIbl;
+};
+
+struct RtSkyConstants
+{
+    uint enabled;
+    uint hasDisplaySky;
+    uint visibleInDxr;
+    uint specularMissUsesDisplaySky;
+
+    float displayIntensity;
+    float rotationRadians;
+    uint2 pad0;
+
+    float4 fallbackTopColor;
+    float4 fallbackHorizonColor;
+    float4 fallbackBottomColor;
+};
+
+struct RtEnvironmentLightingConstants
+{
+    uint hasRadianceTexture;
+    uint hasLightingEnvironment;
+    uint2 pad0;
+
+    float lightingIntensity;
+    float lightingRotationRadians;
+    uint2 pad1;
 };
 
 cbuffer RtRayGenConstants : register(b1)
@@ -152,6 +184,10 @@ cbuffer RtRayGenConstants : register(b1)
     float RtRestirMaxAge;
     float RtRestirMinTarget;
     float RtRestirMaxWeight;
+    
+    RtSkyConstants RtSky;
+    RtEnvironmentLightingConstants RtEnvironment;
+    
 };
 
 static const uint RT_RAY_PRIMARY_DIFFUSE = 0u;
@@ -225,6 +261,8 @@ Texture2D<float4>                   g_IBLDiffuse : register(t381);
 Texture2D<float4>                   g_IBLSpecular : register(t382); 
 StructuredBuffer<RtEnvAliasEntry>   g_EnvAlias : register(t383);
 StructuredBuffer<RtRestirReservoir> g_RestirResolveReservoir : register(t384);
+TextureCube<float4>                 g_RtDisplaySky : register(t385);
+Texture2D<float4>                   g_RtEnvironmentRadiance : register(t386);
 SamplerState                        g_LinearWrap : register(s0);
 SamplerState                        g_LinearClamp : register(s1);
 
@@ -1052,6 +1090,20 @@ bool TraceEnvironmentVisibility(float3 worldPos, float3 geomNormal, float3 wi)
     return shadowPayload.occluded == 0u;
 }
 
+float3 WorldToLightingEnvDir(float3 worldDir)
+{
+    return RotateY(
+        SafeNormalize(worldDir),
+        RtEnvironment.lightingRotationRadians);
+}
+
+float3 LightingEnvToWorldDir(float3 envDir)
+{
+    return RotateY(
+        SafeNormalize(envDir),
+        -RtEnvironment.lightingRotationRadians);
+}
+
 float2 DirToLatLongUV(float3 d)
 {
     d = SafeNormalize(d);
@@ -1060,20 +1112,23 @@ float2 DirToLatLongUV(float3 d)
     return float2(u, 1.0f - v);
 }
 
-float3 LookupEnvironmentRadiance(float3 dir)
+float2 LightingEnvUV(float3 worldDir)
 {
-    if (HasIBL == 0)
-        return 0.0f.xxx;
+    return DirToLatLongUV(
+        WorldToLightingEnvDir(worldDir));
+}
 
-    // Current DXR environment lookup path.
-    //
-    // If a true CPU mip-0 environment texture is added later, this function is
-    // the only place that should swap to that texture. SampleEnvironment() and
-    // PdfEnvironment() still use cubemap alias/PDF mapping.
-    float2 uv = DirToLatLongUV(dir);
-    float3 Li = g_IBLSpecular.SampleLevel(g_LinearClamp, uv, 0.0f).rgb;
+float3 LookupEnvironmentRadiance(float3 worldDir)
+{
+    float2 uv =
+        LightingEnvUV(worldDir);
 
-    return RtEnvIntensity * max(Li, 0.0f.xxx);
+    float3 radiance =
+        RtEnvironment.hasRadianceTexture != 0u
+            ? g_RtEnvironmentRadiance.SampleLevel(g_LinearWrap, uv, 0.0f).rgb
+            : g_IBLSpecular.SampleLevel(g_LinearWrap, uv, 0.0f).rgb;
+
+    return radiance * RtEnvironment.lightingIntensity;
 }
 
 bool IsFiniteScalarRt(float v)
@@ -1137,8 +1192,14 @@ EnvSample SampleEnvironment(float2 uSelect, float2 uTexel)
         (float2(float(x), float(y)) + texelXi) /
         float(RtEnvFaceSize);
 
-    float3 wi = CubeFaceUVToDirection(face, cubeUv);
-    float3 Li = LookupEnvironmentRadiance(wi);
+    float3 envDir =
+        CubeFaceUVToDirection(face, cubeUv);
+
+    float3 wi =
+        LightingEnvToWorldDir(envDir);
+
+    float3 Li =
+        LookupEnvironmentRadiance(wi);
 
     s.wi = wi;
     s.Li = Li;
@@ -1161,8 +1222,14 @@ float PdfEnvironment(float3 wi)
         return 0.0f;
     }
 
+    float3 envDir =
+        WorldToLightingEnvDir(wi);
+
     float2 cubeUv;
-    uint face = DirectionToCubeFaceUV(SafeNormalize(wi), cubeUv);
+    uint face =
+        DirectionToCubeFaceUV(
+            SafeNormalize(envDir),
+            cubeUv);
 
     uint x = min(
         uint(cubeUv.x * float(RtEnvFaceSize)),
@@ -1376,6 +1443,41 @@ bool RestirInitialEnabled()
             RtEnableRestirEnvDi != 0u ||
             IsRtRestirInitialDebugView(RtRestirDebugView)
         );
+}
+
+float3 ProceduralRtSky(float3 dir)
+{
+    float y =
+        saturate(dir.y * 0.5f + 0.5f);
+
+    float horizon =
+        saturate(1.0f - abs(dir.y) * 3.0f);
+
+    float3 base =
+        lerp(
+            RtSky.fallbackBottomColor.rgb,
+            RtSky.fallbackTopColor.rgb,
+            y);
+
+    return lerp(
+        base,
+        RtSky.fallbackHorizonColor.rgb,
+        horizon * 0.65f);
+}
+
+float3 SampleRtDisplaySky(float3 dir)
+{
+    dir =
+        RotateY(
+            SafeNormalize(dir),
+            RtSky.rotationRadians);
+
+    float3 sky =
+        RtSky.hasDisplaySky != 0u
+            ? g_RtDisplaySky.SampleLevel(g_LinearClamp, dir, 0.0f).rgb
+            : ProceduralRtSky(dir);
+
+    return sky * RtSky.displayIntensity;
 }
 
 // RT IBL parity target:
@@ -1842,37 +1944,46 @@ void Miss(inout RayPayload payload)
     {
         return;
     }
+        
+    if (payload.rayType == RT_RAY_INDIRECT)
+    {
+        uint2 pixel = DispatchRaysIndex().xy;
+        g_AovViewZRaw[pixel] = RT_VIEWZ_INVALID;
+
+        payload.color = 0.0f.xxx;
+        return;
+    }
     
     if (payload.rayType == RT_RAY_PRIMARY_SPECULAR)
     {
         uint2 pixel = DispatchRaysIndex().xy;
         g_AovViewZRaw[pixel] = RT_VIEWZ_INVALID;
-        
-        payload.color = 0.0f.xxx;
-        return;
-    }
-    
-    float3 envRadiance = LookupEnvironmentRadiance(WorldRayDirection());
-    float3 sky = EvalSky(WorldRayDirection());
-    
-    if (payload.rayType == RT_RAY_INDIRECT)
-    {
-        uint samplingDebugView = RtSamplingDebugView;
 
-        const bool useEnvRadianceForIndirectMiss =
-            EnvSamplingReady() &&
-            RtEnvAliasFallback == 0u &&
-            (
-                RtUseEnvNeeForFinal != 0u ||
-                samplingDebugView == 101u
-            );
+        const bool useSpecDisplaySky =
+            RtSky.enabled != 0u &&
+            RtSky.visibleInDxr != 0u &&
+            RtSky.specularMissUsesDisplaySky != 0u;
 
         payload.color =
-            useEnvRadianceForIndirectMiss
-                ? envRadiance
-                : sky;
+            useSpecDisplaySky
+                ? SampleRtDisplaySky(WorldRayDirection())
+                : 0.0f.xxx;
+
         return;
     }
+    
+    const float3 rayDir =
+        WorldRayDirection();
+
+    const bool useDisplaySky =
+        RtSky.enabled != 0u &&
+        RtSky.visibleInDxr != 0u;
+
+    float3 sky =
+        useDisplaySky
+            ? SampleRtDisplaySky(rayDir)
+            : EvalSky(rayDir);
+   
     
     if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE)
     {

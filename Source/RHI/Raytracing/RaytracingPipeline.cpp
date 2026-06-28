@@ -39,6 +39,7 @@ namespace
     static constexpr uint32_t kRtRegisterIblSpecular = 382;
     static constexpr uint32_t kRtRegisterEnvAlias = 383;
     static constexpr uint32_t kRtRegisterRestirResolveReservoir = 384;
+    static constexpr uint32_t kRtRegisterDisplaySky = 385;
 
     static constexpr uint32_t kRtMaterialTextureCount =
         kRtMaxMaterials * kRtTexturesPerMaterial;
@@ -46,11 +47,13 @@ namespace
     static constexpr uint32_t kRtLastMaterialTextureRegister =
         kRtRegisterMaterialTextures + kRtMaterialTextureCount - 1;
 
+    static constexpr uint32_t kRtRegisterEnvironmentRadiance = 386;
+
     static constexpr uint32_t kRtHighestSrvRegister =
-        kRtRegisterRestirResolveReservoir;
+        kRtRegisterEnvironmentRadiance;
 
     // Descriptor range starts at t1.
-    // NumDescriptors = 384 covers t1 through t384 inclusive.
+    // NumDescriptors = 386 covers t1 through t386 inclusive.
     static constexpr uint32_t kRtSrvTableCount =
         kRtHighestSrvRegister - kRtRegisterFirstSrv + 1;
 
@@ -59,7 +62,7 @@ namespace
     static_assert(kRtRegisterImportedVerts == 330);
     static_assert(kRtRegisterImportedIndices == 346);
     static_assert(kRtRegisterBrdfLut == 380);
-    static_assert(kRtSrvTableCount == 384);
+    static_assert(kRtSrvTableCount == 386);
 }
 
 static std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path)

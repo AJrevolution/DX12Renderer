@@ -52,6 +52,11 @@ cbuffer PerFrameConstants : register(b0)
     float3 PointLightPad;
 
     PointLightData PointLights[MAX_POINT_LIGHTS];
+    
+    float IblIntensity;
+    float IblRotationRadians;
+    uint HasLightingEnvironment;
+    uint _padIbl;
 };
 
 struct PSIn
@@ -77,6 +82,16 @@ float2 DirToLatLongUV(float3 d)
     float u = atan2(d.z, d.x) / (2.0f * PI) + 0.5f;
     float v = asin(clamp(d.y, -1.0f, 1.0f)) / PI + 0.5f;
     return float2(u, 1.0f - v);
+}
+
+float2 LightingEnvUV(float3 worldDir)
+{
+    float3 envDir =
+        RotateY(
+            SafeNormalize(worldDir),
+            IblRotationRadians);
+
+    return DirToLatLongUV(envDir);
 }
 
 float ComputeShadowFactor(float3 worldPos, float3 worldNormal, float3 lightDir)
@@ -217,14 +232,14 @@ float4 main(PSIn i) : SV_Target
 
     if (HasIBL > 0)
     {
-        float2 diffuseUV = DirToLatLongUV(N);
+        float2 diffuseUV = LightingEnvUV(N);
         diffuseEnv = g_IBLDiffuse.Sample(g_LinearClamp, diffuseUV).rgb;
 
         float3 R = reflect(-V, N);
         float3 Rrough = normalize(lerp(R, N, roughness * roughness));
 
-        float2 specUV0 = DirToLatLongUV(R);
-        float2 specUV1 = DirToLatLongUV(Rrough);
+        float2 specUV0 = LightingEnvUV(R);
+        float2 specUV1 = LightingEnvUV(Rrough);
 
         float3 specSharp = g_IBLSpecular.Sample(g_LinearClamp, specUV0).rgb;
         float3 specBlur = g_IBLSpecular.Sample(g_LinearClamp, specUV1).rgb;
@@ -241,6 +256,9 @@ float4 main(PSIn i) : SV_Target
 
     float3 iblDiffuse = kd * base * diffuseEnv * ao;
     float3 iblSpec = specularEnv * (F0 * brdf.x + brdf.y);
+    
+    iblDiffuse *= IblIntensity;
+    iblSpec *= IblIntensity;
 
     float3 lit = direct + iblDiffuse + iblSpec + emissive;
     

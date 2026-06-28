@@ -36,6 +36,11 @@ struct PerFrameConstants
     DirectX::XMFLOAT3 pointLightPad{};
 
     PointLight pointLights[kMaxPointLights]{};
+
+    float iblIntensity = 1.0f;
+    float iblRotationRadians = 0.0f;
+    uint32_t hasLightingEnvironment = 0;
+    uint32_t _padIbl = 0;
 };
 static_assert(sizeof(PointLight) == 32, "PointLight must match HLSL PointLightData layout.");
 static_assert((sizeof(PerFrameConstants) % 16) == 0); 

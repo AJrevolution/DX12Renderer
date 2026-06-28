@@ -79,6 +79,17 @@ float3 SafeNormalize(float3 v)
     return (len2 > 1e-8f) ? v * rsqrt(len2) : float3(0, 0, 1);
 }
 
+float3 RotateY(float3 d, float angle)
+{
+    float s = sin(angle);
+    float c = cos(angle);
+
+    return float3(
+        d.x * c - d.z * s,
+        d.y,
+        d.x * s + d.z * c);
+}
+
 float3 SRGBToLinear(float3 c)
 {
     // Only use if you sample non-sRGB resources. Prefer SRGB SRVs for baseColor.

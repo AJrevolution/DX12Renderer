@@ -163,6 +163,7 @@
     <ClInclude Include="Source\Renderer\Passes\RtRestirTemporalPass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtTemporalPass.h" />
     <ClInclude Include="Source\Renderer\Passes\ShadowPass.h" />
+    <ClInclude Include="Source\Renderer\Passes\SkyboxPass.h" />
     <ClInclude Include="Source\Renderer\RtEnvironmentImportance.h" />
     <ClInclude Include="Source\Renderer\RtEnvironmentMapCpu.h" />
     <ClInclude Include="Source\Renderer\SceneData.h" />
@@ -219,6 +220,7 @@
     <ClCompile Include="Source\Renderer\Passes\RtRestirTemporalPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtTemporalPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\ShadowPass.cpp" />
+    <ClCompile Include="Source\Renderer\Passes\SkyboxPass.cpp" />
     <ClCompile Include="Source\Renderer\RtEnvironmentImportance.cpp" />
     <ClCompile Include="Source\Renderer\RtEnvironmentMapCpu.cpp" />
     <ClCompile Include="Source\RHI\CommandList\ResourceStateTracker.cpp" />
@@ -539,6 +541,26 @@ if /I "$(Configuration)"=="Debug" (
   dxc.exe -T ps_6_0 -E main -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Shadow_FS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Shadow_FS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\Shadow_FS.cso;%(Outputs)</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="Assets\Shaders\HLSL\Skybox_PS.hlsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if "$(Configuration)"=="Debug" (
+  dxc.exe -T ps_6_0 -E main -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Skybox_PS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Skybox_PS.hlsl"
+) else (
+  dxc.exe -T ps_6_0 -E main -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Skybox_PS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Skybox_PS.hlsl"
+)</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\Skybox_PS.cso;%(Outputs)</Outputs>
+    </CustomBuild>
+    <CustomBuild Include="Assets\Shaders\HLSL\Skybox_VS.hlsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if "$(Configuration)"=="Debug" (
+  dxc.exe -T vs_6_0 -E main -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Skybox_VS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Skybox_VS.hlsl"
+) else (
+  dxc.exe -T vs_6_0 -E main -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Skybox_VS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Skybox_VS.hlsl"
+)</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\Skybox_VS.cso;%(Outputs)</Outputs>
     </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

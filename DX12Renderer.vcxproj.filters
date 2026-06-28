@@ -186,6 +186,9 @@
     <ClInclude Include="Source\Scene\SceneManifest.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\SkyboxPass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -323,6 +326,9 @@
     <ClCompile Include="Source\Scene\SceneManifest.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\SkyboxPass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -362,5 +368,7 @@
     <CustomBuild Include="Assets\Shaders\HLSL\RtRestirTemporal_CS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\RtRestirApply_CS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\Shadow_FS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\Skybox_PS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\Skybox_VS.hlsl" />
   </ItemGroup>
 </Project>
