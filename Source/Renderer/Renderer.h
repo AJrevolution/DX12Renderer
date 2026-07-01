@@ -220,6 +220,7 @@ public:
     bool IsRtAccumulationEnabled() const;
     void SetRtAccumulationEnabled(bool enabled);
     void ToggleRtAccumulation();
+    bool ReloadSceneManifestLive();
 
 private:
 
@@ -251,6 +252,19 @@ private:
         uint32_t importedBlasCount = 0;
         uint32_t srvTableCount = 0;
         uint32_t tlasInstanceCount = 0;
+    };
+
+    struct SceneLiveReloadDiff
+    {
+        bool modelStructureChanged = false;
+        bool environmentAssetPathsChanged = false;
+
+        bool sunChanged = false;
+        bool pointLightsChanged = false;
+        bool environmentScalarsChanged = false;
+
+        bool anyLiveChange = false;
+        bool rejected = false;
     };
 
     struct RtTemporalConstants
@@ -1648,6 +1662,36 @@ private:
 
     void LogEnvironmentContract() const;
 
+    SceneLiveReloadDiff ClassifySceneManifestLiveReload(
+        const SceneManifest& staged) const;
+
+    bool ApplySceneManifestLive(
+        const SceneManifest& staged,
+        const SceneLiveReloadDiff& diff);
+
+    void ApplyManifestLightsLive(
+        const SceneManifest& staged);
+
+    void ApplyManifestSunLive(
+        const SceneManifest& staged);
+
+    void ApplyManifestPointLightsLive(
+        const SceneManifest& staged);
+
+    void ApplyEnvironmentScalarsLive(
+        const SceneManifest& staged);
+
+    void InvalidateLightingForLiveEdit(
+        const wchar_t* reason);
+
+    void LogSceneLiveReloadDiff(
+        const SceneLiveReloadDiff& diff) const;
+
+    void ResolveProceduralGeometryPolicy();
+    bool ShouldAppendProceduralGeometry() const;
+
+    void AppendProceduralDraws(float time);
+
     TrianglePass m_triangle;
     UploadArena  m_upload;
     UploadArena  m_assetUpload;
@@ -2001,6 +2045,11 @@ private:
 
     std::vector<const Material*> m_rtMaterialTable;
     std::unordered_map<const Material*, uint32_t> m_rtMaterialToId;
+
+    // Immutable/default bounds for the built-in procedural fallback scene.
+    // Used as the bounds base only when procedural geometry is active.
+    DirectX::XMFLOAT3 m_defaultSceneBoundsCenter = { 0.0f, 0.5f, 0.0f };
+    DirectX::XMFLOAT3 m_defaultSceneBoundsExtent = { 3.5f, 3.5f, 3.5f };
     
     DirectX::XMFLOAT3 m_sceneBoundsCenter = { 0.0f, 0.5f, 0.0f };
     DirectX::XMFLOAT3 m_sceneBoundsExtent = { 3.5f, 3.5f, 3.5f };
@@ -2577,6 +2626,14 @@ private:
     SkyboxPass m_skyboxPass;
 
     Texture m_rtEnvironmentRadianceTex;
+
+    std::filesystem::path m_sceneManifestPath;
+
+    uint64_t m_sceneAuthoringRevision = 0;
+    uint64_t m_lightingRevision = 0;
+    uint64_t m_environmentRevision = 0;
+
+    bool m_proceduralGeometryActive = true;
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

@@ -14,6 +14,7 @@ namespace
         case 'F':
         case 'R':
         case '0':
+        case VK_F1:
         case VK_F6:
         case VK_F7:
         case VK_F8:

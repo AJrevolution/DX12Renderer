@@ -371,6 +371,101 @@ namespace
         return { a.x * s, a.y * s, a.z * s };
     }
 
+    constexpr float kPi = 3.14159265358979323846f;
+
+    bool IsFiniteFloat(float v)
+    {
+        return std::isfinite(v);
+    }
+
+    bool IsFiniteFloat3(const DirectX::XMFLOAT3& v)
+    {
+        return
+            IsFiniteFloat(v.x) &&
+            IsFiniteFloat(v.y) &&
+            IsFiniteFloat(v.z);
+    }
+
+    DirectX::XMFLOAT3 ClampNonNegativeFloat3(
+        DirectX::XMFLOAT3 v,
+        DirectX::XMFLOAT3 fallback)
+    {
+        if (!IsFiniteFloat3(v))
+            return fallback;
+
+        return
+        {
+            std::max(0.0f, v.x),
+            std::max(0.0f, v.y),
+            std::max(0.0f, v.z)
+        };
+    }
+
+    DirectX::XMFLOAT3 NormalizeOrFallback(
+        DirectX::XMFLOAT3 v,
+        DirectX::XMFLOAT3 fallback)
+    {
+        using namespace DirectX;
+
+        if (!IsFiniteFloat3(v))
+            return fallback;
+
+        XMVECTOR n =
+            XMVectorSet(v.x, v.y, v.z, 0.0f);
+
+        const float lenSq =
+            XMVectorGetX(XMVector3LengthSq(n));
+
+        if (lenSq <= 1.0e-8f)
+            return fallback;
+
+        n = XMVector3Normalize(n);
+
+        XMFLOAT3 out{};
+        XMStoreFloat3(&out, n);
+        return out;
+    }
+
+    float ClampNonNegativeFloat(float v, float fallback = 0.0f)
+    {
+        if (!std::isfinite(v))
+            return fallback;
+
+        return std::max(0.0f, v);
+    }
+
+    float DegreesToRadians(float degrees)
+    {
+        if (!std::isfinite(degrees))
+            return 0.0f;
+
+        return degrees * kPi / 180.0f;
+    }
+
+    bool PathEquivalentForManifest(
+        const std::filesystem::path& a,
+        const std::filesystem::path& b)
+    {
+        return a.lexically_normal().generic_wstring() ==
+            b.lexically_normal().generic_wstring();
+    }
+
+    bool FloatNear(float a, float b, float eps = 1.0e-5f)
+    {
+        return std::fabs(a - b) <= eps;
+    }
+
+    bool Float3Near(
+        const DirectX::XMFLOAT3& a,
+        const DirectX::XMFLOAT3& b,
+        float eps = 1.0e-5f)
+    {
+        return
+            FloatNear(a.x, b.x, eps) &&
+            FloatNear(a.y, b.y, eps) &&
+            FloatNear(a.z, b.z, eps);
+    }
+
 }
 
 const DebugViewDesc* FindDebugViewDesc(uint32_t id)
@@ -874,7 +969,7 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
     // One-shot/static asset imports: large glTF buffers and texture uploads.
     // This prevents startup asset import pressure from permanently bloating the
     // dynamic frame upload budget.
-    m_assetUpload.Initialize(device, frameCount, 512ull * 1024ull * 1024ull);
+    m_assetUpload.Initialize(device, frameCount, 1024ull * 1024ull * 1024ull);
 
     // CPU-only DSV heap
     m_dsvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 16, false, L"DSV Heap (CPU)");
@@ -2804,61 +2899,9 @@ void Renderer::BuildDrawList(float time)
     m_draws.clear();
     m_draws.reserve(4);
 
-    using namespace DirectX;
-
-    const float oscillation = sinf(time * 1.5f);
-    const float rotationAngle = oscillation * 1.1f;
-
+    if (ShouldAppendProceduralGeometry())
     {
-        DrawItem item{};
-        item.mesh = &m_floor;
-        item.material = &m_floorMaterial;
-        item.submeshIndex = 0;
-        XMStoreFloat4x4(&item.world, XMMatrixIdentity());
-        item.rtObjectId = 1u;
-        m_draws.push_back(item);
-    }
-
-    // Center rotating metal test object
-    {
-        DrawItem item{};
-        item.mesh = &m_quad;
-        item.material = &m_metalMaterial;
-        item.submeshIndex = 0;
-        XMMATRIX world =
-            XMMatrixRotationY(rotationAngle) *
-            XMMatrixTranslation(0.0f, 0.5f, 0.0f);
-        XMStoreFloat4x4(&item.world, world);
-        item.rtObjectId = 2u;
-        m_draws.push_back(item);
-    }
-
-    // Left matte reference
-    {
-        DrawItem item{};
-        item.mesh = &m_quad;
-        item.material = &m_matteMaterial;
-        item.submeshIndex = 0;
-        XMMATRIX world =
-            XMMatrixScaling(0.9f, 0.9f, 0.9f) *
-            XMMatrixTranslation(-1.75f, 0.5f, 0.0f);
-        XMStoreFloat4x4(&item.world, world);
-        item.rtObjectId = 3u;
-        m_draws.push_back(item);
-    }
-
-    // Right glossy reference
-    {
-        DrawItem item{};
-        item.mesh = &m_quad;
-        item.material = &m_glossyMaterial;
-        item.submeshIndex = 0;
-        XMMATRIX world =
-            XMMatrixScaling(0.9f, 0.9f, 0.9f) *
-            XMMatrixTranslation(1.75f, 0.5f, 0.0f);
-        XMStoreFloat4x4(&item.world, world);
-        item.rtObjectId = 4u;
-        m_draws.push_back(item);
+        AppendProceduralDraws(time);
     }
 
     AppendSceneModelDraws();
@@ -10815,6 +10858,7 @@ void Renderer::LoadSceneFromManifest(
     m_sceneManifest = {};
     m_sceneManifestLoaded = false;
     m_sceneModelSummaryLogged = false;
+    m_sceneManifestPath.clear();
 
     const std::filesystem::path content =
         Paths::ContentDir_DevOnly();
@@ -10831,6 +10875,8 @@ void Renderer::LoadSceneFromManifest(
 
     const std::filesystem::path manifestPath =
         content / L"Scenes" / L"default_scene.json";
+
+    m_sceneManifestPath = manifestPath;
 
     if (!std::filesystem::exists(manifestPath))
     {
@@ -10914,6 +10960,7 @@ void Renderer::LoadSceneFromManifest(
     }
 
     AssignSceneModelRtBufferIndices();
+    ResolveProceduralGeometryPolicy();
     AdoptSceneModelBounds();
 
     if (!m_sceneModelSummaryLogged)
@@ -10996,6 +11043,7 @@ void Renderer::LoadFallbackImportedScene(
     }
 
     AssignSceneModelRtBufferIndices();
+    ResolveProceduralGeometryPolicy();
     AdoptSceneModelBounds();
     LogSceneModelSummary();
 
@@ -11308,14 +11356,24 @@ const AccelerationStructure* Renderer::GetSceneModelBlasForDrawItem(
 
 void Renderer::AdoptSceneModelBounds()
 {
-    // Preserve procedural scene fallback bounds first.
-    DirectX::XMFLOAT3 mergedMin =
-        SubFloat3(m_sceneBoundsCenter, m_sceneBoundsExtent);
+    DirectX::XMFLOAT3 mergedMin{};
+    DirectX::XMFLOAT3 mergedMax{};
+    bool hasBounds = false;
 
-    DirectX::XMFLOAT3 mergedMax =
-        AddFloat3(m_sceneBoundsCenter, m_sceneBoundsExtent);
+    if (m_proceduralGeometryActive)
+    {
+        mergedMin =
+            SubFloat3(
+                m_defaultSceneBoundsCenter,
+                m_defaultSceneBoundsExtent);
 
-    bool hasAnyModelBounds = false;
+        mergedMax =
+            AddFloat3(
+                m_defaultSceneBoundsCenter,
+                m_defaultSceneBoundsExtent);
+
+        hasBounds = true;
+    }
 
     for (const SceneModelInstance& sceneModel : m_sceneModels)
     {
@@ -11328,13 +11386,25 @@ void Renderer::AdoptSceneModelBounds()
         const LoadedModel::Bounds& b =
             sceneModel.model.GetBounds();
 
-        mergedMin = MinFloat3(mergedMin, b.min);
-        mergedMax = MaxFloat3(mergedMax, b.max);
-        hasAnyModelBounds = true;
+        if (!hasBounds)
+        {
+            mergedMin = b.min;
+            mergedMax = b.max;
+            hasBounds = true;
+        }
+        else
+        {
+            mergedMin = MinFloat3(mergedMin, b.min);
+            mergedMax = MaxFloat3(mergedMax, b.max);
+        }
     }
 
-    if (!hasAnyModelBounds)
+    if (!hasBounds)
+    {
+        m_sceneBoundsCenter = m_defaultSceneBoundsCenter;
+        m_sceneBoundsExtent = m_defaultSceneBoundsExtent;
         return;
+    }
 
     m_sceneBoundsCenter =
         MulFloat3(
@@ -11347,7 +11417,7 @@ void Renderer::AdoptSceneModelBounds()
             0.5f);
 
     OutputDebugStringW(
-        (L"Scene bounds updated from scene models. Center=(" +
+        (L"Scene bounds updated. Center=(" +
             std::to_wstring(m_sceneBoundsCenter.x) + L", " +
             std::to_wstring(m_sceneBoundsCenter.y) + L", " +
             std::to_wstring(m_sceneBoundsCenter.z) + L") Extent=(" +
@@ -11434,7 +11504,11 @@ void Renderer::LoadSceneEnvironment(
     {
         OutputDebugStringW(
             L"Scene environment missing/disabled; using procedural sky fallback.\n");
-        
+               
+        AssignSceneModelRtBufferIndices();
+        ResolveProceduralGeometryPolicy();
+        AdoptSceneModelBounds();
+
         UseProceduralSkyFallback(device);
         LoadDefaultLightingEnvironment(device, cl, frameIndex);
         return;
@@ -12046,4 +12120,577 @@ void Renderer::LogEnvironmentContract() const
         (L"  Specular miss uses display sky: " +
             std::wstring(BoolText(m_environment.specularMissUsesDisplaySky)) +
             L"\n").c_str());
+}
+
+Renderer::SceneLiveReloadDiff Renderer::ClassifySceneManifestLiveReload(
+    const SceneManifest& staged) const
+{
+    SceneLiveReloadDiff diff{};
+
+    // Model changes are structural for 3M.1.
+    if (staged.models.size() != m_sceneManifest.models.size())
+    {
+        diff.modelStructureChanged = true;
+    }
+    else
+    {
+        for (size_t i = 0; i < staged.models.size(); ++i)
+        {
+            const SceneModelDesc& a = m_sceneManifest.models[i];
+            const SceneModelDesc& b = staged.models[i];
+
+            if (a.name != b.name ||
+                !PathEquivalentForManifest(a.path, b.path) ||
+                a.enabled != b.enabled ||
+                a.rasterEnabled != b.rasterEnabled ||
+                a.dxrEnabled != b.dxrEnabled ||
+                a.castShadows != b.castShadows ||
+                a.objectIdBase != b.objectIdBase ||
+                !Float3Near(a.translation, b.translation) ||
+                !Float3Near(a.rotationDegrees, b.rotationDegrees) ||
+                !Float3Near(a.scale, b.scale))
+            {
+                diff.modelStructureChanged = true;
+                break;
+            }
+        }
+    }
+
+    if (m_sceneManifest.hasProceduralGeometry !=
+        staged.hasProceduralGeometry)
+    {
+        diff.modelStructureChanged = true;
+    }
+    else if (m_sceneManifest.hasProceduralGeometry &&
+        staged.hasProceduralGeometry)
+    {
+        if (m_sceneManifest.proceduralGeometry.mode !=
+            staged.proceduralGeometry.mode)
+        {
+            diff.modelStructureChanged = true;
+        }
+    }
+
+    // Environment asset path changes are deferred to asset reload phase.
+    if (m_sceneManifest.hasEnvironment != staged.hasEnvironment)
+    {
+        diff.environmentScalarsChanged = true;
+    }
+
+    if (m_sceneManifest.hasEnvironment && staged.hasEnvironment)
+    {
+        const SceneEnvironmentDesc& a =
+            m_sceneManifest.environment;
+
+        const SceneEnvironmentDesc& b =
+            staged.environment;
+
+        if (!PathEquivalentForManifest(a.displayPath, b.displayPath) ||
+            !PathEquivalentForManifest(a.lightingPath, b.lightingPath) ||
+            !PathEquivalentForManifest(a.lightingDiffusePath, b.lightingDiffusePath) ||
+            !PathEquivalentForManifest(a.lightingSpecularPath, b.lightingSpecularPath) ||
+            !PathEquivalentForManifest(a.lightingRadiancePath, b.lightingRadiancePath) ||
+            a.useDisplayForLighting != b.useDisplayForLighting)
+        {
+            diff.environmentAssetPathsChanged = true;
+        }
+
+        if (a.enabled != b.enabled ||
+            !FloatNear(a.displayIntensity, b.displayIntensity) ||
+            !FloatNear(a.lightingIntensity, b.lightingIntensity) ||
+            !FloatNear(a.rotationDegrees, b.rotationDegrees) ||
+            !FloatNear(a.lightingRotationDegrees, b.lightingRotationDegrees) ||
+            a.visibleInRaster != b.visibleInRaster ||
+            a.visibleInDxr != b.visibleInDxr ||
+            a.specularMissUsesDisplaySky != b.specularMissUsesDisplaySky ||
+            !Float3Near(a.fallbackTopColor, b.fallbackTopColor) ||
+            !Float3Near(a.fallbackHorizonColor, b.fallbackHorizonColor) ||
+            !Float3Near(a.fallbackBottomColor, b.fallbackBottomColor))
+        {
+            diff.environmentScalarsChanged = true;
+        }
+    }
+
+    if (m_sceneManifest.hasSun != staged.hasSun)
+    {
+        diff.sunChanged = true;
+    }
+    else if (m_sceneManifest.hasSun && staged.hasSun)
+    {
+        const SceneSunDesc& a = m_sceneManifest.sun;
+        const SceneSunDesc& b = staged.sun;
+
+        if (a.enabled != b.enabled ||
+            !Float3Near(a.direction, b.direction) ||
+            !Float3Near(a.color, b.color) ||
+            !FloatNear(a.intensity, b.intensity))
+        {
+            diff.sunChanged = true;
+        }
+    }
+
+    if (m_sceneManifest.pointLights.size() != staged.pointLights.size())
+    {
+        diff.pointLightsChanged = true;
+    }
+    else
+    {
+        for (size_t i = 0; i < staged.pointLights.size(); ++i)
+        {
+            const ScenePointLightDesc& a =
+                m_sceneManifest.pointLights[i];
+
+            const ScenePointLightDesc& b =
+                staged.pointLights[i];
+
+            if (a.name != b.name ||
+                a.enabled != b.enabled ||
+                !Float3Near(a.position, b.position) ||
+                !Float3Near(a.color, b.color) ||
+                !FloatNear(a.intensity, b.intensity) ||
+                !FloatNear(a.range, b.range))
+            {
+                diff.pointLightsChanged = true;
+                break;
+            }
+        }
+    }
+
+    diff.anyLiveChange =
+        diff.sunChanged ||
+        diff.pointLightsChanged ||
+        diff.environmentScalarsChanged;
+
+    diff.rejected =
+        diff.modelStructureChanged ||
+        diff.environmentAssetPathsChanged;
+
+    return diff;
+}
+
+bool Renderer::ReloadSceneManifestLive()
+{
+    if (m_sceneManifestPath.empty())
+    {
+        OutputDebugStringW(
+            L"Scene live reload failed: manifest path is empty.\n");
+
+        return false;
+    }
+
+    SceneManifest staged{};
+
+    if (!staged.LoadFromFile(m_sceneManifestPath))
+    {
+        OutputDebugStringW(
+            (L"Scene live reload failed; keeping previous scene. " +
+                staged.lastError +
+                L"\n").c_str());
+
+        return false;
+    }
+
+    const SceneLiveReloadDiff diff =
+        ClassifySceneManifestLiveReload(staged);
+
+    LogSceneLiveReloadDiff(diff);
+
+    if (diff.rejected)
+    {
+        OutputDebugStringW(
+            L"Scene live reload rejected. "
+            L"3M.1 only supports lights and environment scalar edits. "
+            L"Use a full scene reload phase for model or asset path changes.\n");
+
+        return false;
+    }
+
+    if (!diff.anyLiveChange)
+    {
+        OutputDebugStringW(
+            L"Scene live reload: manifest parsed successfully; no live-safe changes detected.\n");
+
+        return true;
+    }
+
+    return ApplySceneManifestLive(staged, diff);
+}
+
+bool Renderer::ApplySceneManifestLive(
+    const SceneManifest& staged,
+    const SceneLiveReloadDiff& diff)
+{
+    bool lightingInvalidated = false;
+
+    if (diff.sunChanged)
+    {
+        ApplyManifestLightsLive(staged);
+        lightingInvalidated = true;
+    }
+
+    if (diff.pointLightsChanged)
+    {
+        ApplyManifestPointLightsLive(staged);
+        lightingInvalidated = true;
+    }
+
+    if (diff.environmentScalarsChanged)
+    {
+        ApplyEnvironmentScalarsLive(staged);
+        lightingInvalidated = true;
+    }
+
+    m_sceneManifest = staged;
+
+    ++m_sceneAuthoringRevision;
+
+    if (lightingInvalidated)
+    {
+        InvalidateLightingForLiveEdit(
+            L"scene manifest live reload");
+    }
+
+    OutputDebugStringW(
+        (L"Scene live reload applied. Revision=" +
+            std::to_wstring(m_sceneAuthoringRevision) +
+            L"\n").c_str());
+
+    return true;
+}
+
+void Renderer::ApplyManifestLightsLive(
+    const SceneManifest& staged)
+{
+    ApplyManifestSunLive(staged);
+    ApplyManifestPointLightsLive(staged);
+}
+
+void Renderer::ApplyManifestSunLive(
+    const SceneManifest& staged)
+{
+    if (!staged.hasSun)
+    {
+        // Preserve existing sun if the block is omitted.
+        return;
+    }
+
+    if (!staged.sun.enabled)
+    {
+        m_sceneData.sun.intensity = 0.0f;
+
+        OutputDebugStringW(
+            L"Live reload: sun disabled.\n");
+
+        return;
+    }
+
+    m_sceneData.sun.direction =
+        NormalizeOrFallback(
+            staged.sun.direction,
+            { -0.35f, -1.0f, -0.25f });
+
+    m_sceneData.sun.color =
+        ClampNonNegativeFloat3(
+            staged.sun.color,
+            { 1.0f, 1.0f, 1.0f });
+
+    m_sceneData.sun.intensity =
+        ClampNonNegativeFloat(
+            staged.sun.intensity,
+            0.0f);
+
+    OutputDebugStringW(
+        (L"Live reload: sun updated. Direction=(" +
+            std::to_wstring(m_sceneData.sun.direction.x) + L", " +
+            std::to_wstring(m_sceneData.sun.direction.y) + L", " +
+            std::to_wstring(m_sceneData.sun.direction.z) + L"), Intensity=" +
+            std::to_wstring(m_sceneData.sun.intensity) +
+            L"\n").c_str());
+}
+
+void Renderer::ApplyManifestPointLightsLive(
+    const SceneManifest& staged)
+{
+    m_sceneData.pointLightCount = 0;
+
+    for (const ScenePointLightDesc& src : staged.pointLights)
+    {
+        if (!src.enabled)
+            continue;
+
+        if (m_sceneData.pointLightCount >= kMaxPointLights)
+        {
+            OutputDebugStringW(
+                L"Live reload: extra point lights ignored; kMaxPointLights exceeded.\n");
+
+            break;
+        }
+
+        PointLight& dst =
+            m_sceneData.pointLights[m_sceneData.pointLightCount++];
+
+        dst.position =
+            IsFiniteFloat3(src.position)
+            ? src.position
+            : DirectX::XMFLOAT3{ 0.0f, 2.0f, 0.0f };
+
+        dst.range =
+            std::max(
+                0.001f,
+                ClampNonNegativeFloat(src.range, 5.0f));
+
+        dst.color =
+            ClampNonNegativeFloat3(
+                src.color,
+                { 1.0f, 1.0f, 1.0f });
+
+        dst.intensity =
+            ClampNonNegativeFloat(
+                src.intensity,
+                0.0f);
+    }
+
+    for (uint32_t i = m_sceneData.pointLightCount;
+        i < kMaxPointLights;
+        ++i)
+    {
+        m_sceneData.pointLights[i] = {};
+    }
+
+    OutputDebugStringW(
+        (L"Live reload: point lights updated. Active=" +
+            std::to_wstring(m_sceneData.pointLightCount) +
+            L"\n").c_str());
+}
+
+void Renderer::ApplyEnvironmentScalarsLive(
+    const SceneManifest& staged)
+{
+    if (!staged.hasEnvironment)
+    {
+        return;
+    }
+
+    const SceneEnvironmentDesc& env = staged.environment;
+
+    m_environment.desc = env;
+
+    m_environment.enabled = env.enabled;
+
+    m_environment.displayIntensity =
+        std::max(0.0f, env.displayIntensity);
+
+    m_environment.lightingIntensity =
+        std::max(0.0f, env.lightingIntensity);
+
+    m_environment.rotationRadians =
+        DegreesToRadians(env.rotationDegrees);
+
+    m_environment.lightingRotationRadians =
+        DegreesToRadians(env.lightingRotationDegrees);
+
+    m_environment.visibleInRaster = env.visibleInRaster;
+    m_environment.visibleInDxr = env.visibleInDxr;
+    m_environment.specularMissUsesDisplaySky =
+        env.specularMissUsesDisplaySky;
+
+    m_environment.desc.fallbackTopColor =
+        ClampNonNegativeFloat3(
+            env.fallbackTopColor,
+            { 0.20f, 0.36f, 0.62f });
+
+    m_environment.desc.fallbackHorizonColor =
+        ClampNonNegativeFloat3(
+            env.fallbackHorizonColor,
+            { 0.76f, 0.80f, 0.86f });
+
+    m_environment.desc.fallbackBottomColor =
+        ClampNonNegativeFloat3(
+            env.fallbackBottomColor,
+            { 0.42f, 0.45f, 0.50f });
+
+    ++m_environmentRevision;
+
+    OutputDebugStringW(
+        (L"Live reload: environment scalars updated. "
+            L"displayIntensity=" +
+            std::to_wstring(m_environment.displayIntensity) +
+            L", lightingIntensity=" +
+            std::to_wstring(m_environment.lightingIntensity) +
+            L"\n").c_str());
+}
+
+void Renderer::InvalidateLightingForLiveEdit(
+    const wchar_t* reason)
+{
+    ++m_lightingRevision;
+
+    // Persistent accumulation.
+    m_rtSampleIndex = 0;
+    m_rtDispatchSampleIndex = 0;
+    ++m_rtResetId;
+
+    // Raw RT accumulation/history.
+    m_rtHistoryValid = false;
+    m_prevRtMotionWorldsValid = false;
+
+    // SVGF / temporal histories.
+    m_rtTemporalHistoryValid = false;
+    m_rtViewZHistoryValid = false;
+    m_rtSurfaceIdHistoryValid = false;
+
+    // ReSTIR reservoir history.
+    m_rtRestirHistoryValid = false;
+    m_rtRestirTemporalValidThisFrame = false;
+    m_rtRestirSpatialValidThisFrame = false;
+    m_rtRestirResolvedValidThisFrame = false;
+
+    // Force current-frame post stack to rebuild naturally.
+    m_rtPostReady = false;
+    m_rtRestirAppliedReady = false;
+
+    OutputDebugStringW(
+        (std::wstring(L"Live lighting edit invalidated RT history: ") +
+            reason +
+            L"\n").c_str());
+}
+
+void Renderer::LogSceneLiveReloadDiff(
+    const SceneLiveReloadDiff& diff) const
+{
+    OutputDebugStringW(L"Scene live reload diff:\n");
+
+    OutputDebugStringW(
+        (std::wstring(L"  sunChanged: ") +
+            (diff.sunChanged ? L"true" : L"false") +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (std::wstring(L"  pointLightsChanged: ") +
+            (diff.pointLightsChanged ? L"true" : L"false") +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (std::wstring(L"  environmentScalarsChanged: ") +
+            (diff.environmentScalarsChanged ? L"true" : L"false") +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (std::wstring(L"  modelStructureChanged: ") +
+            (diff.modelStructureChanged ? L"true" : L"false") +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (std::wstring(L"  environmentAssetPathsChanged: ") +
+            (diff.environmentAssetPathsChanged ? L"true" : L"false") +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (std::wstring(L"  rejected: ") +
+            (diff.rejected ? L"true" : L"false") +
+            L"\n").c_str());
+}
+
+void Renderer::ResolveProceduralGeometryPolicy()
+{
+    const SceneProceduralGeometryMode mode =
+        m_sceneManifest.hasProceduralGeometry
+        ? m_sceneManifest.proceduralGeometry.mode
+        : SceneProceduralGeometryMode::Auto;
+
+    bool hasLoadedAssetModel = false;
+
+    for (const SceneModelInstance& model : m_sceneModels)
+    {
+        if (model.desc.enabled && model.model.IsLoaded())
+        {
+            hasLoadedAssetModel = true;
+            break;
+        }
+    }
+
+    switch (mode)
+    {
+    case SceneProceduralGeometryMode::Always:
+        m_proceduralGeometryActive = true;
+        break;
+
+    case SceneProceduralGeometryMode::Never:
+        m_proceduralGeometryActive = false;
+        break;
+
+    case SceneProceduralGeometryMode::Auto:
+    default:
+        m_proceduralGeometryActive = !hasLoadedAssetModel;
+        break;
+    }
+
+    OutputDebugStringW(
+        (L"Procedural geometry policy resolved. active=" +
+            std::wstring(m_proceduralGeometryActive ? L"true" : L"false") +
+            L", hasLoadedAssetModel=" +
+            std::wstring(hasLoadedAssetModel ? L"true" : L"false") +
+            L"\n").c_str());
+}
+
+bool Renderer::ShouldAppendProceduralGeometry() const
+{
+    return m_proceduralGeometryActive;
+}
+
+void Renderer::AppendProceduralDraws(float time)
+{
+    using namespace DirectX;
+
+    const float oscillation = sinf(time * 1.5f);
+    const float rotationAngle = oscillation * 1.1f;
+
+    {
+        DrawItem item{};
+        item.mesh = &m_floor;
+        item.material = &m_floorMaterial;
+        item.submeshIndex = 0;
+        XMStoreFloat4x4(&item.world, XMMatrixIdentity());
+        item.rtObjectId = 1u;
+        m_draws.push_back(item);
+    }
+
+    {
+        DrawItem item{};
+        item.mesh = &m_quad;
+        item.material = &m_metalMaterial;
+        item.submeshIndex = 0;
+        XMMATRIX world =
+            XMMatrixRotationY(rotationAngle) *
+            XMMatrixTranslation(0.0f, 0.5f, 0.0f);
+        XMStoreFloat4x4(&item.world, world);
+        item.rtObjectId = 2u;
+        m_draws.push_back(item);
+    }
+
+    {
+        DrawItem item{};
+        item.mesh = &m_quad;
+        item.material = &m_matteMaterial;
+        item.submeshIndex = 0;
+        XMMATRIX world =
+            XMMatrixScaling(0.9f, 0.9f, 0.9f) *
+            XMMatrixTranslation(-1.75f, 0.5f, 0.0f);
+        XMStoreFloat4x4(&item.world, world);
+        item.rtObjectId = 3u;
+        m_draws.push_back(item);
+    }
+
+    {
+        DrawItem item{};
+        item.mesh = &m_quad;
+        item.material = &m_glossyMaterial;
+        item.submeshIndex = 0;
+        XMMATRIX world =
+            XMMatrixScaling(0.9f, 0.9f, 0.9f) *
+            XMMatrixTranslation(1.75f, 0.5f, 0.0f);
+        XMStoreFloat4x4(&item.world, world);
+        item.rtObjectId = 4u;
+        m_draws.push_back(item);
+    }
 }

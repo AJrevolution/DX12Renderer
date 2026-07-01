@@ -7,6 +7,13 @@
 #include <string>
 #include <vector>
 
+enum class SceneProceduralGeometryMode : uint8_t
+{
+    Auto,
+    Always,
+    Never
+};
+
 struct SceneModelDesc
 {
     std::string name;
@@ -77,6 +84,12 @@ struct SceneEnvironmentDesc
     DirectX::XMFLOAT3 fallbackBottomColor = { 0.42f, 0.45f, 0.50f };
 };
 
+struct SceneProceduralGeometryDesc
+{
+    SceneProceduralGeometryMode mode =
+        SceneProceduralGeometryMode::Auto;
+};
+
 struct SceneManifest
 {
     std::string name;
@@ -93,4 +106,7 @@ struct SceneManifest
     bool hasEnvironment = false;
 
     bool LoadFromFile(const std::filesystem::path& path);
+
+    SceneProceduralGeometryDesc proceduralGeometry;
+    bool hasProceduralGeometry = false;
 };

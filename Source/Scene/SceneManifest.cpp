@@ -128,6 +128,21 @@ namespace
         XMStoreFloat3(&out, n);
         return out;
     }
+
+    SceneProceduralGeometryMode ParseProceduralGeometryMode(
+        const std::string& value)
+    {
+        if (value == "auto")
+            return SceneProceduralGeometryMode::Auto;
+
+        if (value == "always")
+            return SceneProceduralGeometryMode::Always;
+
+        if (value == "never")
+            return SceneProceduralGeometryMode::Never;
+
+        return SceneProceduralGeometryMode::Auto;
+    }
 }
 
 DirectX::XMMATRIX SceneModelDesc::BuildTransformMatrix() const
@@ -162,6 +177,8 @@ bool SceneManifest::LoadFromFile(const std::filesystem::path& path)
     environment = {};
     hasEnvironment = false;
     lastError.clear();
+    proceduralGeometry = {};
+    hasProceduralGeometry = false;
 
     std::string text;
 
@@ -196,6 +213,18 @@ bool SceneManifest::LoadFromFile(const std::filesystem::path& path)
     }
 
     name = JsonString(root, "name", "scene");
+
+    if (root.contains("proceduralGeometry") &&
+        root["proceduralGeometry"].is_object())
+    {
+        const json& p = root["proceduralGeometry"];
+
+        hasProceduralGeometry = true;
+
+        proceduralGeometry.mode =
+            ParseProceduralGeometryMode(
+                JsonString(p, "mode", "auto"));
+    }
 
     if (root.contains("models") && root["models"].is_array())
     {
@@ -256,22 +285,21 @@ bool SceneManifest::LoadFromFile(const std::filesystem::path& path)
     {
         const json& s = root["sun"];
 
-        if (JsonBool(s, "enabled", true))
-        {
-            hasSun = true;
+        hasSun = true;
 
-            sun.enabled = true;
-            sun.direction =
-                NormaliseOrFallback(
-                    JsonFloat3(s, "direction", sun.direction),
-                    sun.direction);
+        sun.enabled =
+            JsonBool(s, "enabled", true);
 
-            sun.color =
-                JsonFloat3(s, "color", sun.color);
+        sun.direction =
+            NormaliseOrFallback(
+                JsonFloat3(s, "direction", sun.direction),
+                sun.direction);
 
-            sun.intensity =
-                JsonFloat(s, "intensity", sun.intensity);
-        }
+        sun.color =
+            JsonFloat3(s, "color", sun.color);
+
+        sun.intensity =
+            JsonFloat(s, "intensity", sun.intensity);
     }
 
     if (root.contains("pointLights") && root["pointLights"].is_array())
@@ -318,114 +346,111 @@ bool SceneManifest::LoadFromFile(const std::filesystem::path& path)
     {
         const json& e = root["environment"];
 
+        hasEnvironment = true;
         environment = {};
+
         environment.enabled =
             JsonBool(e, "enabled", true);
 
-        if (environment.enabled)
-        {
-            hasEnvironment = true;
+        const std::string displayPath =
+            JsonString(e, "displayPath");
 
-            const std::string displayPath =
-                JsonString(e, "displayPath");
+        const std::string lightingPath =
+            JsonString(e, "lightingPath");
 
-            const std::string lightingPath =
-                JsonString(e, "lightingPath");
+        const std::string lightingDiffusePath =
+            JsonString(e, "lightingDiffusePath");
 
-            const std::string lightingDiffusePath =
-                JsonString(e, "lightingDiffusePath");
+        const std::string lightingSpecularPath =
+            JsonString(e, "lightingSpecularPath");
 
-            const std::string lightingSpecularPath =
-                JsonString(e, "lightingSpecularPath");
+        const std::string lightingRadiancePath =
+            JsonString(e, "lightingRadiancePath");
 
-            const std::string lightingRadiancePath =
-                JsonString(e, "lightingRadiancePath");
+        environment.displayPath =
+            std::filesystem::path(displayPath);
 
-            environment.displayPath =
-                std::filesystem::path(displayPath);
+        environment.lightingPath =
+            std::filesystem::path(lightingPath);
 
-            environment.lightingPath =
-                std::filesystem::path(lightingPath);
+        environment.lightingDiffusePath =
+            std::filesystem::path(lightingDiffusePath);
 
-            environment.lightingDiffusePath =
-                std::filesystem::path(lightingDiffusePath);
+        environment.lightingSpecularPath =
+            std::filesystem::path(lightingSpecularPath);
 
-            environment.lightingSpecularPath =
-                std::filesystem::path(lightingSpecularPath);
+        environment.lightingRadiancePath =
+            std::filesystem::path(lightingRadiancePath);
 
-            environment.lightingRadiancePath =
-                std::filesystem::path(lightingRadiancePath);
+        environment.useDisplayForLighting =
+            JsonBool(
+                e,
+                "useDisplayForLighting",
+                environment.useDisplayForLighting);
 
-            environment.useDisplayForLighting =
-                JsonBool(
-                    e,
-                    "useDisplayForLighting",
-                    environment.useDisplayForLighting);
-
-            environment.displayIntensity =
-                std::max(
-                    0.0f,
-                    JsonFloat(
-                        e,
-                        "displayIntensity",
-                        environment.displayIntensity));
-
-            environment.lightingIntensity =
-                std::max(
-                    0.0f,
-                    JsonFloat(
-                        e,
-                        "lightingIntensity",
-                        environment.lightingIntensity));
-
-            environment.rotationDegrees =
+        environment.displayIntensity =
+            std::max(
+                0.0f,
                 JsonFloat(
                     e,
-                    "rotationDegrees",
-                    environment.rotationDegrees);
+                    "displayIntensity",
+                    environment.displayIntensity));
 
-            environment.lightingRotationDegrees =
+        environment.lightingIntensity =
+            std::max(
+                0.0f,
                 JsonFloat(
                     e,
-                    "lightingRotationDegrees",
-                    environment.rotationDegrees);
+                    "lightingIntensity",
+                    environment.lightingIntensity));
 
-            environment.visibleInRaster =
-                JsonBool(
-                    e,
-                    "visibleInRaster",
-                    environment.visibleInRaster);
+        environment.rotationDegrees =
+            JsonFloat(
+                e,
+                "rotationDegrees",
+                environment.rotationDegrees);
 
-            environment.visibleInDxr =
-                JsonBool(
-                    e,
-                    "visibleInDxr",
-                    environment.visibleInDxr);
+        environment.lightingRotationDegrees =
+            JsonFloat(
+                e,
+                "lightingRotationDegrees",
+                environment.rotationDegrees);
 
-            environment.specularMissUsesDisplaySky =
-                JsonBool(
-                    e,
-                    "specularMissUsesDisplaySky",
-                    environment.specularMissUsesDisplaySky);
+        environment.visibleInRaster =
+            JsonBool(
+                e,
+                "visibleInRaster",
+                environment.visibleInRaster);
 
-            environment.fallbackTopColor =
-                JsonFloat3(
-                    e,
-                    "fallbackTopColor",
-                    environment.fallbackTopColor);
+        environment.visibleInDxr =
+            JsonBool(
+                e,
+                "visibleInDxr",
+                environment.visibleInDxr);
 
-            environment.fallbackHorizonColor =
-                JsonFloat3(
-                    e,
-                    "fallbackHorizonColor",
-                    environment.fallbackHorizonColor);
+        environment.specularMissUsesDisplaySky =
+            JsonBool(
+                e,
+                "specularMissUsesDisplaySky",
+                environment.specularMissUsesDisplaySky);
 
-            environment.fallbackBottomColor =
-                JsonFloat3(
-                    e,
-                    "fallbackBottomColor",
-                    environment.fallbackBottomColor);
-        }
+        environment.fallbackTopColor =
+            JsonFloat3(
+                e,
+                "fallbackTopColor",
+                environment.fallbackTopColor);
+
+        environment.fallbackHorizonColor =
+            JsonFloat3(
+                e,
+                "fallbackHorizonColor",
+                environment.fallbackHorizonColor);
+
+        environment.fallbackBottomColor =
+            JsonFloat3(
+                e,
+                "fallbackBottomColor",
+                environment.fallbackBottomColor);
     }
 
     return true;

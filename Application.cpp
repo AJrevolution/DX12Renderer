@@ -213,6 +213,7 @@ void Application::HandleDebugInput()
     // Keeps visible debug selection small and dependency-free:
     //
     // 0  = final shaded output
+    // F1: Reload scene authoring fields from default_scene.json
     // F6 = previous selectable debug view
     // F7 = next selectable debug view
     // F8 = dump the dynamic debug-view list to DebugOutput
@@ -223,6 +224,11 @@ void Application::HandleDebugInput()
         {
             LogSelectedDebugView(m_renderer);
         }
+    }
+
+    if (m_window.ConsumeKeyPress(VK_F1))
+    {
+        m_renderer.ReloadSceneManifestLive();
     }
 
     if (m_window.ConsumeKeyPress(VK_F6))
@@ -251,6 +257,7 @@ void Application::HandleDebugInput()
 
         LogSelectedDebugView(m_renderer);
     }
+
 
     if (m_window.ConsumeKeyPress('R'))
     {
