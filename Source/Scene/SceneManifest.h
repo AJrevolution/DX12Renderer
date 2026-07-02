@@ -90,6 +90,18 @@ struct SceneProceduralGeometryDesc
         SceneProceduralGeometryMode::Auto;
 };
 
+struct SceneCameraDesc
+{
+    bool enabled = true;
+
+    DirectX::XMFLOAT3 position = { 6.0f, 3.0f, -8.0f };
+    DirectX::XMFLOAT3 target = { 0.0f, 1.0f, 0.0f };
+
+    float fovDegrees = 60.0f;
+    float nearPlane = 0.1f;
+    float farPlane = 1000.0f;
+};
+
 struct SceneManifest
 {
     std::string name;
@@ -109,4 +121,7 @@ struct SceneManifest
 
     SceneProceduralGeometryDesc proceduralGeometry;
     bool hasProceduralGeometry = false;
+
+    SceneCameraDesc camera;
+    bool hasCamera = false;
 };

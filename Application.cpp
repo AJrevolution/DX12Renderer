@@ -213,11 +213,14 @@ void Application::HandleDebugInput()
     // Keeps visible debug selection small and dependency-free:
     //
     // 0  = final shaded output
+    // Q = dump current camera as manifest camera JSON
+	// R = toggle RT accumulation on/off in Raytrace mode
     // F1: Reload scene authoring fields from default_scene.json
     // F6 = previous selectable debug view
     // F7 = next selectable debug view
     // F8 = dump the dynamic debug-view list to DebugOutput
     // F9 = toggle raytracing on/off
+
     if (m_window.ConsumeKeyPress('0'))
     {
         if (m_renderer.SetDebugView(0))
@@ -258,6 +261,10 @@ void Application::HandleDebugInput()
         LogSelectedDebugView(m_renderer);
     }
 
+    if (m_window.ConsumeKeyPress('Q'))
+    {
+        m_renderer.DebugDumpManifestCamera();
+    }
 
     if (m_window.ConsumeKeyPress('R'))
     {

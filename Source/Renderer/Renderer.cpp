@@ -9,6 +9,8 @@
 #include <cmath>
 #include <filesystem>
 #include <cfloat>
+#include <sstream>
+#include <iomanip>
 
 namespace
 {
@@ -466,6 +468,39 @@ namespace
             FloatNear(a.z, b.z, eps);
     }
 
+    float DistanceSq(
+        const DirectX::XMFLOAT3& a,
+        const DirectX::XMFLOAT3& b)
+    {
+        const float dx = a.x - b.x;
+        const float dy = a.y - b.y;
+        const float dz = a.z - b.z;
+
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    bool CameraDescIsValidForRenderer(
+        const SceneCameraDesc& camera)
+    {
+        if (!IsFiniteFloat3(camera.position))
+            return false;
+
+        if (!IsFiniteFloat3(camera.target))
+            return false;
+
+        if (DistanceSq(camera.position, camera.target) <= 1.0e-6f)
+            return false;
+
+        if (!std::isfinite(camera.fovDegrees) ||
+            !std::isfinite(camera.nearPlane) ||
+            !std::isfinite(camera.farPlane))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
 }
 
 const DebugViewDesc* FindDebugViewDesc(uint32_t id)
@@ -770,6 +805,15 @@ void Renderer::ApplyOrbitCameraInput(const OrbitCameraInput& input)
     if (dt <= 0.0f || (yawAxis == 0.0f && zoomAxis == 0.0f))
         return;
 
+    if (m_manifestCameraActive)
+    {
+        ProjectOrbitCameraFromPositionTarget(
+            m_activeManifestCamera.position,
+            m_activeManifestCamera.target);
+
+        m_manifestCameraActive = false;
+    }
+
     SetCameraControlMode(CameraControlMode::ManualOrbit);
 
     const float oldYaw = m_camYaw;
@@ -860,12 +904,12 @@ void Renderer::ComputeOrbitCamera(
 
     outPosition =
     {
-        sy * cp * m_camRadius,
-        sp * m_camRadius + kOrbitCameraHeightOffset,
-        cy * cp * m_camRadius
+        m_orbitTarget.x + sy * cp * m_camRadius,
+        m_orbitTarget.y + sp * m_camRadius + m_orbitHeightOffset,
+        m_orbitTarget.z + cy * cp * m_camRadius
     };
 
-    outTarget = { 0.0f, kOrbitTargetY, 0.0f };
+    outTarget = m_orbitTarget;
 }
 
 void Renderer::InitialiseFreeRoamFromOrbitCamera()
@@ -874,7 +918,16 @@ void Renderer::InitialiseFreeRoamFromOrbitCamera()
 
     XMFLOAT3 position{};
     XMFLOAT3 target{};
-    ComputeOrbitCamera(position, target);
+
+    if (m_manifestCameraActive)
+    {
+        position = m_activeManifestCamera.position;
+        target = m_activeManifestCamera.target;
+    }
+    else
+    {
+        ComputeOrbitCamera(position, target);
+    }
 
     m_freeCamPosition = position;
 
@@ -893,6 +946,7 @@ void Renderer::InitialiseFreeRoamFromOrbitCamera()
     m_freeCamYaw = WrapAngleRadians(m_freeCamYaw);
 
     m_freeCamInitialised = true;
+    m_manifestCameraActive = false;
 }
 
 void Renderer::ProjectOrbitCameraFromFreeRoam()
@@ -900,9 +954,12 @@ void Renderer::ProjectOrbitCameraFromFreeRoam()
     if (!m_freeCamInitialised)
         return;
 
-    const float x = m_freeCamPosition.x;
-    const float z = m_freeCamPosition.z;
-    const float y = m_freeCamPosition.y - kOrbitCameraHeightOffset;
+    const float x = m_freeCamPosition.x - m_orbitTarget.x;
+    const float z = m_freeCamPosition.z - m_orbitTarget.z;
+    const float y =
+        m_freeCamPosition.y -
+        m_orbitTarget.y -
+        m_orbitHeightOffset;
 
     const float radius =
         sqrtf(x * x + y * y + z * z);
@@ -1964,11 +2021,7 @@ void Renderer::RenderFrame(
             CmdEndEvent(cmdList); //DXR
         }
     }
-    else
-    {
-        OutputDebugStringW(
-            L"DXR unavailable or disabled this frame; using raster path.\n");
-    }
+
     if (!renderedWithDxr)
     {
         m_rtDispatchSampleIndex = 0;
@@ -2289,6 +2342,14 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
 
         XMStoreFloat3(&m_sceneData.camera.position, position);
         XMStoreFloat3(&m_sceneData.camera.target, target);
+    }
+    else if (m_manifestCameraActive)
+    {
+        m_sceneData.camera.position =
+            m_activeManifestCamera.position;
+
+        m_sceneData.camera.target =
+            m_activeManifestCamera.target;
     }
     else
     {
@@ -10899,6 +10960,7 @@ void Renderer::LoadSceneFromManifest(
     }
 
     ApplyManifestLights();
+    ApplyManifestCameraInitial(m_sceneManifest);
 
     uint32_t loadedCount = 0;
 
@@ -12127,7 +12189,6 @@ Renderer::SceneLiveReloadDiff Renderer::ClassifySceneManifestLiveReload(
 {
     SceneLiveReloadDiff diff{};
 
-    // Model changes are structural for 3M.1.
     if (staged.models.size() != m_sceneManifest.models.size())
     {
         diff.modelStructureChanged = true;
@@ -12171,7 +12232,26 @@ Renderer::SceneLiveReloadDiff Renderer::ClassifySceneManifestLiveReload(
         }
     }
 
-    // Environment asset path changes are deferred to asset reload phase.
+    if (m_sceneManifest.hasCamera != staged.hasCamera)
+    {
+        diff.cameraChanged = true;
+    }
+    else if (m_sceneManifest.hasCamera && staged.hasCamera)
+    {
+        const SceneCameraDesc& a = m_sceneManifest.camera;
+        const SceneCameraDesc& b = staged.camera;
+
+        if (a.enabled != b.enabled ||
+            !Float3Near(a.position, b.position) ||
+            !Float3Near(a.target, b.target) ||
+            !FloatNear(a.fovDegrees, b.fovDegrees) ||
+            !FloatNear(a.nearPlane, b.nearPlane) ||
+            !FloatNear(a.farPlane, b.farPlane))
+        {
+            diff.cameraChanged = true;
+        }
+    }
+
     if (m_sceneManifest.hasEnvironment != staged.hasEnvironment)
     {
         diff.environmentScalarsChanged = true;
@@ -12259,7 +12339,8 @@ Renderer::SceneLiveReloadDiff Renderer::ClassifySceneManifestLiveReload(
     diff.anyLiveChange =
         diff.sunChanged ||
         diff.pointLightsChanged ||
-        diff.environmentScalarsChanged;
+        diff.environmentScalarsChanged ||
+        diff.cameraChanged;
 
     diff.rejected =
         diff.modelStructureChanged ||
@@ -12299,7 +12380,6 @@ bool Renderer::ReloadSceneManifestLive()
     {
         OutputDebugStringW(
             L"Scene live reload rejected. "
-            L"3M.1 only supports lights and environment scalar edits. "
             L"Use a full scene reload phase for model or asset path changes.\n");
 
         return false;
@@ -12311,6 +12391,11 @@ bool Renderer::ReloadSceneManifestLive()
             L"Scene live reload: manifest parsed successfully; no live-safe changes detected.\n");
 
         return true;
+    }
+
+    if (diff.cameraChanged)
+    {
+        OutputDebugStringW(L"  camera changed\n");
     }
 
     return ApplySceneManifestLive(staged, diff);
@@ -12338,6 +12423,11 @@ bool Renderer::ApplySceneManifestLive(
     {
         ApplyEnvironmentScalarsLive(staged);
         lightingInvalidated = true;
+    }
+
+    if (diff.cameraChanged)
+    {
+        ApplyManifestCameraLive(staged);
     }
 
     m_sceneManifest = staged;
@@ -12525,34 +12615,7 @@ void Renderer::InvalidateLightingForLiveEdit(
 {
     ++m_lightingRevision;
 
-    // Persistent accumulation.
-    m_rtSampleIndex = 0;
-    m_rtDispatchSampleIndex = 0;
-    ++m_rtResetId;
-
-    // Raw RT accumulation/history.
-    m_rtHistoryValid = false;
-    m_prevRtMotionWorldsValid = false;
-
-    // SVGF / temporal histories.
-    m_rtTemporalHistoryValid = false;
-    m_rtViewZHistoryValid = false;
-    m_rtSurfaceIdHistoryValid = false;
-
-    // ReSTIR reservoir history.
-    m_rtRestirHistoryValid = false;
-    m_rtRestirTemporalValidThisFrame = false;
-    m_rtRestirSpatialValidThisFrame = false;
-    m_rtRestirResolvedValidThisFrame = false;
-
-    // Force current-frame post stack to rebuild naturally.
-    m_rtPostReady = false;
-    m_rtRestirAppliedReady = false;
-
-    OutputDebugStringW(
-        (std::wstring(L"Live lighting edit invalidated RT history: ") +
-            reason +
-            L"\n").c_str());
+    InvalidateRtHistoryForSceneEdit(reason);
 }
 
 void Renderer::LogSceneLiveReloadDiff(
@@ -12693,4 +12756,246 @@ void Renderer::AppendProceduralDraws(float time)
         item.rtObjectId = 4u;
         m_draws.push_back(item);
     }
+}
+
+void Renderer::ProjectOrbitCameraFromPositionTarget(
+    const DirectX::XMFLOAT3& position,
+    const DirectX::XMFLOAT3& target)
+{
+    const float dx = position.x - target.x;
+    const float dy = position.y - target.y;
+    const float dz = position.z - target.z;
+
+    const float radius =
+        std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    if (!std::isfinite(radius) || radius <= 1.0e-4f)
+        return;
+
+    m_orbitTarget = target;
+    m_orbitHeightOffset = 0.0f;
+
+    // Do not clamp to kOrbitMaxRadius here. The authored camera should be
+    // allowed to start outside the default demo orbit radius.
+    m_camRadius = std::max(kOrbitMinRadius, radius);
+
+    m_camYaw = WrapAngleRadians(
+        std::atan2(dx, dz));
+
+    m_camPitch = std::asin(
+        std::clamp(dy / radius, -0.95f, 0.95f));
+}
+
+bool Renderer::ApplyManifestCameraDesc(
+    const SceneCameraDesc& camera,
+    bool resetRtHistory,
+    const wchar_t* debugReason)
+{
+    if (!camera.enabled)
+        return false;
+
+    if (!CameraDescIsValidForRenderer(camera))
+    {
+        OutputDebugStringW(
+            L"Manifest camera invalid; keeping current camera.\n");
+
+        return false;
+    }
+
+    SceneCameraDesc c = camera;
+
+    c.fovDegrees =
+        std::clamp(c.fovDegrees, 10.0f, 120.0f);
+
+    c.nearPlane =
+        std::max(0.001f, c.nearPlane);
+
+    c.farPlane =
+        std::max(c.nearPlane + 1.0f, c.farPlane);
+
+    // Seed orbit state so user orbit starts from the authored shot.
+    ProjectOrbitCameraFromPositionTarget(
+        c.position,
+        c.target);
+
+    m_activeManifestCamera = c;
+    m_manifestCameraActive = true;
+
+    m_sceneData.camera.position = c.position;
+    m_sceneData.camera.target = c.target;
+
+    m_sceneData.camera.fovY =
+        DirectX::XMConvertToRadians(c.fovDegrees);
+
+    m_sceneData.camera.nearZ = c.nearPlane;
+    m_sceneData.camera.farZ = c.farPlane;
+
+    SetCameraControlMode(CameraControlMode::ManualOrbit);
+
+    m_cameraTimeValid = false;
+    ++m_cameraRevision;
+
+    if (resetRtHistory)
+    {
+        InvalidateRtHistoryForSceneEdit(debugReason);
+    }
+
+    OutputDebugStringW(
+        L"Manifest camera applied.\n");
+
+    return true;
+}
+
+void Renderer::ApplyManifestCameraInitial(
+    const SceneManifest& manifest)
+{
+    if (!manifest.hasCamera || !manifest.camera.enabled)
+        return;
+
+    ApplyManifestCameraDesc(
+        manifest.camera,
+        false,
+        L"manifest camera initial apply");
+}
+
+void Renderer::ApplyManifestCameraLive(
+    const SceneManifest& staged)
+{
+    if (!staged.hasCamera || !staged.camera.enabled)
+    {
+        if (m_manifestCameraActive)
+        {
+            ProjectOrbitCameraFromPositionTarget(
+                m_activeManifestCamera.position,
+                m_activeManifestCamera.target);
+
+            m_manifestCameraActive = false;
+            ++m_cameraRevision;
+
+            InvalidateRtHistoryForSceneEdit(
+                L"manifest camera disabled or removed");
+        }
+
+        OutputDebugStringW(
+            L"Live reload: manifest camera missing/disabled; current camera preserved.\n");
+
+        return;
+    }
+
+    ApplyManifestCameraDesc(
+        staged.camera,
+        true,
+        L"manifest camera changed");
+}
+
+void Renderer::InvalidateRtHistoryForSceneEdit(
+    const wchar_t* reason)
+{
+    m_rtSampleIndex = 0;
+    m_rtDispatchSampleIndex = 0;
+    ++m_rtResetId;
+
+    m_rtHistoryValid = false;
+    m_prevRtMotionWorldsValid = false;
+
+    m_rtTemporalHistoryValid = false;
+    m_rtViewZHistoryValid = false;
+    m_rtSurfaceIdHistoryValid = false;
+
+    m_rtRestirHistoryValid = false;
+    m_rtRestirTemporalValidThisFrame = false;
+    m_rtRestirSpatialValidThisFrame = false;
+    m_rtRestirResolvedValidThisFrame = false;
+
+    m_rtPostReady = false;
+    m_rtRestirAppliedReady = false;
+
+    OutputDebugStringW(
+        (std::wstring(L"Scene edit invalidated RT history: ") +
+            reason +
+            L"\n").c_str());
+}
+
+std::string Renderer::BuildManifestCameraJson() const
+{
+    using namespace DirectX;
+
+    XMFLOAT3 position{};
+    XMFLOAT3 target{};
+
+    if (m_cameraMode == CameraControlMode::FreeRoam)
+    {
+        constexpr float kDebugCameraTargetDistance = 10.0f;
+
+        const XMVECTOR p =
+            XMLoadFloat3(&m_freeCamPosition);
+
+        const XMVECTOR t =
+            p +
+            FreeRoamForwardVector(m_freeCamYaw, m_freeCamPitch) *
+            kDebugCameraTargetDistance;
+
+        XMStoreFloat3(&position, p);
+        XMStoreFloat3(&target, t);
+    }
+    else if (m_manifestCameraActive)
+    {
+        position =
+            m_activeManifestCamera.position;
+
+        target =
+            m_activeManifestCamera.target;
+    }
+    else
+    {
+        ComputeOrbitCamera(position, target);
+    }
+
+    const float fovDegrees =
+        XMConvertToDegrees(m_sceneData.camera.fovY);
+
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(3);
+
+    ss << "\"camera\": {\n";
+
+    ss << "  \"position\": [ "
+        << position.x << ", "
+        << position.y << ", "
+        << position.z << " ],\n";
+
+    ss << "  \"target\": [ "
+        << target.x << ", "
+        << target.y << ", "
+        << target.z << " ],\n";
+
+    ss << "  \"fovDegrees\": "
+        << fovDegrees << ",\n";
+
+    ss << "  \"nearPlane\": "
+        << m_sceneData.camera.nearZ << ",\n";
+
+    ss << "  \"farPlane\": "
+        << m_sceneData.camera.farZ << "\n";
+
+    ss << "}";
+
+    return ss.str();
+}
+
+void Renderer::DebugDumpManifestCamera() const
+{
+#if defined(_DEBUG) || defined(ENABLE_CAMERA_PRESET_DUMP)
+    const std::string json =
+        BuildManifestCameraJson();
+
+    OutputDebugStringA(
+        "\n--- Manifest Camera Preset ---\n");
+
+    OutputDebugStringA(
+        json.c_str());
+
+    OutputDebugStringA(
+        "\n--- End Manifest Camera Preset ---\n");
+#endif
 }

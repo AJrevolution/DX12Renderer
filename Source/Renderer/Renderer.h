@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
+#include <string>
 #include "Common.h"
 #include "Source/Renderer/Passes/TrianglePass.h"
 #include "Source/Renderer/Passes/ForwardPBRPass.h"
@@ -221,6 +222,7 @@ public:
     void SetRtAccumulationEnabled(bool enabled);
     void ToggleRtAccumulation();
     bool ReloadSceneManifestLive();
+    void DebugDumpManifestCamera() const;
 
 private:
 
@@ -232,6 +234,26 @@ private:
     void ProjectOrbitCameraFromFreeRoam();
     bool ShouldAdvanceSceneAnimation() const;
     float UpdateSceneAnimationTime(float frameTime);
+
+    void ProjectOrbitCameraFromPositionTarget(
+        const DirectX::XMFLOAT3& position,
+        const DirectX::XMFLOAT3& target);
+
+    void ApplyManifestCameraInitial(
+        const SceneManifest& manifest);
+
+    void ApplyManifestCameraLive(
+        const SceneManifest& staged);
+
+    bool ApplyManifestCameraDesc(
+        const SceneCameraDesc& camera,
+        bool resetRtHistory,
+        const wchar_t* debugReason);
+
+    void InvalidateRtHistoryForSceneEdit(
+        const wchar_t* reason);
+
+    std::string BuildManifestCameraJson() const;
 
     //Lights
     void ConfigureDefaultPointLights();
@@ -262,6 +284,7 @@ private:
         bool sunChanged = false;
         bool pointLightsChanged = false;
         bool environmentScalarsChanged = false;
+        bool cameraChanged = false;
 
         bool anyLiveChange = false;
         bool rejected = false;
@@ -1714,6 +1737,19 @@ private:
 
     uint64_t m_cameraRevision = 0;
     uint64_t m_prevRtCameraRevision = 0;
+
+    bool m_manifestCameraActive = false;
+    SceneCameraDesc m_activeManifestCamera{};
+
+    // Orbit target is currently hardcoded in ComputeOrbitCamera.
+    // Make it state so authored cameras can orbit around their authored target.
+    DirectX::XMFLOAT3 m_orbitTarget{ 0.0f, 0.5f, 0.0f };
+
+    // Preserve the old default camera vertical bias:
+    // old target Y = 0.5, old camera height offset = 1.5,
+    // so the additional offset over target is 1.0.
+    float m_orbitHeightOffset = 1.0f;
+
     float m_sceneAnimationTime = 0.0f;
     float m_lastSceneAnimationUpdateTime = 0.0f;
     bool m_sceneAnimationTimeValid = false;

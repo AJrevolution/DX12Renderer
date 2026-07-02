@@ -7,6 +7,7 @@
 #include <sstream>
 #include <algorithm>
 #include <exception>
+#include <cmath>
 
 using json = nlohmann::json;
 
@@ -143,6 +144,41 @@ namespace
 
         return SceneProceduralGeometryMode::Auto;
     }
+
+    bool Float3IsFinite(const DirectX::XMFLOAT3& v)
+    {
+        return
+            std::isfinite(v.x) &&
+            std::isfinite(v.y) &&
+            std::isfinite(v.z);
+    }
+
+    float DistanceSq(
+        const DirectX::XMFLOAT3& a,
+        const DirectX::XMFLOAT3& b)
+    {
+        const float dx = a.x - b.x;
+        const float dy = a.y - b.y;
+        const float dz = a.z - b.z;
+
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    bool CameraDescIsValid(const SceneCameraDesc& camera)
+    {
+        if (!Float3IsFinite(camera.position))
+            return false;
+
+        if (!Float3IsFinite(camera.target))
+            return false;
+
+        constexpr float kMinCameraDistanceSq = 1e-6f;
+
+        if (DistanceSq(camera.position, camera.target) <= kMinCameraDistanceSq)
+            return false;
+
+        return true;
+    }
 }
 
 DirectX::XMMATRIX SceneModelDesc::BuildTransformMatrix() const
@@ -176,6 +212,8 @@ bool SceneManifest::LoadFromFile(const std::filesystem::path& path)
     sun = {};
     environment = {};
     hasEnvironment = false;
+    camera = {};
+    hasCamera = false;
     lastError.clear();
     proceduralGeometry = {};
     hasProceduralGeometry = false;
@@ -279,6 +317,41 @@ bool SceneManifest::LoadFromFile(const std::filesystem::path& path)
 
             models.push_back(model);
         }
+    }
+
+    if (root.contains("camera") && root["camera"].is_object())
+    {
+        const json& c = root["camera"];
+
+        hasCamera = true;
+        camera = {};
+
+        camera.enabled =
+            JsonBool(c, "enabled", true);
+
+        camera.position =
+            JsonFloat3(c, "position", camera.position);
+
+        camera.target =
+            JsonFloat3(c, "target", camera.target);
+
+        camera.fovDegrees =
+            JsonFloat(c, "fovDegrees", camera.fovDegrees);
+
+        camera.nearPlane =
+            JsonFloat(c, "nearPlane", camera.nearPlane);
+
+        camera.farPlane =
+            JsonFloat(c, "farPlane", camera.farPlane);
+
+        camera.fovDegrees =
+            std::clamp(camera.fovDegrees, 10.0f, 120.0f);
+
+        camera.nearPlane =
+            std::max(0.001f, camera.nearPlane);
+
+        camera.farPlane =
+            std::max(camera.nearPlane + 1.0f, camera.farPlane);
     }
 
     if (root.contains("sun") && root["sun"].is_object())
