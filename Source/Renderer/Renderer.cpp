@@ -1026,7 +1026,7 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
     // One-shot/static asset imports: large glTF buffers and texture uploads.
     // This prevents startup asset import pressure from permanently bloating the
     // dynamic frame upload budget.
-    m_assetUpload.Initialize(device, frameCount, 1024ull * 1024ull * 1024ull);
+    m_assetUpload.Initialize(device, frameCount, 2ull * 1024ull * 1024ull * 1024ull);
 
     // CPU-only DSV heap
     m_dsvHeap.Initialize(device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 16, false, L"DSV Heap (CPU)");
@@ -11163,7 +11163,12 @@ void Renderer::ApplyManifestLights()
     }
     else
     {
-        ConfigureDefaultPointLights();
+        m_sceneData.pointLightCount = 0;
+
+        for (uint32_t i = 0; i < kMaxPointLights; ++i)
+        {
+            m_sceneData.pointLights[i] = {};
+        }
     }
 }
 
