@@ -171,7 +171,7 @@ float4 main(PSIn i) : SV_Target
     float validSurface =
         mrao.a;
             
-    if (validSurface < 0.5f || depth >= 0.9999f)
+    if (validSurface < 0.5f)
     {
         discard;
     }
