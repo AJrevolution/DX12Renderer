@@ -15,14 +15,36 @@
       "castShadows": true,
 
       "objectIdBase": 1000
+    },
+
+    {
+      "name": "modern_city_block",
+      "path": "Models/modern_city_block/scene.gltf",
+      "enabled": true,
+
+      "translation": [ 50.0, 0.55, 0.0 ],
+      "rotationDegrees": [ 0.0, 0.0, 0.0 ],
+      "scale": [ 0.002, 0.002, 0.002 ],
+
+      "rasterEnabled": true,
+      "dxrEnabled": true,
+      "castShadows": true,
+
+      "objectIdBase": 20000
     }
   ],
-
+  "camera": {
+    "position": [ -23.849, 4.153, -22.795 ],
+    "target": [ -17.248, 4.115, -15.283 ],
+    "fovDegrees": 41.000,
+    "nearPlane": 0.100,
+    "farPlane": 100.000
+  },
   "sun": {
     "enabled": true,
     "direction": [ -0.75, -0.45, -0.55 ],
     "color": [ 1.0, 0.95, 0.88 ],
-    "intensity": 2.0
+    "intensity": 2.2
   },
 
   "pointLights": [
@@ -31,7 +53,7 @@
       "enabled": true,
       "position": [ 0.0, 3.0, 0.0 ],
       "color": [ 1.0, 0.78, 0.52 ],
-      "intensity": 20.0,
+      "intensity": 0.0,
       "range": 8.0
     }
   ],
@@ -47,7 +69,7 @@
     "lightingPath": "",
     "useDisplayForLighting": false,
 
-    "displayIntensity": 1.0,
+    "displayIntensity": 0.95,
     "lightingIntensity": 1.0,
 
     "rotationDegrees": 0.0,
