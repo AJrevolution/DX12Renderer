@@ -36,15 +36,9 @@ void RtRestirSpatialPass::BuildRootSignature(ID3D12Device* device)
     params[1].InitAsDescriptorTable(1, &srvRange);
     params[2].InitAsDescriptorTable(1, &uavRange);
 
-    CD3DX12_STATIC_SAMPLER_DESC clampSampler(
-        0,
-        D3D12_FILTER_MIN_MAG_MIP_LINEAR,
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
-
+    // The shader uses integer-coordinate resource loads and declares no sampler.
     CD3DX12_ROOT_SIGNATURE_DESC desc{};
-    desc.Init(_countof(params), params, 1, &clampSampler);
+    desc.Init(_countof(params), params, 0, nullptr);
 
     ComPtr<ID3DBlob> blob, err;
 

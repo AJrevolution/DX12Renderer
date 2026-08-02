@@ -318,7 +318,7 @@ namespace
         { 104, "Initial ReSTIR Target Luminance", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
         { 105, "Initial ReSTIR Source PDF", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
         { 106, "Temporal ReSTIR Reuse Accepted Mask", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
-        { 107, "Temporal ReSTIR M / Confidence", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 107, "Temporal ReSTIR M / Age / Confidence", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
         { 108, "Spatial ReSTIR Accepted Neighbour Count", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
         { 109, "Spatial ReSTIR Selected Neighbour Distance", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
         { 110, "Resolved ReSTIR Reservoir Final W", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
@@ -650,6 +650,27 @@ DebugViewAvailability Renderer::GetDebugViewAvailability(uint32_t id) const
         !m_rtRestirResourcesReady)
     {
         return DebugViewAvailability::PendingResources;
+    }
+
+    // Stage readiness persists until ReSTIR history is invalidated. Do not use
+    // current-frame completion flags here because they are cleared before the
+    // owning pass runs each frame.
+    if (IsRtRestirTemporalDebug(id) &&
+        !m_rtRestirTemporalOutputReady)
+    {
+        return DebugViewAvailability::PendingHistory;
+    }
+
+    if (IsRtRestirSpatialDebug(id) &&
+        !m_rtRestirSpatialOutputReady)
+    {
+        return DebugViewAvailability::PendingHistory;
+    }
+
+    if (IsRtRestirResolveDebug(id) &&
+        !m_rtRestirResolveOutputReady)
+    {
+        return DebugViewAvailability::PendingHistory;
     }
 
     return DebugViewAvailability::Available;
@@ -1548,18 +1569,20 @@ void Renderer::RenderFrame(
         (m_rtEnableRestirEnvDi != m_prevRtEnableRestirEnvDi) ||
         (m_rtRestirUseTemporal != m_prevRtRestirUseTemporal) ||
         (m_rtRestirUseSpatial != m_prevRtRestirUseSpatial) ||
+        (m_rtRestirMathMode != m_prevRtRestirMathMode) ||
         (m_rtRestirInitialCandidateCount != m_prevRtRestirInitialCandidateCount) ||
         (m_rtRestirSpatialSamples != m_prevRtRestirSpatialSamples) ||
         (m_rtRestirSpatialRadius != m_prevRtRestirSpatialRadius) ||
         (std::fabs(m_rtRestirNormalSigma - m_prevRtRestirNormalSigma) > 1e-6f) ||
         (std::fabs(m_rtRestirDepthSigma - m_prevRtRestirDepthSigma) > 1e-6f) ||
-        (std::fabs(m_rtRestirViewZSigma - m_prevRtRestirViewZSigma) > 1e-6f) ||
+        (std::fabs(m_rtRestirViewZSigmaScale - m_prevRtRestirViewZSigmaScale) > 1e-6f) ||
         (std::fabs(m_rtRestirRoughnessSigma - m_prevRtRestirRoughnessSigma) > 1e-6f) ||
         (std::fabs(m_rtRestirMaxM - m_prevRtRestirMaxM) > 1e-6f) ||
         (std::fabs(m_rtRestirMaxAge - m_prevRtRestirMaxAge) > 1e-6f) ||
         (std::fabs(m_rtRestirMinTarget - m_prevRtRestirMinTarget) > 1e-9f) ||
         (std::fabs(m_rtRestirMaxWeight - m_prevRtRestirMaxWeight) > 1e-6f) ||
-        (std::fabs(m_rtRestirTemporalMinConfidence - m_prevRtRestirTemporalMinConfidence) > 1e-6f);
+        (std::fabs(m_rtRestirTemporalMinConfidence - m_prevRtRestirTemporalMinConfidence) > 1e-6f) ||
+        (std::fabs(m_rtRestirSpatialMinConfidence - m_prevRtRestirSpatialMinConfidence) > 1e-6f);
 
     const bool resetRawAccumulation =
         cameraChanged ||
@@ -1716,6 +1739,7 @@ void Renderer::RenderFrame(
     m_prevRtEnableRestirEnvDi = m_rtEnableRestirEnvDi;
     m_prevRtRestirUseTemporal = m_rtRestirUseTemporal;
     m_prevRtRestirUseSpatial = m_rtRestirUseSpatial;
+    m_prevRtRestirMathMode = m_rtRestirMathMode;
 
     m_prevRtRestirInitialCandidateCount = m_rtRestirInitialCandidateCount;
     m_prevRtRestirSpatialSamples = m_rtRestirSpatialSamples;
@@ -1723,7 +1747,7 @@ void Renderer::RenderFrame(
 
     m_prevRtRestirNormalSigma = m_rtRestirNormalSigma;
     m_prevRtRestirDepthSigma = m_rtRestirDepthSigma;
-    m_prevRtRestirViewZSigma = m_rtRestirViewZSigma;
+    m_prevRtRestirViewZSigmaScale = m_rtRestirViewZSigmaScale;
     m_prevRtRestirRoughnessSigma = m_rtRestirRoughnessSigma;
 
     m_prevRtRestirMaxM = m_rtRestirMaxM;
@@ -1731,6 +1755,7 @@ void Renderer::RenderFrame(
     m_prevRtRestirMinTarget = m_rtRestirMinTarget;
     m_prevRtRestirMaxWeight = m_rtRestirMaxWeight;
     m_prevRtRestirTemporalMinConfidence = m_rtRestirTemporalMinConfidence;
+    m_prevRtRestirSpatialMinConfidence = m_rtRestirSpatialMinConfidence;
 
     m_rtHistoryValid = true;
 
@@ -6179,6 +6204,24 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
 
     cb->sampling.pad1 = 0.0f;
 
+    const bool useReferenceRestirMath =
+        m_rtRestirMathMode ==
+        RtRestirMathMode::Reference;
+
+    const float effectiveRestirMaxM =
+        useReferenceRestirMath
+        ? kRtRestirReferenceMaxM
+        : std::max(
+            1.0f,
+            m_rtRestirMaxM);
+
+    const float effectiveRestirMaxWeight =
+        useReferenceRestirMath
+        ? kRtRestirReferenceMaxWeight
+        : std::max(
+            1.0f,
+            m_rtRestirMaxWeight);
+
     cb->restir.enableRestirEnvDi =
         (m_rtEnableRestirEnvDi || IsRtRestirDebug(m_debugView)) ? 1u : 0u;
 
@@ -6188,8 +6231,11 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
     cb->restir.restirDebugView =
         m_debugView;
 
+    cb->restir.restirDispatchMode =
+        restirDispatchMode;
+
     cb->restir.restirMaxM =
-        std::max(1.0f, m_rtRestirMaxM);
+        effectiveRestirMaxM;
 
     cb->restir.restirMaxAge =
         std::max(0.0f, m_rtRestirMaxAge);
@@ -6198,9 +6244,15 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
         std::max(0.0f, m_rtRestirMinTarget);
 
     cb->restir.restirMaxWeight =
-        std::max(1.0f, m_rtRestirMaxWeight);
+        effectiveRestirMaxWeight;
 
-    cb->restir.restirDispatchMode = restirDispatchMode;
+    cb->restir.restirMathMode =
+        static_cast<uint32_t>(
+            m_rtRestirMathMode);
+
+    cb->restir.padMath[0] = 0u;
+    cb->restir.padMath[1] = 0u;
+    cb->restir.padMath[2] = 0u;
     
     cb->sky.enabled =
         m_environment.enabled ? 1u : 0u;
@@ -9513,19 +9565,49 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirTemporalConstants(
     cb->depthSigma = std::max(1e-5f, m_rtRestirDepthSigma);
     cb->normalSigma = std::max(1e-5f, m_rtRestirNormalSigma);
     cb->roughnessSigma = std::max(1e-5f, m_rtRestirRoughnessSigma);
-    cb->viewZSigma = std::max(1e-5f, m_rtRestirViewZSigma);
+    cb->viewZSigmaScale = std::max(1e-5f, m_rtRestirViewZSigmaScale);
 
     cb->reprojectMinWeight =
         std::clamp(m_rtRestirTemporalMinConfidence, 0.0f, 1.0f);
 
+    const bool useReferenceMath =
+        m_rtRestirMathMode ==
+        RtRestirMathMode::Reference;
+
     cb->maxM =
-        std::max(1.0f, m_rtRestirMaxM);
+        useReferenceMath
+        ? kRtRestirReferenceMaxM
+        : std::max(
+            1.0f,
+            m_rtRestirMaxM);
 
     cb->maxAge =
         std::max(0.0f, m_rtRestirMaxAge);
 
     cb->maxWeight =
-        std::max(1.0f, m_rtRestirMaxWeight);
+        useReferenceMath
+        ? kRtRestirReferenceMaxWeight
+        : std::max(
+            1.0f,
+            m_rtRestirMaxWeight);
+
+    cb->distanceNormParams =
+    {
+        kRtDistanceNormParamX,
+        kRtDistanceNormParamY,
+        kRtDistanceNormParamZ
+    };
+
+    cb->distanceNormSigma =
+        kRtDistanceNormSigma;
+
+    cb->mathMode =
+        static_cast<uint32_t>(
+            m_rtRestirMathMode);
+
+    cb->padMath[0] = 0u;
+    cb->padMath[1] = 0u;
+    cb->padMath[2] = 0u;
 
     return alloc.gpu;
 }
@@ -9923,6 +10005,7 @@ bool Renderer::RunRtRestirTemporal(
     m_rtRestirHistoryWriteIndex = readIndex;
 
     m_rtRestirTemporalValidThisFrame = true;
+    m_rtRestirTemporalOutputReady = true;
 
     m_rtRestirHistoryValid =
         m_rtRestirUseTemporal &&
@@ -9967,26 +10050,52 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirSpatialConstants(
     cb->roughnessSigma =
         std::max(1e-5f, m_rtRestirRoughnessSigma);
 
-    cb->viewZSigma =
-        std::max(1e-5f, m_rtRestirViewZSigma);
+    cb->viewZSigmaScale =
+        std::max(1e-5f, m_rtRestirViewZSigmaScale);
+
+    const bool useReferenceMath =
+        m_rtRestirMathMode ==
+        RtRestirMathMode::Reference;
 
     cb->maxM =
-        std::max(1.0f, m_rtRestirMaxM);
+        useReferenceMath
+        ? kRtRestirReferenceMaxM
+        : std::max(
+            1.0f,
+            m_rtRestirMaxM);
 
     cb->maxWeight =
-        std::max(1.0f, m_rtRestirMaxWeight);
+        useReferenceMath
+        ? kRtRestirReferenceMaxWeight
+        : std::max(
+            1.0f,
+            m_rtRestirMaxWeight);
 
     cb->frameIndex = frameIndex;
     cb->debugView = m_debugView;
 
     cb->distanceNormParams =
     {
-        1.0f,
-        0.0f,
-        1.0f
+        kRtDistanceNormParamX,
+        kRtDistanceNormParamY,
+        kRtDistanceNormParamZ
     };
 
-    cb->distanceNormSigma = 0.08f;
+    cb->distanceNormSigma =
+        kRtDistanceNormSigma;
+
+    cb->spatialMinReuseWeight =
+        std::clamp(
+            m_rtRestirSpatialMinConfidence,
+            0.0f,
+            1.0f);
+
+    cb->mathMode =
+        static_cast<uint32_t>(
+            m_rtRestirMathMode);
+
+    cb->padMath[0] = 0u;
+    cb->padMath[1] = 0u;
 
     return alloc.gpu;
 }
@@ -10252,6 +10361,7 @@ bool Renderer::RunRtRestirSpatial(
     cmdList->ResourceBarrier(2, barriers);
 
     m_rtRestirSpatialValidThisFrame = true;
+    m_rtRestirSpatialOutputReady = true;
 
     CmdEndEvent(cmdList);
     return true;
@@ -10410,14 +10520,12 @@ bool Renderer::RunRtRestirResolve(
     cmdList->ResourceBarrier(3, barriers);
 
     m_rtRestirResolvedValidThisFrame = true;
+    m_rtRestirResolveOutputReady = true;
 
     CmdEndEvent(cmdList);
     return true;
 }
 
-// ReSTIR reservoir history depends on both reservoir settings and the guide
-// histories used to validate reuse. Raw accumulation resets alone should not
-// clear ReSTIR history, but true temporal/guide invalidation must.
 void Renderer::ResetRtRestirHistory()
 {
     m_rtRestirHistoryValid = false;
@@ -10425,6 +10533,10 @@ void Renderer::ResetRtRestirHistory()
     m_rtRestirTemporalValidThisFrame = false;
     m_rtRestirSpatialValidThisFrame = false;
     m_rtRestirResolvedValidThisFrame = false;
+
+    m_rtRestirTemporalOutputReady = false;
+    m_rtRestirSpatialOutputReady = false;
+    m_rtRestirResolveOutputReady = false;
 
     m_rtRestirHistoryReadIndex = 0;
     m_rtRestirHistoryWriteIndex = 1;

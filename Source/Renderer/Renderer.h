@@ -266,6 +266,24 @@ private:
         MisTwoSampleReference = 3
     };
 
+    enum class RtRestirMathMode : uint32_t
+    {
+        // Diagnostic mode:
+        //   large bounded M
+        //   no final-W clamp
+        //
+        // R1 still uses cosine-only receiver retargeting, so this is not an
+        // unbiased production reference until R2 adds exact receiver targets.
+        Reference = 0,
+
+        // Practical validation mode:
+        //   configured M limit
+        //   configured W limit
+        //   age limits
+        //   conservative hard reuse gates
+        Robust = 1
+    };
+
     struct RtSceneStats
     {
         uint32_t drawCount = 0;
@@ -394,8 +412,15 @@ private:
         float restirMaxAge = 32.0f;
         float restirMinTarget = 1e-5f;
         float restirMaxWeight = 64.0f;
+
+        uint32_t restirMathMode =
+            static_cast<uint32_t>(
+                RtRestirMathMode::Robust);
+
+        uint32_t padMath[3] = {};
     };
     static_assert((sizeof(RtRestirConstants) % 16) == 0, "RtRestirConstants must be 16-byte aligned.");
+    static_assert(sizeof(RtRestirConstants) == 48, "RtRestirConstants must match the HLSL RtRayGenConstants layout.");
 
     struct RtSkyConstants
     {
@@ -459,14 +484,29 @@ private:
         float depthSigma = 0.02f;
         float normalSigma = 0.25f;
         float roughnessSigma = 0.20f;
-        float viewZSigma = 0.08f;
+        float viewZSigmaScale = 0.25f;
 
-        float reprojectMinWeight = 0.25f;
+        float reprojectMinWeight = 0.65f;
         float maxM = 32.0f;
-        float maxAge = 32.0f;
+        float maxAge = 2.0f;
         float maxWeight = 64.0f;
+
+        DirectX::XMFLOAT3 distanceNormParams{
+            1.0f,
+            0.0f,
+            1.0f
+        };
+
+        float distanceNormSigma = 0.08f;
+
+        uint32_t mathMode =
+            static_cast<uint32_t>(
+                RtRestirMathMode::Robust);
+
+        uint32_t padMath[3] = {};
     };
     static_assert((sizeof(RtRestirTemporalConstants) % 16) == 0, "RtRestirTemporalConstants must be 16-byte aligned.");
+    static_assert(sizeof(RtRestirTemporalConstants) == 96, "RtRestirTemporalConstants must match the temporal HLSL cbuffer.");
     
     struct RtRestirSpatialConstants
     {
@@ -474,20 +514,34 @@ private:
         uint32_t sampleCount = 4;
         uint32_t radius = 8;
 
-        float normalSigma = 0.25f;
+        float normalSigma = 0.10f;
         float depthSigma = 0.02f;
         float roughnessSigma = 0.20f;
-        float viewZSigma = 0.08f;
+        float viewZSigmaScale = 0.25f;
 
         float maxM = 32.0f;
         float maxWeight = 64.0f;
         uint32_t frameIndex = 0;
         uint32_t debugView = 0;
 
-        DirectX::XMFLOAT3 distanceNormParams{ 1.0f, 0.0f, 1.0f };
+        DirectX::XMFLOAT3 distanceNormParams{
+            1.0f,
+            0.0f,
+            1.0f
+        };
+
         float distanceNormSigma = 0.08f;
+
+        float spatialMinReuseWeight = 0.25f;
+
+        uint32_t mathMode =
+            static_cast<uint32_t>(
+                RtRestirMathMode::Robust);
+
+        uint32_t padMath[2] = {};
     };
     static_assert((sizeof(RtRestirSpatialConstants) % 16) == 0, "RtRestirSpatialConstants must be 16-byte aligned.");
+    static_assert(sizeof(RtRestirSpatialConstants) == 80, "RtRestirSpatialConstants must match the spatial HLSL cbuffer.");
 
     struct RtRestirApplyConstants
     {
@@ -1911,7 +1965,7 @@ private:
     // These are produced by RtRestirTemporalPass and write directly to m_rtOutput.
     // The RT post stack must stay disabled, but ReSTIR temporal history must still advance.
     //   106 = temporal previous-frame reservoir reuse accepted mask; white = previous reused
-    //   107 = temporal reservoir M / confidence; RG = M heat, B = confidence
+    //   107 = temporal reservoir state; R = M, G = age, B = confidence
     //
     // Spatial reservoir / compute-owned views:
     // These are produced by RtRestirSpatialPass and write directly to m_rtOutput.
@@ -2431,7 +2485,12 @@ private:
     static constexpr uint32_t kRtTemporalUavCount = 3;
     static constexpr float kRtViewZRoughCutoff = 0.35f;
     static constexpr float kRtViewZConfMin = 0.5f;
-    static constexpr float kRtDistanceNormSigma = 0.08f;
+    static constexpr float kRtDistanceNormParamX = 1.0f;
+    static constexpr float kRtDistanceNormParamY = 0.0f;
+    static constexpr float kRtDistanceNormParamZ = 1.0f;
+    static constexpr float kRtDistanceNormSigma =  0.08f;
+    static constexpr float kRtRestirReferenceMaxM = 4096.0f;
+    static constexpr float kRtRestirReferenceMaxWeight = 3.0e30f;
     static constexpr uint32_t kRtOutlierClampSrvCount = 7;
     static constexpr uint32_t kRtOutlierClampUavCount = 2;
     static constexpr bool kRtEnvNeeFireflyGuardDefault = true;
@@ -2593,6 +2652,9 @@ private:
     bool m_rtRestirTemporalValidThisFrame = false;
     bool m_rtRestirSpatialValidThisFrame = false;
     bool m_rtRestirResolvedValidThisFrame = false;
+    bool m_rtRestirTemporalOutputReady = false;
+    bool m_rtRestirSpatialOutputReady = false;
+    bool m_rtRestirResolveOutputReady = false;
     bool m_rtRestirAppliedReady = false;
 
     uint32_t m_rtRestirHistoryReadIndex = 0;
@@ -2616,16 +2678,24 @@ private:
     uint32_t m_rtRestirSpatialSamples = 4;
     uint32_t m_rtRestirSpatialRadius = 8;
 
-    float m_rtRestirNormalSigma = 0.1f;
+    float m_rtRestirNormalSigma = 0.10f;
     float m_rtRestirDepthSigma = 0.02f;
-    float m_rtRestirViewZSigma = 0.25f; 
+    float m_rtRestirViewZSigmaScale = 0.25f;
     float m_rtRestirRoughnessSigma = 0.20f;
 
     float m_rtRestirMaxM = 32.0f;
-    float m_rtRestirMaxAge = 2.0f; 
+    float m_rtRestirMaxAge = 2.0f;
     float m_rtRestirMinTarget = 1e-5f;
     float m_rtRestirMaxWeight = 64.0f;
-    float m_rtRestirTemporalMinConfidence = 0.65f; 
+
+    float m_rtRestirTemporalMinConfidence = 0.65f;
+    float m_rtRestirSpatialMinConfidence = 0.25f;
+
+    RtRestirMathMode m_rtRestirMathMode =
+        RtRestirMathMode::Robust;
+
+    RtRestirMathMode m_prevRtRestirMathMode =
+        RtRestirMathMode::Robust;
 
     //These let RenderFrame() detect when ReSTIR settings changed and clear reservoir history without unnecessarily destroying resources
     bool m_prevRtEnableRestirEnvDi = false;
@@ -2638,7 +2708,7 @@ private:
 
     float m_prevRtRestirNormalSigma = 0.1f;
     float m_prevRtRestirDepthSigma = 0.02f;
-    float m_prevRtRestirViewZSigma = 0.25f;
+    float m_prevRtRestirViewZSigmaScale = 0.25f;
     float m_prevRtRestirRoughnessSigma = 0.20f;
 
     float m_prevRtRestirMaxM = 32.0f;
@@ -2646,6 +2716,7 @@ private:
     float m_prevRtRestirMinTarget = 1e-5f;
     float m_prevRtRestirMaxWeight = 64.0f;
     float m_prevRtRestirTemporalMinConfidence = 0.65f;
+    float m_prevRtRestirSpatialMinConfidence = 0.25f;
 
     RtRestirTemporalPass m_rtRestirTemporalPass;
     RtRestirSpatialPass m_rtRestirSpatialPass;

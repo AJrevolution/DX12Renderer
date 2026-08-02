@@ -184,6 +184,9 @@ cbuffer RtRayGenConstants : register(b1)
     float RtRestirMaxAge;
     float RtRestirMinTarget;
     float RtRestirMaxWeight;
+
+    uint RtRestirMathMode;
+    uint3 _padRtRestirMath;
     
     RtSkyConstants RtSky;
     RtEnvironmentLightingConstants RtEnvironment;
@@ -1663,7 +1666,7 @@ void RayGen()
 
         if (RtRestirDebugView == 104u)
         {
-            if (!ReservoirValid(rr))
+            if (!ReservoirFinalizedValid(rr))
             {
                 g_Output[pixel] = float4(0.0f, 0.0f, 0.05f, 1.0f);
                 return;
@@ -1679,7 +1682,7 @@ void RayGen()
 
         if (RtRestirDebugView == 105u)
         {
-            if (!ReservoirValid(rr))
+            if (!ReservoirFinalizedValid(rr))
             {
                 g_Output[pixel] = float4(0.0f, 0.0f, 0.05f, 1.0f);
                 return;
@@ -2273,7 +2276,8 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         ReservoirFinalize(
             r,
             RtRestirMaxM,
-            RtRestirMaxWeight);
+            RtRestirMaxWeight,
+            RtRestirMathMode);
 
         g_RestirInitialReservoir[pixelIndex] = r;
     }
@@ -2297,7 +2301,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
         float3 invalidReason = 0.0f.xxx;
 
-        if (!ReservoirValid(rr))
+        if (!ReservoirFinalizedValid(rr))
         {
             invalidReason.r = 1.0f;
         }

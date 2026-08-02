@@ -16,14 +16,16 @@ namespace
     //            64 materials * 5 textures:
     //            base color, normal, metallic/roughness, occlusion, emissive
     //
-    // t330 = imported glTF vertices
-    // t331 = imported glTF indices
+    // t330..t345 = imported model vertex buffers
+    // t346..t361 = imported model index buffers
     //
-    // t340 = BRDF LUT
-    // t341 = IBL diffuse
-    // t342 = IBL specular
-    // t343 = environment alias table
-    // t344 = ReSTIR resolve reservoir
+    // t380 = BRDF LUT
+    // t381 = IBL diffuse
+    // t382 = IBL specular
+    // t383 = environment alias table
+    // t384 = ReSTIR resolve reservoir
+    // t385 = display sky cubemap (background only)
+    // t386 = RT lighting-environment radiance
     static constexpr uint32_t kRtMaxMaterials = 64;
     static constexpr uint32_t kRtTexturesPerMaterial = 5;
 
@@ -101,7 +103,7 @@ void RaytracingPipeline::BuildRootSignature(ID3D12Device* device)
         D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
         kRtSrvTableCount,
         1,
-        0);  // t1..t284: geometry, instance data, material textures, imported geometry, IBL, env alias, ReSTIR
+        0);  // t1..t386: geometry, instances, materials, imported buffers, IBL, env alias, ReSTIR, display sky, lighting radiance
 
     CD3DX12_ROOT_PARAMETER params[5]{};
     params[0].InitAsDescriptorTable(1, &uavTable); // u0..u11 RT UAV table

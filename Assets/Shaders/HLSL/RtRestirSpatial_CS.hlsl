@@ -3,7 +3,7 @@
 
 // RT DebugView ownership for this pass:
 //   108 = accepted spatial reuse count
-//   109 = selected neighbor distance
+//   109 = selected neighbour distance
 
 StructuredBuffer<RtRestirReservoir> g_TemporalReservoir : register(t0);
 Texture2D<float4> g_CurrNormal : register(t1);
@@ -15,7 +15,7 @@ RWStructuredBuffer<RtRestirReservoir> g_OutSpatialReservoir : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
 
 static const uint SURFACE_ID_INVALID = 0xFFFFFFFFu;
-static const float kPiRestirSpatial = 3.14159265f;
+static const float RT_RESTIR_SPATIAL_PI = 3.14159265358979323846f;
 
 cbuffer RtRestirSpatialConstants : register(b0)
 {
@@ -26,7 +26,7 @@ cbuffer RtRestirSpatialConstants : register(b0)
     float NormalSigma;
     float DepthSigma;
     float RoughnessSigma;
-    float ViewZSigma;
+    float ViewZSigmaScale;
 
     float MaxM;
     float MaxWeight;
@@ -35,6 +35,10 @@ cbuffer RtRestirSpatialConstants : register(b0)
 
     float3 DistanceNormParams;
     float DistanceNormSigma;
+
+    float SpatialMinReuseWeight;
+    uint MathMode;
+    uint2 _padMath;
 };
 
 uint HashUintRtSpatial(uint x)
@@ -75,43 +79,37 @@ bool LoadSpatialGuide(
     out uint surfaceId,
     out float viewZ)
 {
-    float4 nr = g_CurrNormal[pixel];
+    const float4 packedNormalRoughness = g_CurrNormal[pixel];
 
-    normal = UnpackNormal(nr);
-    roughness = nr.a;
+    normal = UnpackNormal(packedNormalRoughness);
+    roughness = saturate(packedNormalRoughness.a);
     depth = g_CurrDepth[pixel];
     surfaceId = g_CurrSurfaceId[pixel];
     viewZ = g_CurrViewZ[pixel];
 
-    if (!SurfaceIdValid(surfaceId))
-        return false;
-
-    if (depth >= 0.9999f)
-        return false;
-
-    if (!DistanceValid(viewZ))
-        return false;
-
-    return true;
+    return
+        SurfaceIdValid(surfaceId) &&
+        depth < 0.9999f &&
+        DistanceValid(viewZ);
 }
 
-bool SpatialGuideAccept(
+bool EvaluateSpatialGuideWeight(
     uint2 centerPixel,
-    uint2 neighborPixel,
+    uint2 neighbourPixel,
     out float guideWeight)
 {
     guideWeight = 0.0f;
 
-    float3 centerN;
-    float centerR;
+    float3 centerNormal;
+    float centerRoughness;
     float centerDepth;
     uint centerSurfaceId;
     float centerViewZ;
 
     if (!LoadSpatialGuide(
         centerPixel,
-        centerN,
-        centerR,
+        centerNormal,
+        centerRoughness,
         centerDepth,
         centerSurfaceId,
         centerViewZ))
@@ -119,76 +117,123 @@ bool SpatialGuideAccept(
         return false;
     }
 
-    float3 neighborN;
-    float neighborR;
-    float neighborDepth;
-    uint neighborSurfaceId;
-    float neighborViewZ;
+    float3 neighbourNormal;
+    float neighbourRoughness;
+    float neighbourDepth;
+    uint neighbourSurfaceId;
+    float neighbourViewZ;
 
     if (!LoadSpatialGuide(
-        neighborPixel,
-        neighborN,
-        neighborR,
-        neighborDepth,
-        neighborSurfaceId,
-        neighborViewZ))
+        neighbourPixel,
+        neighbourNormal,
+        neighbourRoughness,
+        neighbourDepth,
+        neighbourSurfaceId,
+        neighbourViewZ))
     {
         return false;
     }
 
-    if (centerSurfaceId != neighborSurfaceId)
+    // SurfaceId is intentionally a hard gate. It prevents reuse across object
+    // and material boundaries even when all continuous guides look similar.
+    if (centerSurfaceId != neighbourSurfaceId)
         return false;
 
-    float nd = saturate(dot(centerN, neighborN));
+    const float normalDot =
+        saturate(dot(centerNormal, neighbourNormal));
 
-    float wNormal =
-        exp(-(1.0f - nd) / max(1e-5f, NormalSigma));
+    const float normalWeight =
+        exp(-(1.0f - normalDot) / max(1.0e-5f, NormalSigma));
 
-    float wDepth =
-        exp(-abs(centerDepth - neighborDepth) / max(1e-5f, DepthSigma));
+    const float depthWeight =
+        exp(-abs(centerDepth - neighbourDepth) /
+            max(1.0e-5f, DepthSigma));
 
-    float wRough =
-        exp(-abs(centerR - neighborR) / max(1e-5f, RoughnessSigma));
+    const float roughnessWeight =
+        exp(-abs(centerRoughness - neighbourRoughness) /
+            max(1.0e-5f, RoughnessSigma));
 
-    float centerNormZ =
+    const float centerNormZ =
         NormalizeDistance(
             centerViewZ,
             centerViewZ,
-            centerR,
+            centerRoughness,
             DistanceNormParams);
 
-    float neighborNormZ =
+    const float neighbourNormZ =
         NormalizeDistance(
-            neighborViewZ,
+            neighbourViewZ,
             centerViewZ,
-            centerR,
+            centerRoughness,
             DistanceNormParams);
 
-    float viewZSigma =
-        max(1e-5f, DistanceNormSigma * max(1e-5f, ViewZSigma));
+    const float viewZSigma =
+        max(1.0e-5f, DistanceNormSigma * max(1.0e-5f, ViewZSigmaScale));
 
-    float wViewZ =
+    const float viewZWeight =
         DistanceSimilarityWeight(
             centerNormZ,
-            neighborNormZ,
+            neighbourNormZ,
             viewZSigma);
 
-    // Treat ~3 sigma as the rejection boundary. This avoids accepting
-    // completely unrelated pixels while still keeping the sigma knobs useful.
-    if (wNormal < 0.05f ||
-        wDepth < 0.05f ||
-        wRough < 0.05f ||
-        wViewZ < 0.05f)
+    if (normalWeight < 0.05f ||
+        depthWeight < 0.05f ||
+        roughnessWeight < 0.05f ||
+        viewZWeight < 0.05f)
     {
         return false;
     }
 
-    guideWeight = wNormal * wDepth * wRough * wViewZ;
-    return guideWeight > 0.0f;
+    guideWeight =
+        normalWeight *
+        depthWeight *
+        roughnessWeight *
+        viewZWeight;
+
+    return
+        RtReservoirFiniteScalar(guideWeight) &&
+        guideWeight > 0.0f;
 }
 
-void SpatialReservoirUpdate(
-    inout RtRestirReservoir dst,
+bool RetargetNeighbourReservoir(
+    inout RtRestirReservoir neighbour,
+    uint2 centerPixel,
+    uint2 neighbourPixel,
+    out float centerTarget)
+{
+    centerTarget = 0.0f;
+
+    if (!ReservoirFinalizedValid(neighbour))
+        return false;
+
+    const float3 centerNormal =
+        UnpackNormal(g_CurrNormal[centerPixel]);
+
+    const float3 neighbourNormal =
+        UnpackNormal(g_CurrNormal[neighbourPixel]);
+
+    const float3 wi = SafeNormalize(neighbour.sampleDir_pdf.xyz);
+    const float centerNoL = saturate(dot(centerNormal, wi));
+    const float neighbourNoL = saturate(dot(neighbourNormal, wi));
+
+    if (centerNoL <= 1.0e-4f || neighbourNoL <= 1.0e-4f)
+        return false;
+
+    const float cosineRatio = centerNoL / neighbourNoL;
+
+    if (!RtReservoirFiniteScalar(cosineRatio) ||
+        cosineRatio < 0.5f ||
+        cosineRatio > 2.0f)
+    {
+        return false;
+    }
+
+    centerTarget = ReservoirTarget(neighbour) * cosineRatio;
+    return ReservoirRetarget(neighbour, centerTarget);
+}
+
+RtReservoirUpdateResult UpdateSpatialReservoir(
+    inout RtRestirReservoir destination,
     RtRestirReservoir candidate,
     float candidateWeight,
     float candidateM,
@@ -196,48 +241,42 @@ void SpatialReservoirUpdate(
     inout float selectedDistance,
     inout uint rng)
 {
-    if (!ReservoirValid(candidate))
-        return;
+    const RtReservoirUpdateResult result =
+        ReservoirUpdateWeightedTracked(
+            destination,
+            candidate,
+            candidateWeight,
+            candidateM,
+            rng);
 
-    if (candidateWeight <= 0.0f || candidateM <= 0.0f)
-        return;
-
-    dst.weightSum_M_W.x += candidateWeight;
-    dst.weightSum_M_W.y += candidateM;
-
-    float p = candidateWeight / max(1e-8f, dst.weightSum_M_W.x);
-
-    if (RtReservoirRand01(rng) < p)
+    if (result.selected != 0u)
     {
-        dst.sampleDir_pdf = candidate.sampleDir_pdf;
-        dst.sampleLi_target = candidate.sampleLi_target;
-        dst.sampleIndex = candidate.sampleIndex;
-        dst.surfaceId = candidate.surfaceId;
-        dst.flags = candidate.flags | RT_RESTIR_RESERVOIR_VALID;
-        dst.age = candidate.age;
-        dst.weightSum_M_W.w = candidate.weightSum_M_W.w;
-
-        selectedDistance = candidateDistance;
+        selectedDistance =
+            candidateDistance;
     }
+
+    return result;
 }
 
 [numthreads(8, 8, 1)]
-void main(uint3 dtid : SV_DispatchThreadID)
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    uint2 pixel = dtid.xy;
+    const uint2 pixel = dispatchThreadId.xy;
 
-    uint width, height;
+    uint width;
+    uint height;
     g_Output.GetDimensions(width, height);
 
     if (pixel.x >= width || pixel.y >= height)
         return;
 
-    uint pixelIndex = pixel.y * width + pixel.x;
+    const uint pixelIndex = pixel.y * width + pixel.x;
 
-    RtRestirReservoir outR;
-    ReservoirClear(outR);
+    RtRestirReservoir outputReservoir;
+    ReservoirClear(outputReservoir);
 
-    RtRestirReservoir center = g_TemporalReservoir[pixelIndex];
+    RtRestirReservoir center =
+        g_TemporalReservoir[pixelIndex];
 
     uint rng =
         HashUintRtSpatial(
@@ -249,118 +288,144 @@ void main(uint3 dtid : SV_DispatchThreadID)
     uint acceptedCount = 0u;
     float selectedDistance = 0.0f;
 
-    if (ReservoirValid(center))
+    if (ReservoirFinalizedValid(center))
     {
-        center.weightSum_M_W.y =
-            min(center.weightSum_M_W.y, MaxM);
+        const float centerM =
+            max(1.0f, min(center.weightSum_M_W.y, MaxM));
 
-        SpatialReservoirUpdate(
-            outR,
+        const float centerWeight =
+            ReservoirReuseWeight(
+                center,
+                ReservoirTarget(center),
+                centerM);
+
+        UpdateSpatialReservoir(
+            outputReservoir,
             center,
-            max(0.0f, center.weightSum_M_W.x),
-            max(1.0f, center.weightSum_M_W.y),
+            centerWeight,
+            centerM,
             0.0f,
             selectedDistance,
             rng);
     }
 
-    uint sampleCount = max(1u, SampleCount);
-    uint radius = max(1u, Radius);
+    const uint sampleCount = max(1u, SampleCount);
+    const uint radius = max(1u, Radius);
 
     [loop]
-    for (uint i = 0u; i < sampleCount; ++i)
+    for (uint sampleIndex = 0u;
+        sampleIndex < sampleCount;
+        ++sampleIndex)
     {
-        float angle = RtReservoirRand01(rng) * 2.0f * kPiRestirSpatial;
-        float dist = sqrt(RtReservoirRand01(rng)) * float(radius);
+        const float angle =
+            RtReservoirRand01(rng) * 2.0f * RT_RESTIR_SPATIAL_PI;
 
-        int2 offset =
-            int2(round(float2(cos(angle), sin(angle)) * dist));
+        // sqrt produces uniform area density over the sampling disk.
+        const float distance =
+            sqrt(RtReservoirRand01(rng)) * float(radius);
 
-        if (offset.x == 0 && offset.y == 0)
+        const int2 offset =
+            int2(round(float2(cos(angle), sin(angle)) * distance));
+
+        if (all(offset == 0))
             continue;
 
-        int2 neighborI = int2(pixel) + offset;
+        const int2 neighbourPixelI = int2(pixel) + offset;
 
-        if (neighborI.x < 0 ||
-            neighborI.y < 0 ||
-            neighborI.x >= int(width) ||
-            neighborI.y >= int(height))
+        if (neighbourPixelI.x < 0 ||
+            neighbourPixelI.y < 0 ||
+            neighbourPixelI.x >= int(width) ||
+            neighbourPixelI.y >= int(height))
         {
             continue;
         }
 
-        uint2 neighborPixel = uint2(neighborI);
-        uint neighborIndex = neighborPixel.y * width + neighborPixel.x;
+        const uint2 neighbourPixel = uint2(neighbourPixelI);
+        const uint neighbourIndex =
+            neighbourPixel.y * width + neighbourPixel.x;
 
-        RtRestirReservoir neighbor = g_TemporalReservoir[neighborIndex];
-
-        if (!ReservoirValid(neighbor))
-            continue;
+        RtRestirReservoir neighbour =
+            g_TemporalReservoir[neighbourIndex];
 
         float guideWeight = 0.0f;
+        float centerTarget = 0.0f;
 
-        if (!SpatialGuideAccept(pixel, neighborPixel, guideWeight))
+        if (!ReservoirFinalizedValid(neighbour) ||
+            !EvaluateSpatialGuideWeight(
+                pixel,
+                neighbourPixel,
+                guideWeight) ||
+            !RetargetNeighbourReservoir(
+                neighbour,
+                pixel,
+                neighbourPixel,
+                centerTarget))
+        {
             continue;
+        }
 
-        neighbor.flags |= RT_RESTIR_RESERVOIR_SPATIAL;
-        neighbor.weightSum_M_W.y =
-            min(neighbor.weightSum_M_W.y, MaxM);
-        neighbor.weightSum_M_W.w =
+        // Confidence controls eligibility. It does not scale the represented energy.
+        if (guideWeight < SpatialMinReuseWeight)
+        {
+            continue;
+        }
+
+        neighbour.flags |=
+            RT_RESTIR_RESERVOIR_SPATIAL;
+
+        neighbour.weightSum_M_W.w =
             guideWeight;
 
-        float candidateWeight =
-            max(0.0f, neighbor.weightSum_M_W.x) *
-            guideWeight;
+        const float neighbourM =
+        max(1.0f, min(neighbour.weightSum_M_W.y, MaxM));
 
-        float candidateM =
-            max(1.0f, neighbor.weightSum_M_W.y);
+        const float neighbourWeight =
+            ReservoirReuseWeight(
+                neighbour,
+                centerTarget,
+                neighbourM);
 
-        SpatialReservoirUpdate(
-            outR,
-            neighbor,
-            candidateWeight,
-            candidateM,
-            length(float2(offset)),
-            selectedDistance,
-            rng);
+        const RtReservoirUpdateResult updateResult =
+            UpdateSpatialReservoir(
+                outputReservoir,
+                neighbour,
+                neighbourWeight,
+                neighbourM,
+                length(float2(offset)),
+                selectedDistance,
+                rng);
 
-        acceptedCount++;
+        if (updateResult.accepted != 0u)
+        {
+            acceptedCount++;
+        }
     }
 
-    ReservoirFinalize(
-        outR,
-        MaxM,
-        MaxWeight);
+    ReservoirFinalize(outputReservoir, MaxM, MaxWeight, MathMode);
 
-    if (!ReservoirValid(outR))
-    {
-        ReservoirClear(outR);
-    }
+    if (!ReservoirFinalizedValid(outputReservoir))
+        ReservoirClear(outputReservoir);
 
-    g_OutSpatialReservoir[pixelIndex] = outR;
+    g_OutSpatialReservoir[pixelIndex] = outputReservoir;
 
     if (DebugView == 108u)
     {
-        float v =
-            sampleCount > 0u
-                ? float(acceptedCount) / float(sampleCount)
-                : 0.0f;
+        const float value =
+            float(acceptedCount) / float(sampleCount);
 
-        g_Output[pixel] = float4(Heat(v), 1.0f);
+        g_Output[pixel] = float4(Heat(value), 1.0f);
     }
     else if (DebugView == 109u)
     {
-        if (!ReservoirValid(outR))
+        if (!ReservoirFinalizedValid(outputReservoir))
         {
             g_Output[pixel] = float4(0.0f.xxx, 1.0f);
             return;
         }
 
-        float v =
-        radius > 0u
-            ? saturate(selectedDistance / float(radius))
-            : 0.0f;
+        const float value =
+            saturate(selectedDistance / float(radius));
 
-        g_Output[pixel] = float4(Heat(v), 1.0f);
+        g_Output[pixel] = float4(Heat(value), 1.0f);
     }
 }

@@ -2,8 +2,8 @@
 #include "RtReservoir.hlsli"
 
 // RT DebugView ownership for this pass:
-//   106 = ReSTIR temporal reuse mask
-//   107 = ReSTIR temporal reservoir M / confidence
+//   106 = previous-frame reservoir reuse accepted mask
+//   107 = R: normalized M, G: normalized age, B: reuse confidence
 
 StructuredBuffer<RtRestirReservoir> g_CurrInitialReservoir : register(t0);
 StructuredBuffer<RtRestirReservoir> g_PrevTemporalReservoir : register(t1);
@@ -22,8 +22,6 @@ Texture2D<uint> g_PrevSurfaceId : register(t10);
 RWStructuredBuffer<RtRestirReservoir> g_OutTemporalReservoir : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
 
-SamplerState g_LinearClamp : register(s0);
-
 static const uint SURFACE_ID_INVALID = 0xFFFFFFFFu;
 
 cbuffer RtRestirTemporalConstants : register(b0)
@@ -40,12 +38,18 @@ cbuffer RtRestirTemporalConstants : register(b0)
     float DepthSigma;
     float NormalSigma;
     float RoughnessSigma;
-    float ViewZSigma;
+    float ViewZSigmaScale;
 
     float ReprojectMinWeight;
     float MaxM;
     float MaxAge;
     float MaxWeight;
+
+    float3 DistanceNormParams;
+    float DistanceNormSigma;
+
+    uint MathMode;
+    uint3 _padMath;
 };
 
 uint HashUintRtRestir(uint x)
@@ -65,8 +69,13 @@ float3 UnpackNormal(float4 packed)
 
 bool PrevUVValid(float2 uv)
 {
-    return uv.x >= 0.0f && uv.x <= 1.0f &&
-           uv.y >= 0.0f && uv.y <= 1.0f;
+    // The upper edge is exclusive. uv == 1 maps one texel beyond the resource
+    // and is a disocclusion, not a valid reprojection that should be clamped.
+    return
+        all(uv >= 0.0f.xx) &&
+        all(uv < 1.0f.xx) &&
+        !any(isnan(uv)) &&
+        !any(isinf(uv));
 }
 
 bool SurfaceIdValid(uint id)
@@ -74,91 +83,146 @@ bool SurfaceIdValid(uint id)
     return id != SURFACE_ID_INVALID;
 }
 
-float GuideWeight(
+bool CurrentGuideValid(uint2 pixel)
+{
+    const uint surfaceId = g_CurrSurfaceId[pixel];
+    const float depth = g_CurrDepth[pixel];
+    const float viewZ = g_CurrViewZ[pixel];
+
+    return
+        SurfaceIdValid(surfaceId) &&
+        depth < 0.9999f &&
+        DistanceValid(viewZ);
+}
+
+bool EvaluateTemporalGuideWeight(
     uint2 currPixel,
     uint2 prevPixel,
     out float reuseWeight)
 {
     reuseWeight = 0.0f;
 
-    // If these flags are false, the C++ side did not prove that the previous
-    // guide histories are real previous-frame histories. Do not reuse.
     if (SurfaceIdHistoryValid == 0u || ViewZHistoryValid == 0u)
-        return 0.0f;
+        return false;
 
-    uint currId = g_CurrSurfaceId[currPixel];
-    uint prevId = g_PrevSurfaceId[prevPixel];
+    const uint currId = g_CurrSurfaceId[currPixel];
+    const uint prevId = g_PrevSurfaceId[prevPixel];
 
     if (!SurfaceIdValid(currId) ||
         !SurfaceIdValid(prevId) ||
         currId != prevId)
     {
-        return 0.0f;
+        return false;
     }
 
-    float currDepth = g_CurrDepth[currPixel];
-    float prevDepth = g_PrevDepth[prevPixel];
+    const float currDepth = g_CurrDepth[currPixel];
+    const float prevDepth = g_PrevDepth[prevPixel];
 
     if (currDepth >= 0.9999f || prevDepth >= 0.9999f)
-        return 0.0f;
-
-    float currZ = g_CurrViewZ[currPixel];
-    float prevZ = g_PrevViewZ[prevPixel];
-
-    if (!DistanceValid(currZ) || !DistanceValid(prevZ))
-        return 0.0f;
-
-    float4 currNR = g_CurrNormal[currPixel];
-    float4 prevNR = g_PrevNormal[prevPixel];
-
-    float3 currN = UnpackNormal(currNR);
-    float3 prevN = UnpackNormal(prevNR);
-    
-    float normalDot = dot(currN, prevN);
-
-    if (normalDot < 0.95f)
-        return 0.0f;
-
-    float currR = currNR.a;
-    float prevR = prevNR.a;
-
-    float wDepth =
-        exp(-abs(currDepth - prevDepth) / max(1e-5f, DepthSigma));
-
-    float wNormal =
-        exp(-(1.0f - saturate(dot(currN, prevN))) / max(1e-5f, NormalSigma));
-
-    float wRough =
-        exp(-abs(currR - prevR) / max(1e-5f, RoughnessSigma));
-
-    float wViewZ =
-        exp(-abs(currZ - prevZ) / max(1e-5f, ViewZSigma));
-
-    reuseWeight = wDepth * wNormal * wRough * wViewZ;
-    return reuseWeight;
-}
-
-bool PreviousReservoirDirectionCompatible(
-    RtRestirReservoir prev,
-    uint2 currPixel,
-    uint2 prevPixel)
-{
-    float3 currN = UnpackNormal(g_CurrNormal[currPixel]);
-    float3 prevN = UnpackNormal(g_PrevNormal[prevPixel]);
-
-    float3 wi = SafeNormalize(prev.sampleDir_pdf.xyz);
-
-    float currNoL = saturate(dot(currN, wi));
-    float prevNoL = saturate(dot(prevN, wi));
-
-    if (currNoL <= 1e-4f || prevNoL <= 1e-4f)
         return false;
 
-    float ratio =
-        min(currNoL, prevNoL) /
-        max(1e-4f, max(currNoL, prevNoL));
+    const float currViewZ = g_CurrViewZ[currPixel];
+    const float prevViewZ = g_PrevViewZ[prevPixel];
 
-    return ratio >= 0.50f;
+    if (!DistanceValid(currViewZ) || !DistanceValid(prevViewZ))
+        return false;
+
+    const float4 currNR = g_CurrNormal[currPixel];
+    const float4 prevNR = g_PrevNormal[prevPixel];
+    const float3 currNormal = UnpackNormal(currNR);
+    const float3 prevNormal = UnpackNormal(prevNR);
+    const float normalDot = saturate(dot(currNormal, prevNormal));
+
+    // SurfaceId is a hard identity gate. The remaining guide tests protect
+    // against animation, disocclusion, and large geometric changes within an ID.
+    if (normalDot < 0.95f)
+        return false;
+
+    const float currRoughness = saturate(currNR.a);
+    const float prevRoughness = saturate(prevNR.a);
+
+    const float normalWeight =
+        exp(-(1.0f - normalDot) / max(1.0e-5f, NormalSigma));
+
+    const float depthWeight =
+        exp(-abs(currDepth - prevDepth) / max(1.0e-5f, DepthSigma));
+
+    const float roughnessWeight =
+        exp(-abs(currRoughness - prevRoughness) /
+            max(1.0e-5f, RoughnessSigma));
+
+    // Use the same normalized-distance contract as the ViewZ reconstruction,
+    // temporal denoiser, and spatial ReSTIR pass. Raw metre differences are not
+    // stable across scene scale and distance.
+    const float currNormZ =
+        NormalizeDistance(
+            currViewZ,
+            currViewZ,
+            currRoughness,
+            DistanceNormParams);
+
+    const float prevNormZ =
+        NormalizeDistance(
+            prevViewZ,
+            currViewZ,
+            currRoughness,
+            DistanceNormParams);
+
+    const float viewZSigma =
+        max(1.0e-5f, DistanceNormSigma * max(1.0e-5f, ViewZSigmaScale));
+
+    const float viewZWeight =
+        DistanceSimilarityWeight(currNormZ, prevNormZ, viewZSigma);
+
+    reuseWeight =
+        normalWeight *
+        depthWeight *
+        roughnessWeight *
+        viewZWeight;
+
+    return
+        RtReservoirFiniteScalar(reuseWeight) &&
+        reuseWeight > 0.0f;
+}
+
+bool RetargetPreviousReservoir(
+    inout RtRestirReservoir previous,
+    uint2 currPixel,
+    uint2 prevPixel,
+    out float currentTarget)
+{
+    currentTarget = 0.0f;
+
+    if (!ReservoirFinalizedValid(previous))
+        return false;
+
+    const float3 currNormal =
+        UnpackNormal(g_CurrNormal[currPixel]);
+
+    const float3 prevNormal =
+        UnpackNormal(g_PrevNormal[prevPixel]);
+
+    const float3 wi = SafeNormalize(previous.sampleDir_pdf.xyz);
+    const float currNoL = saturate(dot(currNormal, wi));
+    const float prevNoL = saturate(dot(prevNormal, wi));
+
+    if (currNoL <= 1.0e-4f || prevNoL <= 1.0e-4f)
+        return false;
+
+    const float cosineRatio = currNoL / prevNoL;
+
+    // The hard normal/roughness/SurfaceId gates make this receiver-domain
+    // retarget conservative. SurfaceId includes object/material identity, while
+    // this ratio corrects the selected sample's dominant geometric target term.
+    if (!RtReservoirFiniteScalar(cosineRatio) ||
+        cosineRatio < 0.5f ||
+        cosineRatio > 2.0f)
+    {
+        return false;
+    }
+
+    currentTarget = ReservoirTarget(previous) * cosineRatio;
+    return ReservoirRetarget(previous, currentTarget);
 }
 
 float3 Heat(float v)
@@ -172,22 +236,23 @@ float3 Heat(float v)
 }
 
 [numthreads(8, 8, 1)]
-void main(uint3 dtid : SV_DispatchThreadID)
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    uint2 pixel = dtid.xy;
+    const uint2 pixel = dispatchThreadId.xy;
 
-    uint width, height;
+    uint width;
+    uint height;
     g_Output.GetDimensions(width, height);
 
     if (pixel.x >= width || pixel.y >= height)
         return;
 
-    uint pixelIndex = pixel.y * width + pixel.x;
+    const uint pixelIndex = pixel.y * width + pixel.x;
+    const RtRestirReservoir current =
+        g_CurrInitialReservoir[pixelIndex];
 
-    RtRestirReservoir curr = g_CurrInitialReservoir[pixelIndex];
-
-    RtRestirReservoir outR;
-    ReservoirClear(outR);
+    RtRestirReservoir outputReservoir;
+    ReservoirClear(outputReservoir);
 
     uint rng =
         HashUintRtRestir(
@@ -196,94 +261,116 @@ void main(uint3 dtid : SV_DispatchThreadID)
             FrameIndex * 26699u ^
             0xB5297A4Du);
 
-    bool usedCurrent = false;
     bool usedPrevious = false;
-    float temporalReuseWeight = 0.0f;
 
-    if (ReservoirValid(curr))
+    if (ReservoirFinalizedValid(current))
     {
-        ReservoirUpdateWeighted(
-            outR,
-            curr,
-            max(0.0f, curr.weightSum_M_W.x),
-            max(1.0f, curr.weightSum_M_W.y),
-            rng);
+        const float currentM =
+            max(1.0f, min(current.weightSum_M_W.y, MaxM));
 
-        usedCurrent = true;
+        const float currentWeight =
+            ReservoirReuseWeight(
+                current,
+                ReservoirTarget(current),
+                currentM);
+
+        ReservoirUpdateWeighted(
+            outputReservoir,
+            current,
+            currentWeight,
+            currentM,
+            rng);
     }
 
+    // A failed current environment candidate does not invalidate the visible
+    // surface. Stable previous history may still provide a valid candidate.
     if (TemporalEnabled != 0u &&
         HistoryValid != 0u &&
-        ReservoirValid(curr))
+        CurrentGuideValid(pixel))
     {
-        float2 prevUV = g_CurrPrevUV[pixel];
+        const float2 prevUV = g_CurrPrevUV[pixel];
 
         if (PrevUVValid(prevUV))
         {
-            
-            int2 prevPixelI =
-                int2(prevUV * float2(width, height));
+            const uint2 prevPixel =
+                min(
+                    uint2(prevUV * float2(width, height)),
+                    uint2(width - 1u, height - 1u));
 
-            prevPixelI =
-                clamp(prevPixelI, int2(0, 0), int2(int(width) - 1, int(height) - 1));
+            const uint prevIndex =
+                prevPixel.y * width + prevPixel.x;
 
-            uint2 prevPixel = uint2(prevPixelI);
-            uint prevIndex = prevPixel.y * width + prevPixel.x;
-
-            RtRestirReservoir prev = g_PrevTemporalReservoir[prevIndex];
+            RtRestirReservoir previous =
+                g_PrevTemporalReservoir[prevIndex];
 
             float guideWeight = 0.0f;
-            GuideWeight(pixel, prevPixel, guideWeight);
+            float currentTarget = 0.0f;
 
-            if (ReservoirValid(prev) &&
-                PreviousReservoirDirectionCompatible(prev, pixel, prevPixel) &&
+            if (ReservoirFinalizedValid(previous) &&
+                EvaluateTemporalGuideWeight(pixel, prevPixel, guideWeight) &&
                 guideWeight >= ReprojectMinWeight &&
-                float(prev.age) < MaxAge)
+                float(previous.age) < MaxAge &&
+                RetargetPreviousReservoir(
+                    previous,
+                    pixel,
+                    prevPixel,
+                    currentTarget))
             {
-                prev.flags |= RT_RESTIR_RESERVOIR_REPROJECTED;
-                prev.age = min(prev.age + 1u, 0xFFFFFFFEu);
-                prev.weightSum_M_W.w = guideWeight;
+                previous.flags |= RT_RESTIR_RESERVOIR_REPROJECTED;
+                previous.age = min(previous.age + 1u, 0xFFFFFFFEu);
+                previous.weightSum_M_W.w = guideWeight;
 
-                float prevM =
-                    max(1.0f, min(prev.weightSum_M_W.y, MaxM));
+                const float previousM =
+                    max(1.0f, min(previous.weightSum_M_W.y, MaxM));
 
-                float prevCandidateWeight =
-                    max(0.0f, prev.weightSum_M_W.x) *
-                    guideWeight;
-
-                ReservoirUpdateWeighted(
-                    outR,
-                    prev,
-                    prevCandidateWeight,
-                    prevM,
-                    rng);
-
-                usedPrevious = true;
-                temporalReuseWeight = guideWeight;
+                // Guide confidence is a hard acceptance gate and debug/confidence signal.
+                // It must not scale the mathematical RIS weight.
+                const float previousWeight =
+                    ReservoirReuseWeight(
+                        previous,
+                        currentTarget,
+                        previousM);
+                
+                const RtReservoirUpdateResult updateResult =
+                    ReservoirUpdateWeightedTracked(
+                        outputReservoir,
+                        previous,
+                        previousWeight,
+                        previousM,
+                        rng);
+                
+                usedPrevious =
+                    updateResult.accepted != 0u;
             }
         }
     }
 
-    ReservoirFinalize(outR, MaxM, MaxWeight);
+    ReservoirFinalize(outputReservoir, MaxM, MaxWeight, MathMode);
 
-    if (!ReservoirValid(outR))
-    {
-        ReservoirClear(outR);
-    }
+    if (!ReservoirFinalizedValid(outputReservoir))
+        ReservoirClear(outputReservoir);
 
-    g_OutTemporalReservoir[pixelIndex] = outR;
+    g_OutTemporalReservoir[pixelIndex] = outputReservoir;
 
     if (DebugView == 106u)
     {
-        float v = usedPrevious ? 1.0f : 0.0f;
-        g_Output[pixel] = float4(v.xxx, 1.0f);
+        g_Output[pixel] =
+            float4((usedPrevious ? 1.0f : 0.0f).xxx, 1.0f);
     }
     else if (DebugView == 107u)
     {
-        float m = ReservoirValid(outR) ? outR.weightSum_M_W.y : 0.0f;
-        float conf = ReservoirValid(outR) ? outR.weightSum_M_W.w : 0.0f;
+        const bool valid = ReservoirFinalizedValid(outputReservoir);
+        const float normalizedM = valid
+            ? saturate(outputReservoir.weightSum_M_W.y / max(1.0f, MaxM))
+            : 0.0f;
+        const float normalizedAge = valid && MaxAge > 0.0f
+            ? saturate(float(outputReservoir.age) / MaxAge)
+            : 0.0f;
+        const float confidence = valid
+            ? saturate(outputReservoir.weightSum_M_W.w)
+            : 0.0f;
 
-        float mVis = saturate(m / max(1.0f, MaxM));
-        g_Output[pixel] = float4(Heat(mVis).rg, saturate(conf), 1.0f);
+        g_Output[pixel] =
+            float4(normalizedM, normalizedAge, confidence, 1.0f);
     }
 }

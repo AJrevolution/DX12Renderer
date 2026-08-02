@@ -14,40 +14,62 @@ cbuffer RtRestirApplyConstants : register(b0)
     uint RtRestirApplyFlags;
 };
 
-[numthreads(8, 8, 1)]
-void main(uint3 tid : SV_DispatchThreadID)
+bool Finite3(float3 value)
 {
-    uint2 p = tid.xy;
+    return
+        !any(isnan(value)) &&
+        !any(isinf(value));
+}
+
+float3 SanitizeRadiance(float3 value)
+{
+    return Finite3(value)
+        ? max(value, 0.0f.xxx)
+        : 0.0f.xxx;
+}
+
+[numthreads(8, 8, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint2 pixel = dispatchThreadId.xy;
 
     uint width;
     uint height;
     g_OutDiffuse.GetDimensions(width, height);
 
-    if (p.x >= width || p.y >= height)
+    if (pixel.x >= width || pixel.y >= height)
         return;
 
-    float4 baseD = g_BaseDiffuse[p];
-    float4 baseS = g_BaseSpec[p];
-
-    float3 restirD = g_RestirDiffuse[p].rgb;
-    float3 restirS = g_RestirSpec[p].rgb;
+    const float4 baseDiffuse = g_BaseDiffuse[pixel];
+    const float4 baseSpecular = g_BaseSpec[pixel];
 
     if (RtRestirApplyMode == 0u)
     {
-        g_OutDiffuse[p] = baseD;
-        g_OutSpec[p] = baseS;
+        g_OutDiffuse[pixel] = baseDiffuse;
+        g_OutSpec[pixel] = baseSpecular;
         return;
     }
 
-    // Mode 1: validation-only additive post-denoise ReSTIR apply.
-    // This is intentionally scaled because the resolved ReSTIR term is added
-    // after the existing denoiser/combine path. A production integration should
-    // apply before temporal/A-trous filtering and avoid this compensating scale.
-    g_OutDiffuse[p] = float4(
-    baseD.rgb + restirD * RtRestirApplyDiffuseScale,
-    baseD.a);
+    // Mode 1 is intentionally validation-only. Production integration belongs
+    // before temporal/A-Trous filtering and replaces the legacy environment NEE
+    // term rather than adding a post-denoise compensating signal.
+    const float diffuseScale =
+        max(0.0f, RtRestirApplyDiffuseScale);
 
-    g_OutSpec[p] = float4(
-    baseS.rgb + restirS * RtRestirApplySpecularScale,
-    baseS.a);
+    const float specularScale =
+        max(0.0f, RtRestirApplySpecularScale);
+
+    const float3 restirDiffuse =
+        SanitizeRadiance(g_RestirDiffuse[pixel].rgb);
+
+    const float3 restirSpecular =
+        SanitizeRadiance(g_RestirSpec[pixel].rgb);
+
+    g_OutDiffuse[pixel] = float4(
+        SanitizeRadiance(baseDiffuse.rgb) + restirDiffuse * diffuseScale,
+        baseDiffuse.a);
+
+    g_OutSpec[pixel] = float4(
+        SanitizeRadiance(baseSpecular.rgb) + restirSpecular * specularScale,
+        baseSpecular.a);
 }
