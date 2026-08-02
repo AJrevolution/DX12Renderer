@@ -510,6 +510,9 @@ if /I "$(Configuration)"=="Debug" (
  dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirSpatial_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirSpatial_CS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtRestirSpatial_CS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirSpatial_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirSpatial_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtRestirSpatial_CS.cso</Outputs>
     </CustomBuild>
     <CustomBuild Include="Assets\Shaders\HLSL\RtRestirTemporal_CS.hlsl">
       <FileType>Document</FileType>
@@ -519,6 +522,9 @@ if /I "$(Configuration)"=="Debug" (
  dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirTemporal_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirTemporal_CS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtRestirTemporal_CS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirTemporal_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirTemporal_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtRestirTemporal_CS.cso</Outputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
@@ -530,6 +536,9 @@ if /I "$(Configuration)"=="Debug" (
  dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirApply_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirApply_CS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtRestirApply_CS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirApply_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirApply_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtRestirApply_CS.cso</Outputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
