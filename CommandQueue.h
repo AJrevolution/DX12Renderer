@@ -11,6 +11,8 @@ public:
 
     ID3D12CommandQueue* Get() const { return m_queue.Get(); }
 
+    uint64_t GetTimestampFrequency() const;
+
     uint64_t Signal();
     void Wait(uint64_t fenceValue);
     void Flush();

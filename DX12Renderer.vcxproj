@@ -159,6 +159,8 @@
     <ClInclude Include="Source\Renderer\Passes\RtMotionDilatePass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtOutlierClampPass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtRestirApplyPass.h" />
+    <ClInclude Include="Source\Renderer\Passes\RtRestirComposeCurrentPass.h" />
+    <ClInclude Include="Source\Renderer\Passes\RtRestirMetricsPass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtRestirSpatialPass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtRestirTemporalPass.h" />
     <ClInclude Include="Source\Renderer\Passes\RtTemporalPass.h" />
@@ -166,6 +168,7 @@
     <ClInclude Include="Source\Renderer\Passes\SkyboxPass.h" />
     <ClInclude Include="Source\Renderer\RtEnvironmentImportance.h" />
     <ClInclude Include="Source\Renderer\RtEnvironmentMapCpu.h" />
+    <ClInclude Include="Source\Renderer\RtRestirGpuProfiler.h" />
     <ClInclude Include="Source\Renderer\SceneData.h" />
     <ClInclude Include="Source\Renderer\SceneResources.h" />
     <ClInclude Include="Source\RHI\CommandList\ResourceStateTracker.h" />
@@ -216,6 +219,8 @@
     <ClCompile Include="Source\Renderer\Passes\RtMotionDilatePass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtOutlierClampPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtRestirApplyPass.cpp" />
+    <ClCompile Include="Source\Renderer\Passes\RtRestirComposeCurrentPass.cpp" />
+    <ClCompile Include="Source\Renderer\Passes\RtRestirMetricsPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtRestirSpatialPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtRestirTemporalPass.cpp" />
     <ClCompile Include="Source\Renderer\Passes\RtTemporalPass.cpp" />
@@ -223,6 +228,7 @@
     <ClCompile Include="Source\Renderer\Passes\SkyboxPass.cpp" />
     <ClCompile Include="Source\Renderer\RtEnvironmentImportance.cpp" />
     <ClCompile Include="Source\Renderer\RtEnvironmentMapCpu.cpp" />
+    <ClCompile Include="Source\Renderer\RtRestirGpuProfiler.cpp" />
     <ClCompile Include="Source\RHI\CommandList\ResourceStateTracker.cpp" />
     <ClCompile Include="Source\RHI\Memory\DescriptorAllocator.cpp" />
     <ClCompile Include="Device.cpp" />
@@ -254,7 +260,12 @@
     <None Include="Assets\Shaders\HLSL\MaterialConstants.hlsli" />
     <None Include="Assets\Shaders\HLSL\MaterialSampling.hlsli" />
     <None Include="Assets\Shaders\HLSL\PBR.hlsli" />
+    <None Include="Assets\Shaders\HLSL\RtPrimaryJitter.hlsli" />
     <None Include="Assets\Shaders\HLSL\RtReservoir.hlsli" />
+    <None Include="Assets\Shaders\HLSL\RtRestirEnvironment.hlsli" />
+    <None Include="Assets\Shaders\HLSL\RtRestirReceiver.hlsli" />
+    <None Include="Assets\Shaders\HLSL\RtRestirRejection.hlsli" />
+    <None Include="Assets\Shaders\HLSL\RtRestirTarget.hlsli" />
     <None Include="Assets\Shaders\HLSL\RtSampling.hlsli" />
     <None Include="packages.config" />
   </ItemGroup>
@@ -365,30 +376,25 @@
   <ItemGroup>
     <CustomBuild Include="Assets\Shaders\HLSL\Raytracing.hlsl">
       <FileType>Document</FileType>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-if "$(Configuration)"=="Debug" (
-  dxc.exe -T lib_6_3 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Raytracing.cso" "$(ProjectDir)Assets\Shaders\HLSL\Raytracing.hlsl"
-) else (
-  dxc.exe -T lib_6_3 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Raytracing.cso" "$(ProjectDir)Assets\Shaders\HLSL\Raytracing.hlsl"
-)</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T lib_6_3 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Raytracing.cso" "$(ProjectDir)Assets\Shaders\HLSL\Raytracing.hlsl"</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\Raytracing.cso;%(Outputs)</Outputs>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">dxc.exe -T lib_6_3 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Raytracing.cso" "$(ProjectDir)Assets\Shaders\HLSL\Raytracing.hlsl"</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T lib_6_3 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Raytracing.cso" "$(ProjectDir)Assets\Shaders\HLSL\Raytracing.hlsl"</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\Raytracing.cso;%(Outputs)</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(ProjectDir)Assets\Shaders\HLSL\Common.hlsli;$(ProjectDir)Assets\Shaders\HLSL\PBR.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtSampling.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtReservoir.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirEnvironment.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirReceiver.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirTarget.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtPrimaryJitter.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirRejection.hlsli;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)Assets\Shaders\HLSL\Common.hlsli;$(ProjectDir)Assets\Shaders\HLSL\PBR.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtSampling.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtReservoir.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirEnvironment.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirReceiver.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirTarget.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtPrimaryJitter.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirRejection.hlsli;%(AdditionalInputs)</AdditionalInputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="Assets\Shaders\HLSL\RtDenoise_CS.hlsl">
       <FileType>Document</FileType>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-if "$(Configuration)"=="Debug" (
- dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtDenoise_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtDenoise_CS.hlsl"
-) 
-else (
- dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtDenoise_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtDenoise_CS.hlsl"
-)</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtDenoise_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtDenoise_CS.hlsl"</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtDenoise_CS.cso;%(Outputs)</Outputs>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtDenoise_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtDenoise_CS.hlsl"</Command>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtDenoise_CS.cso</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtDenoise_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtDenoise_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtDenoise_CS.cso;%(Outputs)</Outputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
@@ -504,37 +510,32 @@ if /I "$(Configuration)"=="Debug" (
   <ItemGroup>
     <CustomBuild Include="Assets\Shaders\HLSL\RtRestirSpatial_CS.hlsl">
       <FileType>Document</FileType>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if "$(Configuration)"=="Debug" (
- dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirSpatial_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirSpatial_CS.hlsl"
-) else (
- dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirSpatial_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirSpatial_CS.hlsl"
-)</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirSpatial_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirSpatial_CS.hlsl"</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtRestirSpatial_CS.cso</Outputs>
       <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
 dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirSpatial_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirSpatial_CS.hlsl"</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtRestirSpatial_CS.cso</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(ProjectDir)Assets\Shaders\HLSL\Common.hlsli;$(ProjectDir)Assets\Shaders\HLSL\PBR.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtSampling.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtReservoir.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirEnvironment.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirReceiver.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirTarget.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtPrimaryJitter.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirRejection.hlsli;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)Assets\Shaders\HLSL\Common.hlsli;$(ProjectDir)Assets\Shaders\HLSL\PBR.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtSampling.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtReservoir.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirEnvironment.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirReceiver.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirTarget.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtPrimaryJitter.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirRejection.hlsli;%(AdditionalInputs)</AdditionalInputs>
     </CustomBuild>
     <CustomBuild Include="Assets\Shaders\HLSL\RtRestirTemporal_CS.hlsl">
       <FileType>Document</FileType>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if "$(Configuration)"=="Debug" (
- dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirTemporal_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirTemporal_CS.hlsl"
-) else (
- dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirTemporal_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirTemporal_CS.hlsl"
-)</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirTemporal_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirTemporal_CS.hlsl"</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtRestirTemporal_CS.cso</Outputs>
       <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
 dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirTemporal_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirTemporal_CS.hlsl"</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtRestirTemporal_CS.cso</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(ProjectDir)Assets\Shaders\HLSL\Common.hlsli;$(ProjectDir)Assets\Shaders\HLSL\PBR.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtSampling.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtReservoir.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirEnvironment.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirReceiver.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirTarget.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtPrimaryJitter.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirRejection.hlsli;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)Assets\Shaders\HLSL\Common.hlsli;$(ProjectDir)Assets\Shaders\HLSL\PBR.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtSampling.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtReservoir.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirEnvironment.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirReceiver.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirTarget.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtPrimaryJitter.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtRestirRejection.hlsli;%(AdditionalInputs)</AdditionalInputs>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="Assets\Shaders\HLSL\RtRestirApply_CS.hlsl">
       <FileType>Document</FileType>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if "$(Configuration)"=="Debug" (
- dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirApply_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirApply_CS.hlsl"
-) else (
- dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirApply_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirApply_CS.hlsl"
-)</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirApply_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirApply_CS.hlsl"</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtRestirApply_CS.cso</Outputs>
       <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
 dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirApply_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirApply_CS.hlsl"</Command>
@@ -570,6 +571,32 @@ dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Sh
   dxc.exe -T vs_6_0 -E main -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\Skybox_VS.cso" "$(ProjectDir)Assets\Shaders\HLSL\Skybox_VS.hlsl"
 )</Command>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\Skybox_VS.cso;%(Outputs)</Outputs>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="Assets\Shaders\HLSL\RtRestirComposeCurrent_CS.hlsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirComposeCurrent_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirComposeCurrent_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtRestirComposeCurrent_CS.cso;%(Outputs)</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirComposeCurrent_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirComposeCurrent_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtRestirComposeCurrent_CS.cso;%(Outputs)</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(ProjectDir)Assets\Shaders\HLSL\RtRestirReceiver.hlsli;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)Assets\Shaders\HLSL\RtRestirReceiver.hlsli;%(AdditionalInputs)</AdditionalInputs>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="Assets\Shaders\HLSL\RtRestirMetrics_CS.hlsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T cs_6_0 -Zi -Qembed_debug -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirMetrics_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirMetrics_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(OutDir)Shaders\Compiled\RtRestirMetrics_CS.cso;%(Outputs)</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(ProjectDir)Assets\Shaders\HLSL\Common.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtReservoir.hlsli;%(AdditionalInputs)</AdditionalInputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">if not exist "$(OutDir)Shaders\Compiled" mkdir "$(OutDir)Shaders\Compiled"
+dxc.exe -T cs_6_0 -O3 -WX -I "$(ProjectDir)Assets\Shaders\HLSL" -Fo "$(OutDir)Shaders\Compiled\RtRestirMetrics_CS.cso" "$(ProjectDir)Assets\Shaders\HLSL\RtRestirMetrics_CS.hlsl"</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(OutDir)Shaders\Compiled\RtRestirMetrics_CS.cso;%(Outputs)</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)Assets\Shaders\HLSL\Common.hlsli;$(ProjectDir)Assets\Shaders\HLSL\RtReservoir.hlsli;%(AdditionalInputs)</AdditionalInputs>
     </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

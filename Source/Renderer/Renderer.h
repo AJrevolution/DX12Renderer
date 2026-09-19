@@ -41,6 +41,9 @@
 #include "Source/Scene/LoadedModel.h"
 #include "Source/Scene/SceneManifest.h"
 #include "Source/Renderer/Passes/SkyboxPass.h"
+#include "Source/Renderer/Passes/RtRestirComposeCurrentPass.h"
+#include "Source/Renderer/Passes/RtRestirMetricsPass.h"
+#include "Source/Renderer/RtRestirGpuProfiler.h"
 
 enum class DebugViewDomain : uint8_t
 {
@@ -173,9 +176,6 @@ struct SceneEnvironmentRuntime
 
     float lightingIntensity = 1.0f;
     float lightingRotationRadians = 0.0f;
-
-    // Avoid duplicate GPU texture load when radiancePath == specularPath.
-    bool rtRadianceUsesIblSpecular = false;
 };
 
 const char* CameraControlModeName(CameraControlMode mode);
@@ -183,7 +183,7 @@ const char* CameraControlModeName(CameraControlMode mode);
 class Renderer
 {
 public:
-    void Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount);
+    void Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount, uint64_t timestampFrequency);
 
     void BeginFrame(uint32_t frameIndex);
 
@@ -219,6 +219,8 @@ public:
     void ApplyOrbitCameraInput(const OrbitCameraInput& input);
     void ApplyFreeRoamCameraInput(const FreeRoamCameraInput& input);
     bool IsRtAccumulationEnabled() const;
+    void CycleRtRestirValidationMode();
+    void CycleRtRestirMetricsCapturePoint();
     void SetRtAccumulationEnabled(bool enabled);
     void ToggleRtAccumulation();
     bool ReloadSceneManifestLive();
@@ -254,7 +256,7 @@ private:
         const wchar_t* reason);
 
     std::string BuildManifestCameraJson() const;
-
+    
     //Lights
     void ConfigureDefaultPointLights();
 
@@ -266,14 +268,32 @@ private:
         MisTwoSampleReference = 3
     };
 
+    enum class RtDirectEnvironmentMode : uint32_t
+    {
+        LegacyMis = 0,
+        RestirValidation = 1,
+        RestirProduction = 2
+    };
+
+    enum class RtRestirValidationMode : uint32_t
+    {
+        Off = 0,
+        InitialOnly,
+        TemporalOnly,
+        TemporalSpatial,
+        ExactTargetReference,
+        RestirReference,
+        RestirRobust
+    };
+
     enum class RtRestirMathMode : uint32_t
     {
-        // Diagnostic mode:
-        //   large bounded M
-        //   no final-W clamp
+        // Validation reference mode:
+        //   exact receiver targets
+        //   packed M bounded to 4095
+        //   effectively no final-W clamp
         //
-        // R1 still uses cosine-only receiver retargeting, so this is not an
-        // unbiased production reference until R2 adds exact receiver targets.
+        // Reference estimator used to validate the bounded Robust variant.
         Reference = 0,
 
         // Practical validation mode:
@@ -374,6 +394,10 @@ private:
         float minStableHistoryForClamp = 2.0f;
         float confidenceDebugScale = 1.0f;
         float padShape0 = 0.0f;
+
+        uint32_t enableRestirConfidence = 0;
+        float restirConfidenceFloor = 0.25f;
+        uint32_t padRestirConfidence[2] = {};
     };
     static_assert((sizeof(RtTemporalConstants) % 16) == 0, "RtTemporalConstants must be 16-byte aligned.");
 
@@ -410,17 +434,30 @@ private:
 
         float restirMaxM = 32.0f;
         float restirMaxAge = 32.0f;
-        float restirMinTarget = 1e-5f;
+        float restirMinTarget = 1.0e-5f;
         float restirMaxWeight = 64.0f;
 
         uint32_t restirMathMode =
             static_cast<uint32_t>(
-                RtRestirMathMode::Robust);
+                RtRestirMathMode::Reference);
 
-        uint32_t padMath[3] = {};
+        uint32_t directEnvironmentMode =
+            static_cast<uint32_t>(
+                RtDirectEnvironmentMode::LegacyMis);
+
+        uint32_t validationMode =
+            static_cast<uint32_t>(
+                RtRestirValidationMode::Off);
+
+        float deltaRoughnessCutoff = 0.04f;
+
+        uint32_t primarySampleIndex = 0;
+        uint32_t primaryResetId = 0;
+        uint32_t primaryJitterEnabled = 0;
+        uint32_t padRestir = 0;
     };
     static_assert((sizeof(RtRestirConstants) % 16) == 0, "RtRestirConstants must be 16-byte aligned.");
-    static_assert(sizeof(RtRestirConstants) == 48, "RtRestirConstants must match the HLSL RtRayGenConstants layout.");
+    static_assert(sizeof(RtRestirConstants) == 64, "RtRestirConstants must match the HLSL RtRayGenConstants layout.");
 
     struct RtSkyConstants
     {
@@ -504,9 +541,22 @@ private:
                 RtRestirMathMode::Robust);
 
         uint32_t padMath[3] = {};
+
+        // Receiver reconstruction and exact-target constants.
+        DirectX::XMFLOAT4X4 inverseViewProjection{};
+
+        float deltaRoughnessCutoff = 0.04f;
+        uint32_t primarySampleIndex = 0;
+        uint32_t primaryResetId = 0;
+        uint32_t primaryJitterEnabled = 0;
+
+        uint32_t hasEnvironmentRadiance = 0;
+        float lightingIntensity = 1.0f;
+        float lightingRotationRadians = 0.0f;
+        uint32_t environmentFaceSize = 0;
     };
     static_assert((sizeof(RtRestirTemporalConstants) % 16) == 0, "RtRestirTemporalConstants must be 16-byte aligned.");
-    static_assert(sizeof(RtRestirTemporalConstants) == 96, "RtRestirTemporalConstants must match the temporal HLSL cbuffer.");
+    static_assert(sizeof(RtRestirTemporalConstants) == 192, "RtRestirTemporalConstants must match the temporal HLSL cbuffer.");
     
     struct RtRestirSpatialConstants
     {
@@ -539,9 +589,22 @@ private:
                 RtRestirMathMode::Robust);
 
         uint32_t padMath[2] = {};
+
+        // Receiver reconstruction and exact-target constants.
+        DirectX::XMFLOAT4X4 inverseViewProjection{};
+
+        float deltaRoughnessCutoff = 0.04f;
+        uint32_t primarySampleIndex = 0;
+        uint32_t primaryResetId = 0;
+        uint32_t primaryJitterEnabled = 0;
+
+        uint32_t hasEnvironmentRadiance = 0;
+        float lightingIntensity = 1.0f;
+        float lightingRotationRadians = 0.0f;
+        uint32_t environmentFaceSize = 0;
     };
     static_assert((sizeof(RtRestirSpatialConstants) % 16) == 0, "RtRestirSpatialConstants must be 16-byte aligned.");
-    static_assert(sizeof(RtRestirSpatialConstants) == 80, "RtRestirSpatialConstants must match the spatial HLSL cbuffer.");
+    static_assert(sizeof(RtRestirSpatialConstants) == 176, "RtRestirSpatialConstants must match the spatial HLSL cbuffer.");
 
     struct RtRestirApplyConstants
     {
@@ -606,6 +669,167 @@ private:
     };
     static_assert((sizeof(RtAtrousConstants) % 16) == 0, "RtAtrousConstants must be 16-byte aligned.");
 
+    struct RtRestirEnvReservoirPacked
+    {
+        uint32_t packedDirection = 0;
+        uint32_t sampleIndex = 0;
+
+        float sourcePdf = 0.0f;
+        float selectedTarget = 0.0f;
+
+        float weightSum = 0.0f;
+        float finalWeight = 0.0f;
+
+        uint32_t packedState = 0;
+        uint32_t surfaceId = 0xFFFFFFFFu;
+    };
+    static_assert(sizeof(RtRestirEnvReservoirPacked) == 32, "Packed ReSTIR environment reservoir must remain 32 bytes.");
+
+    struct RtRestirMetricPartial
+    {
+        float diffuseLuminanceSum = 0.0f;
+        float specularLuminanceSum = 0.0f;
+        float combinedLuminanceSum = 0.0f;
+        float maximumLuminance = 0.0f;
+
+        // bits  0..15 = invalid reservoir count
+        // bits 16..31 = non-finite signal count
+        uint32_t invalidCounts = 0;
+
+        // bits  0..15 = M clamp count
+        // bits 16..31 = W clamp count
+        uint32_t clampCounts = 0;
+
+        uint32_t rejectionCount = 0;
+        uint32_t sampleCount = 0;
+    };
+    static_assert(sizeof(RtRestirMetricPartial) == 32, "RtRestirMetricPartial must remain 32 bytes.");
+
+    enum class RtRestirMetricsDomain : uint32_t
+    {
+        Unknown = 0,
+        Initial,
+        Temporal,
+        TemporalSpatial,
+        ExactTargetReference,
+        RestirReference,
+        RestirRobust,
+        ComposedPreDenoiser,
+        FinalDenoised
+    };
+
+    enum class RtRestirMetricsCapturePoint : uint32_t
+    {
+        ValidationOutput = 0,
+        ComposedPreDenoiser,
+        FinalDenoised
+    };
+
+    struct RtRestirMetricsContext
+    {
+        RtRestirMetricsDomain domain =
+            RtRestirMetricsDomain::Unknown;
+
+        RtRestirValidationMode validationMode =
+            RtRestirValidationMode::Off;
+
+        RtDirectEnvironmentMode directEnvironmentMode =
+            RtDirectEnvironmentMode::LegacyMis;
+
+        RtRestirMathMode mathMode =
+            RtRestirMathMode::Reference;
+
+        uint32_t width = 0;
+        uint32_t height = 0;
+
+        bool measureReservoirDiagnostics = false;
+    };
+
+    struct RtRestirMetricsCapture
+    {
+        RtRestirMetricsDomain domain =
+            RtRestirMetricsDomain::Unknown;
+
+        ID3D12Resource* diffuse = nullptr;
+        ID3D12Resource* specular = nullptr;
+
+        // Optional diffuse remodulation input.
+        // Required when diffuseIsDemodulated is true.
+        ID3D12Resource* diffuseAlbedo = nullptr;
+
+        ID3D12Resource* reservoir = nullptr;
+        ID3D12Resource* rejectionReason = nullptr;
+
+        bool diffuseIsDemodulated = false;
+        bool measureReservoirDiagnostics = false;
+    };
+
+    struct RtRestirGpuFrameMetadata
+    {
+        bool pending = false;
+        bool initialRestirEnabled = false;
+
+        uint32_t width = 0;
+        uint32_t height = 0;
+
+        RtDirectEnvironmentMode directEnvironmentMode =
+            RtDirectEnvironmentMode::LegacyMis;
+
+        RtRestirValidationMode validationMode =
+            RtRestirValidationMode::Off;
+
+        RtRestirMathMode mathMode =
+            RtRestirMathMode::Reference;
+    };
+
+    struct RtRestirGpuTimingStats
+    {
+        uint64_t sampleCount = 0;
+
+        double meanMs = 0.0;
+        double medianMs = 0.0;
+        double p95Ms = 0.0;
+    };
+
+    struct RtRestirGpuTimingBucket
+    {
+        uint32_t width = 0;
+        uint32_t height = 0;
+
+        RtDirectEnvironmentMode directEnvironmentMode =
+            RtDirectEnvironmentMode::LegacyMis;
+
+        RtRestirValidationMode validationMode =
+            RtRestirValidationMode::Off;
+
+        RtRestirMathMode mathMode =
+            RtRestirMathMode::Reference;
+
+        // Extra discriminator because initial candidate generation happens
+        // inside PrimaryDxr rather than in an isolated dispatch.
+        bool initialRestirEnabled = false;
+
+        uint64_t completedFrameCount = 0;
+
+        std::array<
+            std::vector<double>,
+            RtRestirGpuProfiler::kTimerCount>
+            stageSamplesMs;
+    };
+
+    struct RtRestirComposeCurrentConstants
+    {
+        uint32_t directEnvironmentMode =
+            static_cast<uint32_t>(
+                RtDirectEnvironmentMode::LegacyMis);
+
+        uint32_t debugView = 0;
+
+        float deltaRoughnessCutoff = 0.04f;
+        uint32_t hasExactTargetReference = 0;
+    };
+    static_assert(sizeof(RtRestirComposeCurrentConstants) == 16, "RtRestirComposeCurrentConstants must match HLSL.");
+
     struct DrawItem
     {
         Mesh* mesh = nullptr;
@@ -625,6 +849,22 @@ private:
         // True when this draw's world transform reverses triangle handedness.
         // This is geometry/draw state, not material state.
         bool reversesWinding = false;
+    };
+
+    struct RtDrawHistoryIdentity
+    {
+        const Mesh* mesh = nullptr;
+        const Material* material = nullptr;
+
+        uint32_t submeshIndex = 0;
+        uint32_t rtObjectId = 0;
+
+        uint32_t sceneModelIndex = UINT32_MAX;
+        uint32_t sceneModelRtBufferIndex = UINT32_MAX;
+
+        D3D12_GPU_VIRTUAL_ADDRESS blasAddress = 0;
+
+        uint32_t reversesWinding = 0;
     };
 
     struct SceneModelInstance
@@ -839,17 +1079,13 @@ private:
     };
     static_assert((sizeof(RtCombineConstants) % 16) == 0, "RtCombineConstants must be 16-byte aligned.");
 
-    struct RtRestirReservoir
+    struct RtRestirMetricsConstants
     {
-        DirectX::XMFLOAT4 sampleDir_pdf{};
-        DirectX::XMFLOAT4 sampleLi_target{};
-        DirectX::XMFLOAT4 weightSum_M_W{};
-        uint32_t sampleIndex = 0;
-        uint32_t flags = 0;
-        uint32_t age = 0;
-        uint32_t surfaceId = 0xFFFFFFFFu;
+        uint32_t measureReservoirDiagnostics = 0;
+        uint32_t diffuseIsDemodulated = 0;
+        uint32_t pad0[2] = {};
     };
-    static_assert(sizeof(RtRestirReservoir) == 64, "RtRestirReservoir must match HLSL layout.");
+    static_assert((sizeof(RtRestirMetricsConstants) % 16) == 0, "RtRestirMetricsConstants must be 16-byte aligned.");
 
     // Denoiser shaping contract:
     //
@@ -1164,39 +1400,89 @@ private:
             dv == 103;
     }
 
-    static bool IsRtRestirRayGenDebug(uint32_t dv)
+    static bool IsRtRestirRayGenDebug(
+        uint32_t id)
     {
-        return dv == 104 ||
-            dv == 105;
+        return
+            id == 104 ||
+            id == 105;
     }
 
-    static bool IsRtRestirTemporalDebug(uint32_t dv)
+    static bool IsRtRestirTargetDebug(
+        uint32_t id)
     {
-        return dv == 106 ||
-            dv == 107;
+        return
+            id == 115 ||
+            id == 116 ||
+            id == 117;
     }
 
-    static bool IsRtRestirSpatialDebug(uint32_t dv)
+    static bool IsRtRestirGuideDebug(
+        uint32_t id)
     {
-        return dv == 108 ||
-            dv == 109;
+        return id == 118;
     }
 
-    static bool IsRtRestirResolveDebug(uint32_t dv)
+    static bool IsRtRestirResolveProductionDebug(
+        uint32_t id)
     {
-        return dv == 110 ||
-            dv == 111 ||
-            dv == 112 ||
-            dv == 113 ||
-            dv == 114;
+        return
+            id == 119 ||
+            id == 122 ||
+            id == 125;
     }
 
-    static bool IsRtRestirDebug(uint32_t dv)
+    static bool IsRtRestirComposeDebug(
+        uint32_t id)
     {
-        return IsRtRestirRayGenDebug(dv) ||
-            IsRtRestirTemporalDebug(dv) ||
-            IsRtRestirSpatialDebug(dv) ||
-            IsRtRestirResolveDebug(dv);
+        return
+            id == 120 ||
+            id == 121 ||
+            id == 123 ||
+            id == 124;
+    }
+
+    static bool IsRtRestirTemporalDebug(
+        uint32_t id)
+    {
+        return
+            id == 106 ||
+            id == 107 ||
+            IsRtRestirTargetDebug(id) ||
+            IsRtRestirGuideDebug(id);
+    }
+
+    static bool IsRtRestirSpatialDebug(
+        uint32_t id)
+    {
+        return
+            id == 108 ||
+            id == 109 ||
+            IsRtRestirTargetDebug(id) ||
+            IsRtRestirGuideDebug(id);
+    }
+
+    static bool IsRtRestirResolveDebug(
+        uint32_t id)
+    {
+        return
+            id == 110 ||
+            id == 111 ||
+            id == 112 ||
+            id == 113 ||
+            id == 114 ||
+            IsRtRestirResolveProductionDebug(id);
+    }
+
+    static bool IsRtRestirDebug(
+        uint32_t id)
+    {
+        return
+            IsRtRestirRayGenDebug(id) ||
+            IsRtRestirTemporalDebug(id) ||
+            IsRtRestirSpatialDebug(id) ||
+            IsRtRestirResolveDebug(id) ||
+            IsRtRestirComposeDebug(id);
     }
 
     std::vector<DrawItem> m_draws;
@@ -1256,6 +1542,10 @@ private:
         D3D12_CPU_DESCRIPTOR_HANDLE dst,
         const Texture& texture) const;
 
+    void WriteEnvironmentRadianceSrv(
+        ID3D12Device* device,
+        D3D12_CPU_DESCRIPTOR_HANDLE destination) const;
+
     void CreateRtFallbackTextures(
         ID3D12Device* device,
         CommandList& cl,
@@ -1266,8 +1556,28 @@ private:
     void CreateRtAccum(ID3D12Device* device, uint32_t width, uint32_t height);
     void ResetRtAccumulation(bool resetTemporalHistory = true);
     D3D12_CPU_DESCRIPTOR_HANDLE RtUavCpuAt(uint32_t slot) const;
+    D3D12_GPU_DESCRIPTOR_HANDLE RtUavGpuAt(uint32_t slot) const;
 
     void CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t height);
+
+    void CreateRtGlobalUavTexture(
+        ID3D12Device* device,
+        ComPtr<ID3D12Resource>& resource,
+        DXGI_FORMAT format,
+        uint32_t width,
+        uint32_t height,
+        uint32_t uavSlot,
+        const wchar_t* name);
+
+    void WriteNullRtGlobalUav(
+        ID3D12Device* device,
+        DXGI_FORMAT format,
+        uint32_t slot);
+
+    void EnsureRtRestirOptionalAovs(
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height);
     bool UpdateRtDenoiseSrvTable(
         uint32_t frameIndex,
         ID3D12Device* device,
@@ -1442,6 +1752,8 @@ private:
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRayGenConstants(uint32_t frameIndex, uint32_t restirDispatchMode = 0);
     void CommitRtMotionWorlds();
 
+    void InvalidateRtMotionHistory();
+
     bool UpdateRtMotionDilateTables(
         uint32_t frameIndex,
         ID3D12Device* device,
@@ -1482,14 +1794,16 @@ private:
 
     bool UpdateRtDiffuseDemodulateTables(
         uint32_t frameIndex,
-        ID3D12Device* device);
+        ID3D12Device* device,
+        ID3D12Resource* diffuseInput);
 
     bool RunRtDiffuseDemodulate(
         CommandList& cl,
         uint32_t frameIndex,
         ID3D12Device* device,
         uint32_t width,
-        uint32_t height);
+        uint32_t height,
+        ID3D12Resource* diffuseInput);
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtDiffuseDemodulateConstants(
         uint32_t frameIndex);
@@ -1516,7 +1830,8 @@ private:
         uint32_t frameIndex,
         ID3D12Device* device,
         uint32_t width,
-        uint32_t height);
+        uint32_t height,
+        float sceneTime);
 
     void CommitRtSurfaceIdHistory(
         CommandList& cl,
@@ -1557,11 +1872,17 @@ private:
     bool LoadRtEnvironmentCpuRadiance(const std::filesystem::path& path);
     void ClearRtEnvironmentCpuRadiance();
 
+    bool UploadRtEnvironmentRadianceAtlas(ID3D12Device* device, CommandList& cl, uint32_t frameIndex);
+
     bool EnsureRtEnvironmentAlias(ID3D12Device* device, CommandList& cl);
     void WriteNullRtEnvAliasSrv(D3D12_CPU_DESCRIPTOR_HANDLE dst) const;
     void WriteRtEnvAliasSrv(D3D12_CPU_DESCRIPTOR_HANDLE dst) const;
 
     void EnsureRtRestirResources(uint32_t width, uint32_t height);
+    void EnsureRtRestirAppliedResources(
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height);
     void ResetRtRestirResources();
     void ResetRtRestirHistory();
 
@@ -1578,6 +1899,7 @@ private:
         ID3D12Device* device,
         ID3D12Resource* prevTemporalReservoir,
         ID3D12Resource* outTemporalReservoir,
+        ID3D12Resource* outTemporalConfidence,
         ID3D12Resource* currPrevUvResource,
         ID3D12Resource* currViewZResource,
         ID3D12Resource* prevViewZResource,
@@ -1607,6 +1929,7 @@ private:
         uint32_t frameIndex,
         ID3D12Device* device,
         ID3D12Resource* temporalReservoir,
+        ID3D12Resource* temporalConfidence,
         ID3D12Resource* currNormalResource,
         ID3D12Resource* currDepthResource,
         ID3D12Resource* currSurfaceIdResource,
@@ -1656,6 +1979,8 @@ private:
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtRestirApplyConstants(uint32_t frameIndex);
 
     void BuildRtDrawItems();
+
+    RtDrawHistoryIdentity MakeRtDrawHistoryIdentity(const DrawItem& item) const;
 
     const AccelerationStructure* GetBlasForDrawItem(
         const DrawItem& item) const;
@@ -1768,6 +2093,128 @@ private:
     bool ShouldAppendProceduralGeometry() const;
 
     void AppendProceduralDraws(float time);
+
+    bool UpdateRtRestirComposeCurrentTables(
+        uint32_t frameIndex,
+        ID3D12Device* device);
+
+    D3D12_GPU_VIRTUAL_ADDRESS
+        UpdateRtRestirComposeCurrentConstants(
+            uint32_t frameIndex);
+
+    bool RunRtRestirComposeCurrent(
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height);
+
+    void EnsureRtRestirMetricsResources(
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height);
+
+    ID3D12Resource* CurrentRtRestirFinalReservoir() const;
+    ID3D12Resource* CurrentRtRestirRejectionReason() const;
+
+    void ResetRtRestirMetricsResources();
+
+    bool UpdateRtRestirMetricsTables(
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        const RtRestirMetricsCapture& capture);
+
+    bool RunRtRestirMetrics(
+        CommandList& cl,
+        uint32_t frameIndex,
+        ID3D12Device* device,
+        uint32_t width,
+        uint32_t height,
+        const RtRestirMetricsCapture& capture);
+
+    D3D12_GPU_VIRTUAL_ADDRESS
+        UpdateRtRestirMetricsConstants(
+            uint32_t frameIndex,
+            const RtRestirMetricsCapture& capture);
+
+    void ReadCompletedRtRestirMetrics(
+        uint32_t frameIndex);
+
+    void ReadCompletedRtRestirGpuTimings(
+        uint32_t frameIndex);
+
+    static const char* RtRestirGpuTimerName(
+        RtRestirGpuTimer timer);
+
+    static RtRestirGpuTimingStats
+        ComputeRtRestirGpuTimingStats(
+            const std::vector<double>& samplesMs);
+
+    RtRestirGpuTimingBucket&
+        GetOrCreateRtRestirGpuTimingBucket(
+            const RtRestirGpuFrameMetadata& metadata);
+
+    void AccumulateRtRestirGpuTimings(
+        const RtRestirGpuFrameMetadata& metadata);
+
+    void LogRtRestirGpuTimingBucket(
+        const RtRestirGpuTimingBucket& bucket) const;
+
+    void LogRtRestirAllocationSizes(
+        ID3D12Device* device) const;
+
+    RtRestirMetricsCapturePoint
+        GetRtRestirMetricsCapturePoint() const;
+
+    void SetRtRestirMetricsCapturePoint(
+        RtRestirMetricsCapturePoint capturePoint);
+
+    static RtDirectEnvironmentMode ResolveRtDirectEnvironmentMode(
+        RtDirectEnvironmentMode configuredMode,
+        RtRestirValidationMode validationMode);
+
+    static RtRestirMathMode ResolveRtRestirMathMode(
+        RtRestirMathMode configuredMode,
+        RtRestirValidationMode validationMode);
+
+    static RtRestirMetricsDomain ResolveRtRestirMetricsDomain(
+        RtRestirValidationMode validationMode);
+
+    static const char* RtRestirMetricsDomainName(
+        RtRestirMetricsDomain domain);
+
+    static const char* RtRestirValidationModeName(
+        RtRestirValidationMode mode);
+
+    static const char* RtDirectEnvironmentModeName(
+        RtDirectEnvironmentMode mode);
+
+    static const char* RtRestirMathModeName(
+        RtRestirMathMode mode);
+
+    RtDirectEnvironmentMode EffectiveRtDirectEnvironmentMode() const;
+    RtRestirMathMode EffectiveRtRestirMathMode() const;
+
+    RtRestirMetricsCapturePoint
+        m_rtRestirMetricsCapturePoint =
+        RtRestirMetricsCapturePoint::ValidationOutput;
+
+    bool EffectiveRtRestirTemporalEnabled() const;
+    bool EffectiveRtRestirSpatialEnabled() const;
+
+    bool RtRestirValidationRunsRestir() const;
+
+    bool RtPrimaryJitterEnabledForCurrentDispatch() const;
+
+    bool BuildRtRestirMetricsCapture(
+        RtRestirMetricsCapturePoint capturePoint,
+        bool ranRestirResolve,
+        bool ranRestirCompose,
+        RtRestirMetricsCapture& outCapture) const;
+
+    bool BuildRtRestirValidationMetricsCapture(
+        bool ranRestirResolve,
+        RtRestirMetricsCapture& outCapture) const;
 
     TrianglePass m_triangle;
     UploadArena  m_upload;
@@ -2239,6 +2686,18 @@ private:
         DescriptorAllocator::Allocation restirApplyUavTable{};
         uint32_t restirApplySrvCount = 0;
         uint32_t restirApplyUavCount = 0;
+
+        DescriptorAllocator::Allocation restirComposeSrvTable{};
+        DescriptorAllocator::Allocation restirComposeUavTable{};
+
+        uint32_t restirComposeSrvCount = 0;
+        uint32_t restirComposeUavCount = 0;
+
+        DescriptorAllocator::Allocation restirMetricsSrvTable{};
+        DescriptorAllocator::Allocation restirMetricsUavTable{};
+
+        uint32_t restirMetricsSrvCount = 0;
+        uint32_t restirMetricsUavCount = 0;
     };
     
     std::vector<FrameRaytracingResources> m_rtFrames;
@@ -2252,19 +2711,59 @@ private:
     // u0 = m_rtOutput          R8G8B8A8_UNORM display
     // u1 = m_rtAccumDiffuse    R16G16B16A16_FLOAT linear
     // u2 = m_rtAccumSpec       R16G16B16A16_FLOAT linear
-    // u3 = m_rtAovNormal       R16G16B16A16_FLOAT rgb=geom normal, a=roughness
+    // u3 = m_rtAovNormal       R16G16B16A16_FLOAT rgb=geom normal, a=shading roughness
     // u4 = m_rtAovDepth        R32_FLOAT
     // u5 = m_rtAovMotion       R16G16_FLOAT prevUV, (-1,-1) invalid
     // u6 = m_rtAovViewZRaw  R16_FLOAT visible-surface RayT, -1 invalid
     // u7 = m_rtAovSurfaceId    R32_UINT object/material id, 0xFFFFFFFF invalid
     // u8 = m_rtAovDiffuseAlbedo R16G16B16A16_FLOAT rgb=diffuse albedo, a=stable demod flag
-    // u9  = m_rtRestirInitialReservoir StructuredBuffer/RWStructuredBuffer<RtRestirReservoir>
+    // u9  = m_rtRestirScratchReservoir  RWStructuredBuffer<RtRestirEnvReservoirPacked>
     // u10 = m_rtRestirResolvedDiffuse  R16G16B16A16_FLOAT
     // u11 = m_rtRestirResolvedSpec     R16G16B16A16_FLOAT
+    // u12 = m_rtAovSpecularF0           R16G16B16A16_FLOAT
+    // u13 = m_rtRestirConfidence        R16_FLOAT
+    // u14 = m_rtExactTargetReferenceDiffuse  R16G16B16A16_FLOAT validation reference
+    // u15 = m_rtExactTargetReferenceSpec     R16G16B16A16_FLOAT validation reference
+    // u16 = m_rtRestirReceiverNormalRoughness RGBA16F rgb = exact shading/world normal, a   = raw material roughness
     DescriptorAllocator::Allocation m_rtOutputUav{};
     uint32_t m_rtOutputWidth = 0;
     uint32_t m_rtOutputHeight = 0;
 
+    enum class RtRestirCoreUavBindingState : uint8_t
+    {
+        Uninitialized = 0,
+        Null,
+        Live
+    };
+
+    RtRestirCoreUavBindingState
+        m_rtRestirCoreUavBindingState =
+        RtRestirCoreUavBindingState::Uninitialized;
+
+    // Lazy DXR UAV resources are retained until resize/shutdown because
+    // submitted frames may still reference their descriptors.
+    ComPtr<ID3D12Resource> m_rtAovSpecularF0;
+    bool m_rtAovSpecularF0Ready = false;
+
+    ComPtr<ID3D12Resource> m_rtRestirReceiverNormalRoughness;
+
+    bool m_rtRestirReceiverNormalRoughnessReady = false;
+
+    ComPtr<ID3D12Resource> m_rtRestirConfidence;
+    bool m_rtRestirConfidenceReady = false;
+
+    ComPtr<ID3D12Resource> m_rtRestirConfidenceFallbackWhite;
+
+    ComPtr<ID3D12DescriptorHeap>
+        m_rtRestirConfidenceFallbackWhiteClearHeap;
+
+    DescriptorAllocator::Allocation
+        m_rtRestirConfidenceFallbackWhiteUav{};
+
+    ComPtr<ID3D12Resource> m_rtExactTargetReferenceDiffuse;
+    ComPtr<ID3D12Resource> m_rtExactTargetReferenceSpec;
+    bool m_rtExactTargetReferenceAovsReady = false;
+    bool m_rtExactTargetReferenceValidThisFrame = false;
 
     uint32_t m_rtMaterialCount = 4;
     bool m_rtOutputReady = false;
@@ -2273,6 +2772,10 @@ private:
     uint32_t m_rtResetId = 0;
     bool m_rtAccumulateThisFrame = false;
     bool m_rtAccumulatingLastFrame = false;
+
+    uint32_t m_rtPrimaryAovSampleIndex = 0;
+    uint32_t m_rtPrimaryAovResetId = 0;
+    bool m_rtPrimaryAovJitterEnabled = false;
 
     ComPtr<ID3D12Resource> m_rtAccumDiffuse;
     ComPtr<ID3D12Resource> m_rtAccumSpec;
@@ -2292,6 +2795,8 @@ private:
     std::vector<DirectX::XMFLOAT4X4> m_prevRtMotionWorlds;
 
     bool m_prevRtMotionWorldsValid = false;
+
+    std::vector<RtDrawHistoryIdentity> m_prevRtDrawIdentities;
 
     uint32_t m_widthCached = 1;
     uint32_t m_heightCached = 1;
@@ -2469,7 +2974,7 @@ private:
     uint32_t m_rtAtrousIterationsSpec = 1;
     uint32_t m_prevRtAtrousIterationsSpec = 1;
 
-    static constexpr uint32_t kRtUavTableCount = 12;
+    static constexpr uint32_t kRtUavTableCount = 17;
     static constexpr uint32_t kRtHistorySelectSrvCount = 7;
     static constexpr uint32_t kRtHistorySelectUavCount = 3;
     static constexpr uint32_t kRtSvgfSrvCount = 8;
@@ -2481,7 +2986,7 @@ private:
     static constexpr uint32_t kRtDiffuseDemodSrvCount = 3;
     static constexpr uint32_t kRtDiffuseDemodUavCount = 2;
     static constexpr uint32_t kRtCombineSrvCount = 3;
-    static constexpr uint32_t kRtTemporalSrvCount = 14;
+    static constexpr uint32_t kRtTemporalSrvCount = 15;
     static constexpr uint32_t kRtTemporalUavCount = 3;
     static constexpr float kRtViewZRoughCutoff = 0.35f;
     static constexpr float kRtViewZConfMin = 0.5f;
@@ -2489,21 +2994,26 @@ private:
     static constexpr float kRtDistanceNormParamY = 0.0f;
     static constexpr float kRtDistanceNormParamZ = 1.0f;
     static constexpr float kRtDistanceNormSigma =  0.08f;
-    static constexpr float kRtRestirReferenceMaxM = 4096.0f;
+    static constexpr float kRtRestirReferenceMaxM = 4095.0f;
+    static constexpr float kRtRestirReferenceMaxAge = 32.0f;
     static constexpr float kRtRestirReferenceMaxWeight = 3.0e30f;
     static constexpr uint32_t kRtOutlierClampSrvCount = 7;
     static constexpr uint32_t kRtOutlierClampUavCount = 2;
     static constexpr bool kRtEnvNeeFireflyGuardDefault = true;
-    static constexpr uint32_t kRtRestirTemporalSrvCount = 11;
-    static constexpr uint32_t kRtRestirTemporalUavCount = 2;
-    static constexpr uint32_t kRtRestirSpatialSrvCount = 5;
-    static constexpr uint32_t kRtRestirSpatialUavCount = 2;
+    static constexpr uint32_t kRtRestirTemporalSrvCount = 15;
+    static constexpr uint32_t kRtRestirTemporalUavCount = 4;
+    static constexpr uint32_t kRtRestirSpatialSrvCount = 11;
+    static constexpr uint32_t kRtRestirSpatialUavCount = 4;
     static constexpr uint32_t kRtRestirApplySrvCount = 4;
     static constexpr uint32_t kRtRestirApplyUavCount = 2;
-
+    static constexpr uint32_t kRtRestirComposeSrvCount = 7;
+    static constexpr uint32_t kRtRestirComposeUavCount = 3;
+    static constexpr uint32_t kRtRestirMetricsSrvCount = 5;
+    static constexpr uint32_t kRtRestirMetricsUavCount = 1;
+    static constexpr uint32_t kRtRestirMetricsGroupSizeX = 16;
+    static constexpr uint32_t kRtRestirMetricsGroupSizeY = 16;
 
     RtDiffuseDemodulatePass m_rtDiffuseDemodulatePass;
-
 
     RtMotionDilatePass m_rtMotionDilatePass;
     static constexpr uint32_t kMaxRtMotionDilateRadius = 4;
@@ -2637,20 +3147,34 @@ private:
     //
     // m_rtRestirHistoryValid tracks reservoir history only. It is intentionally
     // separate from raw RT accumulation history and SVGF signal history.
-    ComPtr<ID3D12Resource> m_rtRestirInitialReservoir;
-    ComPtr<ID3D12Resource> m_rtRestirTemporalReservoir[2];
-    ComPtr<ID3D12Resource> m_rtRestirSpatialReservoir;
+    
+    // Scratch ownership:
+    //
+    // Primary DXR:
+    //   initial reservoirs
+    //
+    // Spatial:
+    //   final spatial reservoirs after temporal no longer needs initial data.
+    ComPtr<ID3D12Resource> m_rtRestirScratchReservoir;
 
+    ComPtr<ID3D12Resource>
+        m_rtRestirTemporalReservoir[2];
+
+    ComPtr<ID3D12Resource> m_rtRestirTemporalRejectionReason;
+    ComPtr<ID3D12Resource> m_rtRestirRejectionReason;
     ComPtr<ID3D12Resource> m_rtRestirResolvedDiffuse;
     ComPtr<ID3D12Resource> m_rtRestirResolvedSpec;
     ComPtr<ID3D12Resource> m_rtRestirAppliedDiffuse;
     ComPtr<ID3D12Resource> m_rtRestirAppliedSpec;
+    ComPtr<ID3D12Resource> m_rtRestirTemporalConfidence[2];
 
+    bool m_rtRestirTemporalConfidenceReady = false;
     bool m_rtRestirResourcesReady = false;
     bool m_rtRestirHistoryValid = false;
 
     bool m_rtRestirTemporalValidThisFrame = false;
     bool m_rtRestirSpatialValidThisFrame = false;
+    bool m_rtRestirRejectionReasonReady = false;
     bool m_rtRestirResolvedValidThisFrame = false;
     bool m_rtRestirTemporalOutputReady = false;
     bool m_rtRestirSpatialOutputReady = false;
@@ -2659,11 +3183,11 @@ private:
 
     uint32_t m_rtRestirHistoryReadIndex = 0;
     uint32_t m_rtRestirHistoryWriteIndex = 1;
+    uint64_t m_prevRtRestirEnvironmentRevision = 0;
 
-
-    // Validation-only post-denoise ReSTIR apply scale.
-    // This is not a physical ReSTIR weight; production integration should apply
-    // the resolved direct term before temporal/A-trous filtering.
+    // Legacy validation-only post-denoise diagnostic apply controls.
+    // Production ReSTIR composes resolved direct-environment lighting
+    // before denoising and never uses this path.
     float m_rtRestirApplyDiffuseScale = 0.25f;
     float m_rtRestirApplySpecularScale = 0.25f;
     uint32_t m_rtRestirApplyMode = 1; // validation additive
@@ -2692,12 +3216,14 @@ private:
     float m_rtRestirSpatialMinConfidence = 0.25f;
 
     RtRestirMathMode m_rtRestirMathMode =
-        RtRestirMathMode::Robust;
+        RtRestirMathMode::Reference;
 
     RtRestirMathMode m_prevRtRestirMathMode =
-        RtRestirMathMode::Robust;
+        RtRestirMathMode::Reference;
 
-    //These let RenderFrame() detect when ReSTIR settings changed and clear reservoir history without unnecessarily destroying resources
+    // Previous ReSTIR settings used by RenderFrame() to detect
+    // history-invalidating changes without unnecessarily
+    // recreating ReSTIR resources.
     bool m_prevRtEnableRestirEnvDi = false;
     bool m_prevRtRestirUseTemporal = true;
     bool m_prevRtRestirUseSpatial = true;
@@ -2741,6 +3267,84 @@ private:
     uint64_t m_environmentRevision = 0;
 
     bool m_proceduralGeometryActive = true;
+
+    RtDirectEnvironmentMode m_rtDirectEnvironmentMode =
+        RtDirectEnvironmentMode::LegacyMis;
+
+    RtDirectEnvironmentMode m_prevRtDirectEnvironmentMode =
+        RtDirectEnvironmentMode::LegacyMis;
+
+    RtRestirValidationMode m_rtRestirValidationMode =
+        RtRestirValidationMode::Off;
+
+    RtRestirValidationMode m_prevRtRestirValidationMode =
+        RtRestirValidationMode::Off;
+
+    float m_rtRestirDeltaRoughnessCutoff =
+        0.04f;
+
+    float m_prevRtRestirDeltaRoughnessCutoff =
+        0.04f;
+
+    ComPtr<ID3D12Resource> m_rtRestirComposedDiffuse;
+
+    ComPtr<ID3D12Resource> m_rtRestirComposedSpec;
+
+    bool m_rtRestirComposedReady = false;
+
+    RtRestirComposeCurrentPass m_rtRestirComposeCurrentPass;
+
+    RtRestirMetricsPass m_rtRestirMetricsPass;
+    RtRestirGpuProfiler m_rtRestirGpuProfiler;
+
+    std::vector<RtRestirGpuFrameMetadata>
+        m_rtRestirGpuFrameMetadata;
+
+    double m_rtRestirPrimaryLegacyMs = -1.0;
+    double m_rtRestirPrimaryInitialMs = -1.0;
+
+    uint64_t m_rtRestirGpuCompletedFrameCount = 0;
+
+    std::vector<RtRestirGpuTimingBucket>
+        m_rtRestirGpuTimingBuckets;
+
+    static constexpr size_t
+        kRtRestirGpuTimingWindowSize = 256;
+
+    static constexpr uint64_t
+        kRtRestirGpuTimingFirstReportSamples = 16;
+
+    static constexpr uint64_t
+        kRtRestirGpuTimingReportInterval = 60;
+
+    // One partial per 16x16 metrics dispatch group.
+    ComPtr<ID3D12Resource> m_rtRestirMetricsPartial;
+    uint32_t m_rtRestirMetricsPartialCount = 0;
+    bool m_rtRestirMetricsReady = false;
+
+    // One readback allocation per frame slot. BeginFrame(frameIndex) is already
+    // fence-safe, so that is where the corresponding completed slot is mapped.
+    std::vector<ComPtr<ID3D12Resource>>
+        m_rtRestirMetricsReadback;
+
+    std::vector<bool> m_rtRestirMetricsReadbackPending;
+
+    std::vector<RtRestirMetricsContext>
+        m_rtRestirMetricsReadbackContext;
+
+    uint64_t m_rtRestirMetricsCapturedFrameCount = 0;
+
+    uint64_t m_rtTimestampFrequency = 0;
+
+    bool m_rtEnableRestirDenoiserConfidence = false;
+    float m_rtRestirConfidenceFloor = 0.25f;
+
+    bool m_prevRtEnableRestirDenoiserConfidence = false;
+    float m_prevRtRestirConfidenceFloor = 0.25f;
+
+    static const char*
+        RtRestirMetricsCapturePointName(
+            RtRestirMetricsCapturePoint capturePoint);
 
     D3D12_GPU_VIRTUAL_ADDRESS UpdateRtHistorySelectConstants(uint32_t frameIndex);
 };

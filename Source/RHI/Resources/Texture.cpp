@@ -467,6 +467,137 @@ void Texture::CreateFromRGBA8Data(
     cl.Transition(m_resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 }
 
+void Texture::CreateFromRGBA32FData(
+    ID3D12Device* device,
+    CommandList& cl,
+    UploadArena& upload,
+    uint32_t frameIndex,
+    uint32_t width,
+    uint32_t height,
+    const void* rgba32fPixels,
+    const wchar_t* debugName)
+{
+    if (!device ||
+        !rgba32fPixels ||
+        width == 0 ||
+        height == 0)
+    {
+        throw std::runtime_error(
+            "CreateFromRGBA32FData: invalid texture data.");
+    }
+
+    m_width = width;
+    m_height = height;
+    m_mipCount = 1;
+
+    m_resourceFormat =
+        DXGI_FORMAT_R32G32B32A32_FLOAT;
+
+    m_srvFormat =
+        DXGI_FORMAT_R32G32B32A32_FLOAT;
+
+    m_dsvFormat =
+        DXGI_FORMAT_UNKNOWN;
+
+    m_dimension =
+        TextureDimension::Texture2D;
+
+    m_arraySize = 1;
+
+    D3D12_RESOURCE_DESC texDesc =
+        CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R32G32B32A32_FLOAT,
+            width,
+            height);
+
+    auto defaultHeap =
+        CD3DX12_HEAP_PROPERTIES(
+            D3D12_HEAP_TYPE_DEFAULT);
+
+    ThrowIfFailed(
+        device->CreateCommittedResource(
+            &defaultHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &texDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(&m_resource)),
+        "CreateFromRGBA32FData: texture creation failed");
+
+    CommandList::SetGlobalState(
+        m_resource.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST);
+
+    if (debugName)
+        m_resource->SetName(debugName);
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT numRows = 0;
+    UINT64 rowSize = 0;
+    UINT64 totalBytes = 0;
+
+    device->GetCopyableFootprints(
+        &texDesc,
+        0,
+        1,
+        0,
+        &footprint,
+        &numRows,
+        &rowSize,
+        &totalBytes);
+
+    auto uploadAlloc =
+        upload.Allocate(
+            frameIndex,
+            totalBytes,
+            D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+
+    const uint8_t* src =
+        reinterpret_cast<const uint8_t*>(
+            rgba32fPixels);
+
+    const size_t srcRowPitch =
+        static_cast<size_t>(width) *
+        sizeof(float) *
+        4u;
+
+    for (UINT y = 0; y < numRows; ++y)
+    {
+        memcpy(
+            uploadAlloc.cpu +
+            (y * footprint.Footprint.RowPitch),
+            src +
+            (y * srcRowPitch),
+            srcRowPitch);
+    }
+
+    auto dstLoc =
+        CD3DX12_TEXTURE_COPY_LOCATION(
+            m_resource.Get(),
+            0);
+
+    auto srcLoc =
+        CD3DX12_TEXTURE_COPY_LOCATION(
+            upload.GetBuffer(frameIndex),
+            footprint);
+
+    srcLoc.PlacedFootprint.Offset =
+        uploadAlloc.offset;
+
+    cl.CopyTexture(
+        dstLoc,
+        0,
+        0,
+        0,
+        srcLoc,
+        nullptr);
+
+    cl.Transition(
+        m_resource.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+}
+
 D3D12_SHADER_RESOURCE_VIEW_DESC Texture::MakeSrvDesc() const
 {
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};

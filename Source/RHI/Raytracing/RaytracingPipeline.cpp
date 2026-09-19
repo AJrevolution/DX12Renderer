@@ -84,7 +84,7 @@ void RaytracingPipeline::Initialize(ID3D12Device5* device, const std::filesystem
 void RaytracingPipeline::BuildRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE uavTable;
-    uavTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 12, 0, 0); 
+    uavTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 17, 0, 0);
     // u0 = rtOutput
     // u1 = rtAccumDiffuse
     // u2 = rtAccumSpec
@@ -94,23 +94,29 @@ void RaytracingPipeline::BuildRootSignature(ID3D12Device* device)
     // u6 = aovPrimaryHitDistance
     // u7 = aovSurfaceId
     // u8 = aovDiffuseAlbedo
-    // u9  = ReSTIR initial reservoir
+    // u9  = ReSTIR scratch reservoir
     // u10 = ReSTIR resolved diffuse
     // u11 = ReSTIR resolved spec
+    // u12 = current specular F0 AOV
+    // u13 = final ReSTIR confidence
+    // u14 = validation reference diffuse
+    // u15 = validation reference specular
+    // u16 = ReSTIR receiver normal/raw-material-roughness
 
     CD3DX12_DESCRIPTOR_RANGE srvTable;
     srvTable.Init(
         D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
         kRtSrvTableCount,
         1,
-        0);  // t1..t386: geometry, instances, materials, imported buffers, IBL, env alias, ReSTIR, display sky, lighting radiance
+        0);
 
     CD3DX12_ROOT_PARAMETER params[5]{};
-    params[0].InitAsDescriptorTable(1, &uavTable); // u0..u11 RT UAV table
+    params[0].InitAsDescriptorTable(1, &uavTable); // u0..u16 RT UAV table
     params[1].InitAsShaderResourceView(0);         // t0 TLAS
     params[2].InitAsConstantBufferView(0);         // b0 frame
     params[3].InitAsDescriptorTable(1, &srvTable); // t1..expanded RT table
     params[4].InitAsConstantBufferView(1);         // b1 RtRayGenConstants
+
     
     CD3DX12_STATIC_SAMPLER_DESC linearWrap(
         0,

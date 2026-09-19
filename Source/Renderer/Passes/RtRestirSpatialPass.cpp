@@ -26,24 +26,48 @@ void RtRestirSpatialPass::Initialize(ID3D12Device* device, const std::filesystem
 void RtRestirSpatialPass::BuildRootSignature(ID3D12Device* device)
 {
     CD3DX12_DESCRIPTOR_RANGE srvRange;
-    srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 0); // t0..t4
+    srvRange.Init(
+        D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+        11,
+        0,
+        0); // t0..t10
 
     CD3DX12_DESCRIPTOR_RANGE uavRange;
-    uavRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 0); // u0 spatial reservoir, u1 debug output
+    uavRange.Init(
+        D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
+        4,
+        0,
+        0); // u0..u3
 
     CD3DX12_ROOT_PARAMETER params[3]{};
-    params[0].InitAsConstantBufferView(0);     // b0 RtRestirSpatialConstants
-    params[1].InitAsDescriptorTable(1, &srvRange);
-    params[2].InitAsDescriptorTable(1, &uavRange);
 
-    // The shader uses integer-coordinate resource loads and declares no sampler.
+    params[0].InitAsConstantBufferView(
+        0); // b0 RtRestirSpatialConstants
+
+    params[1].InitAsDescriptorTable(
+        1,
+        &srvRange); // t0..t10
+
+    params[2].InitAsDescriptorTable(
+        1,
+        &uavRange); // u0..u3
+
     CD3DX12_ROOT_SIGNATURE_DESC desc{};
-    desc.Init(_countof(params), params, 0, nullptr);
+    desc.Init(
+        _countof(params),
+        params,
+        0,
+        nullptr);
 
-    ComPtr<ID3DBlob> blob, err;
+    ComPtr<ID3DBlob> blob;
+    ComPtr<ID3DBlob> err;
 
     ThrowIfFailed(
-        D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err),
+        D3D12SerializeRootSignature(
+            &desc,
+            D3D_ROOT_SIGNATURE_VERSION_1,
+            &blob,
+            &err),
         "Serialize RT ReSTIR spatial root sig");
 
     ThrowIfFailed(
@@ -54,7 +78,9 @@ void RtRestirSpatialPass::BuildRootSignature(ID3D12Device* device)
             IID_PPV_ARGS(&m_rootSig)),
         "Create RT ReSTIR spatial root sig");
 
-    SetD3D12ObjectName(m_rootSig.Get(), L"RootSig: RT ReSTIR Spatial");
+    SetD3D12ObjectName(
+        m_rootSig.Get(),
+        L"RootSig: RT ReSTIR Spatial");
 }
 
 void RtRestirSpatialPass::BuildPipelineState(ID3D12Device* device, const std::filesystem::path& shaderPath)

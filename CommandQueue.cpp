@@ -21,6 +21,25 @@ void CommandQueue::Initialize(ID3D12Device* device, D3D12_COMMAND_LIST_TYPE type
     if (!m_fenceEvent) throw std::runtime_error("CreateEvent failed.");
 }
 
+uint64_t CommandQueue::GetTimestampFrequency() const
+{
+    if (!m_queue)
+    {
+        throw std::runtime_error(
+            "CommandQueue::GetTimestampFrequency called before Initialize.");
+    }
+
+    UINT64 frequency = 0;
+
+    ThrowIfFailed(
+        m_queue->GetTimestampFrequency(
+            &frequency),
+        "CommandQueue GetTimestampFrequency");
+
+    return static_cast<uint64_t>(
+        frequency);
+}
+
 uint64_t CommandQueue::Signal()
 {
     const uint64_t value = m_nextFenceValue++;

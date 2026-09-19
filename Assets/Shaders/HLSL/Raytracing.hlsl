@@ -2,6 +2,9 @@
 #include "PBR.hlsli"
 #include "RtSampling.hlsli"
 #include "RtReservoir.hlsli"
+#include "RtRestirEnvironment.hlsli"
+#include "RtRestirTarget.hlsli"
+#include "RtPrimaryJitter.hlsli"
 
 #define RT_MAX_MATERIALS 64
 #define RT_TEXTURES_PER_MATERIAL 5
@@ -186,7 +189,14 @@ cbuffer RtRayGenConstants : register(b1)
     float RtRestirMaxWeight;
 
     uint RtRestirMathMode;
-    uint3 _padRtRestirMath;
+    uint RtDirectEnvironmentMode;
+    uint RtRestirValidationMode;
+    float RtRestirDeltaRoughnessCutoff;
+
+    uint RtPrimarySampleIndex;
+    uint RtPrimaryResetId;
+    uint RtPrimaryJitterEnabled;
+    uint _padRtPrimarySampling;
     
     RtSkyConstants RtSky;
     RtEnvironmentLightingConstants RtEnvironment;
@@ -206,6 +216,20 @@ static const uint RT_ENV_SAMPLING_BRDF_ONLY = 0u;
 static const uint RT_ENV_SAMPLING_ENV_ONLY = 1u;
 static const uint RT_ENV_SAMPLING_MIS_ONE_SAMPLE = 2u;
 static const uint RT_ENV_SAMPLING_MIS_TWO_SAMPLE = 3u;
+
+static const uint RT_DIRECT_ENV_LEGACY_MIS = 0u;
+static const uint RT_DIRECT_ENV_RESTIR_VALIDATION = 1u;
+static const uint RT_DIRECT_ENV_RESTIR_PRODUCTION = 2u;
+
+static const uint RT_RESTIR_VALIDATION_EXACT_TARGET_REFERENCE = 4u;
+
+bool RestirOwnsDirectEnvironment()
+{
+    return
+        RtDirectEnvironmentMode ==
+            RT_DIRECT_ENV_RESTIR_PRODUCTION &&
+        RtEnableRestirEnvDi != 0u;
+}
 
 struct RayPayload
 {
@@ -243,9 +267,14 @@ RWTexture2D<float2>                 g_AovMotion : register(u5);         // prevU
 RWTexture2D<float>                  g_AovViewZRaw : register(u6);       // primary ray distance / ViewZ-compatible guide, -1 invalid
 RWTexture2D<uint>                   g_AovSurfaceId : register(u7);      // object/material id, 0xFFFFFFFF invalid
 RWTexture2D<float4>                 g_AovDiffuseAlbedo : register(u8);  // rgb=diffuse albedo, a=stable demod flag
-RWStructuredBuffer<RtRestirReservoir> g_RestirInitialReservoir : register(u9);
+RWStructuredBuffer<RtRestirEnvReservoirPacked> g_RestirScratchReservoir : register(u9);
 RWTexture2D<float4>                 g_RestirResolvedDiffuse : register(u10);
 RWTexture2D<float4>                 g_RestirResolvedSpec : register(u11);
+RWTexture2D<float4>                 g_AovSpecularF0 : register(u12);
+RWTexture2D<float>                  g_RestirConfidence : register(u13);
+RWTexture2D<float4>                 g_ExactTargetReferenceDiffuse : register(u14);
+RWTexture2D<float4>                 g_ExactTargetReferenceSpec : register(u15);
+RWTexture2D<float4>                 g_RestirReceiverNormalRoughness : register(u16);
 StructuredBuffer<VertexRT>          g_QuadVerts : register(t1);
 ByteAddressBuffer                   g_QuadIndices : register(t2);
 StructuredBuffer<VertexRT>          g_FloorVerts : register(t3);
@@ -263,7 +292,7 @@ Texture2D<float4>                   g_BRDFLut : register(t380);
 Texture2D<float4>                   g_IBLDiffuse : register(t381);
 Texture2D<float4>                   g_IBLSpecular : register(t382); 
 StructuredBuffer<RtEnvAliasEntry>   g_EnvAlias : register(t383);
-StructuredBuffer<RtRestirReservoir> g_RestirResolveReservoir : register(t384);
+StructuredBuffer<RtRestirEnvReservoirPacked> g_RestirResolveReservoir : register(t384);
 TextureCube<float4>                 g_RtDisplaySky : register(t385);
 Texture2D<float4>                   g_RtEnvironmentRadiance : register(t386);
 SamplerState                        g_LinearWrap : register(s0);
@@ -519,23 +548,6 @@ float NextRandom01(inout uint state)
     state = 1664525u * state + 1013904223u;
     return (state & 0x00FFFFFFu) / 16777216.0f;
 }
-
-float2 PixelJitter(uint2 pixel, uint sampleIndex, uint resetId)
-{
-    uint seed =
-        pixel.x * 1973u ^
-        pixel.y * 9277u ^
-        sampleIndex * 26699u ^
-        resetId * 31847u;
-
-    seed = HashUint(seed);
-
-    return float2(
-        NextRandom01(seed),
-        NextRandom01(seed)) - 0.5f;
-}
-
-static const float kPi = 3.14159265f;
 
 uint InitRng(uint2 pixel, uint sampleIndex, uint resetId)
 {
@@ -847,45 +859,6 @@ PbrSplit EvalPointLightsPbrSplitAtSurface(
     return r;
 }
 
-PbrSplit EvalEnvBrdfSplit(
-    float3 base,
-    float metallic,
-    float roughness,
-    float3 N,
-    float3 V,
-    float3 L)
-{
-    PbrSplit r;
-    r.diffuse = 0.0f.xxx;
-    r.spec = 0.0f.xxx;
-
-    float NdotL = saturate(dot(N, L));
-    float NdotV = saturate(dot(N, V));
-
-    if (NdotL <= 1e-4f || NdotV <= 1e-4f)
-        return r;
-
-    float3 H = SafeNormalize(V + L);
-    float NdotH = saturate(dot(N, H));
-    float VdotH = saturate(dot(V, H));
-
-    if (NdotH <= 1e-4f || VdotH <= 1e-4f)
-        return r;
-
-    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
-    float3 F = F_Schlick(VdotH, F0);
-    float D = D_GGX(NdotH, roughness);
-    float G = G_Smith(NdotV, NdotL, roughness);
-
-    // BRDF only. Caller multiplies by Li and NdotL.
-    r.spec = (D * G * F) / max(1e-4f, 4.0f * NdotV * NdotL);
-
-    float3 kd = (1.0f - F) * (1.0f - metallic);
-    r.diffuse = kd * base / kPi;
-
-    return r;
-}
-
 float PdfDiffuseBrdf(float3 N, float3 L)
 {
     float NdotL = saturate(dot(N, L));
@@ -936,8 +909,26 @@ uint EffectiveEnvSamplingMode()
     return RtEnvSamplingMode;
 }
 
+bool ExactTargetReferenceEnvSamplingReady()
+{
+    return
+        EnvSamplingReady() &&
+        RtEnvAliasFallback == 0u;
+}
+
+bool NeedExactTargetReference()
+{
+    return
+        RtRestirValidationMode ==
+            RT_RESTIR_VALIDATION_EXACT_TARGET_REFERENCE ||
+        RtRestirDebugView == 121u;
+}
+
 bool EnvNeeEnabled()
 {
+    if (RestirOwnsDirectEnvironment())
+        return false;
+
     if (!EnvSamplingReady())
         return false;
 
@@ -963,8 +954,20 @@ bool IsRtEnvEstimatorDebugView(uint dv)
         dv == 102u;
 }
 
-bool EnvBrdfEnvironmentContributionEnabled(bool isSpecular, float roughness)
+bool EnvBrdfEnvironmentContributionEnabled(
+    bool isSpecular,
+    float materialRoughness)
 {
+    if (RestirOwnsDirectEnvironment())
+    {
+        // Production ReSTIR owns primary direct environment lighting.
+        // Only near-delta primary specular keeps the legacy fallback.
+        return
+            isSpecular &&
+            materialRoughness <
+                RtRestirDeltaRoughnessCutoff;
+    }
+
     if (!EnvSamplingReady())
         return true;
 
@@ -988,7 +991,7 @@ bool EnvNeeDebugReady()
 
 bool EnvBrdfEnvironmentMisEnabled(
     bool isSpecular,
-    float roughness,
+    float materialRoughness,
     uint samplingDebugView)
 {
     if (!EnvSamplingReady())
@@ -1017,7 +1020,7 @@ bool EnvBrdfEnvironmentMisEnabled(
         return false;
     }
 
-    if (isSpecular && roughness < RtEnvDeltaRoughnessCutoff)
+    if (isSpecular && materialRoughness < RtEnvDeltaRoughnessCutoff)
         return false;
 
     return true;
@@ -1093,45 +1096,12 @@ bool TraceEnvironmentVisibility(float3 worldPos, float3 geomNormal, float3 wi)
     return shadowPayload.occluded == 0u;
 }
 
-float3 WorldToLightingEnvDir(float3 worldDir)
-{
-    return RotateY(
-        SafeNormalize(worldDir),
-        RtEnvironment.lightingRotationRadians);
-}
-
-float3 LightingEnvToWorldDir(float3 envDir)
-{
-    return RotateY(
-        SafeNormalize(envDir),
-        -RtEnvironment.lightingRotationRadians);
-}
-
 float2 DirToLatLongUV(float3 d)
 {
     d = SafeNormalize(d);
     float u = atan2(d.z, d.x) / (2.0f * kPi) + 0.5f;
     float v = asin(clamp(d.y, -1.0f, 1.0f)) / kPi + 0.5f;
     return float2(u, 1.0f - v);
-}
-
-float2 LightingEnvUV(float3 worldDir)
-{
-    return DirToLatLongUV(
-        WorldToLightingEnvDir(worldDir));
-}
-
-float3 LookupEnvironmentRadiance(float3 worldDir)
-{
-    float2 uv =
-        LightingEnvUV(worldDir);
-
-    float3 radiance =
-        RtEnvironment.hasRadianceTexture != 0u
-            ? g_RtEnvironmentRadiance.SampleLevel(g_LinearWrap, uv, 0.0f).rgb
-            : g_IBLSpecular.SampleLevel(g_LinearWrap, uv, 0.0f).rgb;
-
-    return radiance * RtEnvironment.lightingIntensity;
 }
 
 bool IsFiniteScalarRt(float v)
@@ -1199,10 +1169,18 @@ EnvSample SampleEnvironment(float2 uSelect, float2 uTexel)
         CubeFaceUVToDirection(face, cubeUv);
 
     float3 wi =
-        LightingEnvToWorldDir(envDir);
+        RestirEnvironmentToWorldDirection(
+            envDir,
+            RtEnvironment.lightingRotationRadians);
 
     float3 Li =
-        LookupEnvironmentRadiance(wi);
+        SampleRestirEnvironmentRadiance(
+            g_RtEnvironmentRadiance,
+            wi,
+            RtEnvironment.hasRadianceTexture,
+            RtEnvFaceSize,
+            RtEnvironment.lightingIntensity,
+            RtEnvironment.lightingRotationRadians);
 
     s.wi = wi;
     s.Li = Li;
@@ -1226,7 +1204,9 @@ float PdfEnvironment(float3 wi)
     }
 
     float3 envDir =
-        WorldToLightingEnvDir(wi);
+        RestirWorldToEnvironmentDirection(
+            wi,
+            RtEnvironment.lightingRotationRadians);
 
     float2 cubeUv;
     uint face =
@@ -1409,33 +1389,72 @@ bool IsRtRestirInitialDebugView(uint dv)
         dv == 105u;
 }
 
-bool IsRtRestirResolveDebugView(uint dv)
+bool IsRtRestirTargetDebugView(uint id)
 {
     return
-        dv == 110u ||
-        dv == 111u ||
-        dv == 112u ||
-        dv == 113u ||
-        dv == 114u;
+        id == 115u ||
+        id == 116u ||
+        id == 117u;
+}
+
+bool IsRtRestirGuideDebugView(uint id)
+{
+    return
+        id == 118u;
+}
+
+bool IsRtRestirResolveProductionDebugView(uint id)
+{
+    return
+        id == 119u ||
+        id == 122u ||
+        id == 125u;
+}
+
+bool IsRtRestirComposeDebugView(uint id)
+{
+    return
+        id == 120u ||
+        id == 121u ||
+        id == 123u ||
+        id == 124u;
+}
+
+bool IsRtRestirResolveDebugView(uint id)
+{
+    return
+        id == 110u ||
+        id == 111u ||
+        id == 112u ||
+        id == 113u ||
+        id == 114u ||
+        IsRtRestirResolveProductionDebugView(id);
 }
 
 bool IsRtRestirTemporalDebugView(uint dv)
 {
-    return dv == 106u || dv == 107u;
+    return dv == 106u || dv == 107u ||
+        IsRtRestirTargetDebugView(dv) ||
+        IsRtRestirGuideDebugView(dv);
 }
 
-bool IsRtRestirSpatialDebugView(uint dv)
-{
-    return dv == 108u || dv == 109u;
-}
-
-bool IsRtRestirDebugView(uint dv)
+bool IsRtRestirSpatialDebugView(uint id)
 {
     return
-        IsRtRestirInitialDebugView(dv) ||
-        IsRtRestirTemporalDebugView(dv) ||
-        IsRtRestirSpatialDebugView(dv) ||
-        IsRtRestirResolveDebugView(dv);
+        id == 108u ||
+        id == 109u ||
+        IsRtRestirTargetDebugView(id) ||
+        IsRtRestirGuideDebugView(id);
+}
+
+bool IsRtRestirDebugView(uint id)
+{
+    return
+        IsRtRestirInitialDebugView(id) ||
+        IsRtRestirTemporalDebugView(id) ||
+        IsRtRestirSpatialDebugView(id) ||
+        IsRtRestirResolveDebugView(id) ||
+        IsRtRestirComposeDebugView(id);
 }
 
 bool RestirInitialEnabled()
@@ -1444,7 +1463,8 @@ bool RestirInitialEnabled()
         RtRestirDispatchMode == 0u &&
         (
             RtEnableRestirEnvDi != 0u ||
-            IsRtRestirInitialDebugView(RtRestirDebugView)
+                IsRtRestirDebugView(
+                    RtRestirDebugView)
         );
 }
 
@@ -1483,9 +1503,11 @@ float3 SampleRtDisplaySky(float3 dir)
     return sky * RtSky.displayIntensity;
 }
 
-// RT IBL parity target:
-// - same latlong UV mapping convention as raster
-// - same BRDF LUT usage
+// RT legacy IBL parity target:
+// - legacy diffuse/specular IBL retains the raster lat-long convention
+// - ReSTIR radiance uses the dedicated face-major six-face atlas through
+//   SampleRestirEnvironmentRadiance()
+// - same BRDF LUT usage for the legacy IBL path
 // - same roughness blur approximation (sharp R vs roughened R lerp)
 // - same metallic/roughness interpretation from ORM
 
@@ -1502,9 +1524,9 @@ void RayGen()
 
     if (restirInitialEnabled)
     {
-        RtRestirReservoir empty;
+        RtRestirEnvReservoirPacked empty;
         ReservoirClear(empty);
-        g_RestirInitialReservoir[pixelIndex] = empty;
+        g_RestirScratchReservoir[pixelIndex] = empty;
     }
     
     uint samplingDebugView = RtSamplingDebugView;
@@ -1540,20 +1562,27 @@ void RayGen()
     bool isRtRestirDebug =
         IsRtRestirDebugView(RtRestirDebugView);
     
-    bool bypassAccum = 
-        (RtAccumulate == 0) ||
-        isRtShadingDebug ||
-        isMotionDebug ||
-        isViewZDebug ||
-        isSurfaceIdDebug ||
-        isDiffuseAlbedoDebug ||
-        isRtRestirInitialDebug ||
-        isRtRestirResolveDispatch ||
-        isRtRestirDebug;
-    
     g_AovViewZRaw[pixel] = RT_VIEWZ_INVALID;
     g_AovSurfaceId[pixel] = RT_SURFACE_ID_INVALID;
     g_AovDiffuseAlbedo[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    g_AovSpecularF0[pixel] = 0.0f.xxxx;
+
+    // The C++ resolve path has already prepared this texture:
+    // spatial confidence is already present, or temporal confidence was copied
+    // into it. Do not erase it before the resolve closest-hit shader reads it.
+    if (!isRtRestirResolveDispatch)
+    {
+        g_RestirConfidence[pixel] = 0.0f;
+    }
+
+    if (!isRtRestirResolveDispatch)
+    {
+        g_ExactTargetReferenceDiffuse[pixel] =
+            0.0f.xxxx;
+
+        g_ExactTargetReferenceSpec[pixel] =
+            0.0f.xxxx;
+    }
     
     uint rng = InitRng(pixel, RtSampleIndex, RtResetId);
     if (samplingDebugView == 96u)
@@ -1608,11 +1637,23 @@ void RayGen()
     uint diffRng = rng;
     uint specRng = HashUint(rng ^ 0x9E3779B9u ^ 0xD1B54A35u);
     
-    float2 jitter = 0.0f.xx;
-    if (!bypassAccum)
-    {
-        jitter = float2(Rand01(rng), Rand01(rng)) - 0.5f;
-    }
+    const bool primaryJitterEnabled =
+        RtPrimaryJitterEnabled != 0u;
+
+    float2 jitter =
+        primaryJitterEnabled
+        ? RtPrimaryPixelJitter(
+            pixel,
+            RtPrimarySampleIndex,
+            RtPrimaryResetId)
+        : 0.0f.xx;
+
+    const bool bypassPrimaryJitter =
+        !primaryJitterEnabled;
+
+    const bool bypassAccum =
+        bypassPrimaryJitter ||
+        isRtRestirResolveDispatch;
     
     float2 uv = (float2(pixel) + 0.5 + jitter) / float2(dim);
     float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
@@ -1659,10 +1700,10 @@ void RayGen()
     }
 
     // 104/105 must run after the primary trace because closest-hit writes
-    // g_RestirInitialReservoir.
+    // g_RestirScratchReservoir.
     if (isRtRestirInitialDebug)
     {
-        RtRestirReservoir rr = g_RestirInitialReservoir[pixelIndex];
+        RtRestirEnvReservoirPacked rr = g_RestirScratchReservoir[pixelIndex];
 
         if (RtRestirDebugView == 104u)
         {
@@ -1922,6 +1963,12 @@ void Miss(inout RayPayload payload)
     payload.rayType == RT_RAY_PRIMARY_DIFFUSE)
     {
         uint2 pixel = DispatchRaysIndex().xy;
+        
+        g_AovSpecularF0[pixel] =
+        0.0f.xxxx;
+
+        g_RestirConfidence[pixel] =
+        0.0f;
 
         g_RestirResolvedDiffuse[pixel] = float4(0.0f.xxx, 1.0f);
         g_RestirResolvedSpec[pixel] = float4(0.0f.xxx, 1.0f);
@@ -1929,9 +1976,15 @@ void Miss(inout RayPayload payload)
         if (RtRestirDebugView == 110u ||
             RtRestirDebugView == 111u ||
             RtRestirDebugView == 112u ||
-            RtRestirDebugView == 113u)
+            RtRestirDebugView == 113u ||
+            RtRestirDebugView == 119u ||
+            RtRestirDebugView == 122u ||
+            RtRestirDebugView == 125u)
         {
-            g_Output[pixel] = float4(0.0f.xxx, 1.0f);
+            g_Output[pixel] =
+                float4(
+                    0.0f.xxx,
+                    1.0f);
         }
         else if (RtRestirDebugView == 114u)
         {
@@ -1990,16 +2043,34 @@ void Miss(inout RayPayload payload)
     
     if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE)
     {
-        uint2 pixel = DispatchRaysIndex().xy;
-       
-        g_AovNormal[pixel] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        uint2 pixel =
+            DispatchRaysIndex().xy;
+
+        g_AovNormal[pixel] =
+            float4(0.0f, 0.0f, 0.0f, 1.0f);
+
         g_AovDepth[pixel] = 1.0f;
+
         g_AovMotion[pixel] = float2(-1.0f, -1.0f);
+
         g_AovViewZRaw[pixel] = RT_VIEWZ_INVALID;
+
         g_AovSurfaceId[pixel] = RT_SURFACE_ID_INVALID;
-        g_AovDiffuseAlbedo[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        
+
+        g_AovDiffuseAlbedo[pixel] = 0.0f.xxxx;
+
+        g_AovSpecularF0[pixel] = 0.0f.xxxx;
+
+        g_RestirReceiverNormalRoughness[pixel] = 0.0f.xxxx;
+
+        g_RestirConfidence[pixel] = 0.0f;        
+
+        g_ExactTargetReferenceDiffuse[pixel] = 0.0f.xxxx;
+
+        g_ExactTargetReferenceSpec[pixel] = 0.0f.xxxx;
+
         payload.color = sky;
+
         return;
     }
 
@@ -2140,13 +2211,19 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         data.baseColorFactor.rgb *
         baseTex.rgb;
 
-    float roughness =
-        saturate(data.roughness * metalRoughTex.g);
+    float materialRoughness =
+        saturate(
+            data.roughness *
+            metalRoughTex.g);
 
     float metallic =
-        saturate(data.metallic * metalRoughTex.b);
+        saturate(
+            data.metallic *
+            metalRoughTex.b);
     
-    roughness = max(0.045f, roughness);
+    float shadingRoughness =
+        PbrShadingRoughnessFromMaterial(
+            materialRoughness);
     
     // Use outgoing direction for both primary and indirect hits.
     float3 V = SafeNormalize(-WorldRayDirection());
@@ -2155,8 +2232,13 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     float4 clip = mul(float4(worldPos, 1.0f), ViewProj);
     float depth01 = saturate(clip.z / clip.w);
     
-    float3 diffuseAlbedo = base * (1.0f - metallic);
-    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
+    const float safeMetallic = saturate(metallic);
+
+    const float3 safeBase = max(base, 0.0f.xxx);
+
+    const float3 diffuseAlbedo = safeBase * (1.0f - safeMetallic);
+
+    const float3 F0 = lerp(0.04f.xxx, safeBase, safeMetallic);
     
     float pSpec = clamp(Max3(F0), 0.05f, 0.95f);
     float pSpecSafe = saturate(pSpec);
@@ -2164,15 +2246,38 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     
     float NdotV = saturate(dot(worldNormal, V));
     float3 R = reflect(-V, worldNormal);
-    float3 Rrough = SafeNormalize(lerp(R, worldNormal, roughness * roughness));
+    float3 Rrough = SafeNormalize(lerp(R, worldNormal, shadingRoughness * shadingRoughness));
     
     float3 iblDiffuse = 0.0f.xxx;
     float3 iblSpecular = 0.0f.xxx;
+    
+    RtRestirReceiver restirReceiver;
+
+    restirReceiver.normal = worldNormal;
+
+    restirReceiver.viewDirection = V;
+
+    restirReceiver.diffuseAlbedo = diffuseAlbedo;
+
+    restirReceiver.specularF0 = F0;
+
+    restirReceiver.materialRoughness = materialRoughness;
+
+    restirReceiver.shadingRoughness = shadingRoughness;
+
+    restirReceiver.surfaceId = currentSurfaceId;
+
+    restirReceiver.valid = 1u;
+
+    restirReceiver.specularEligible =
+        materialRoughness >= RtRestirDeltaRoughnessCutoff
+            ? 1u
+            : 0u;
 
     if (HasIBL != 0 && HasBRDFLut != 0)
     {
         iblDiffuse = EvalIBLDiffuse(worldNormal) * diffuseAlbedo;
-        iblSpecular = EvalIBLSpecular(R, Rrough, roughness, NdotV, F0);
+        iblSpecular = EvalIBLSpecular(R, Rrough, shadingRoughness, NdotV, F0);
     }
 
     if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE)
@@ -2187,7 +2292,16 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
             prevUV = ProjectPrevUVFromWorld(prevWorldPos);
         }
 
-        g_AovNormal[pixel] = float4(geomNormal * 0.5f + 0.5f, roughness);
+        g_AovNormal[pixel] =
+            float4(
+                geomNormal * 0.5f + 0.5f,
+                shadingRoughness);
+        
+        g_RestirReceiverNormalRoughness[pixel] =
+            float4(
+                worldNormal * 0.5f + 0.5f,
+                materialRoughness);
+        
         g_AovDepth[pixel] = depth01;
         g_AovMotion[pixel] = prevUV;
         g_AovSurfaceId[pixel] = currentSurfaceId;
@@ -2198,10 +2312,15 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         // This is not strict camera-space Z and not specular secondary-ray hit distance.
         g_AovViewZRaw[pixel] = RayTCurrent();
         
-        float3 diffuseAlbedo = saturate(base * (1.0f - saturate(metallic)));
-        float stableAlbedo = DiffuseAlbedoStable(diffuseAlbedo) ? 1.0f : 0.0f;
+        const float stableAlbedo =
+            DiffuseAlbedoStable(
+                saturate(diffuseAlbedo))
+            ? 1.0f
+            : 0.0f;
 
         g_AovDiffuseAlbedo[pixel] = float4(diffuseAlbedo, stableAlbedo);
+
+        g_AovSpecularF0[pixel] = float4(F0, 1.0f);
     }
     
     if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE &&
@@ -2211,12 +2330,12 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         uint2 dim = DispatchRaysDimensions().xy;
         uint pixelIndex = pixel.y * dim.x + pixel.x;
 
-        RtRestirReservoir r;
+        RtRestirEnvReservoirPacked r;
         ReservoirClear(r);
 
         uint rrng = InitRtEnvRng(pixel, 107u, payload.rayType);
 
-        uint candidateCount = max(1u, RtRestirInitialCandidateCount);
+        uint candidateCount = min(max(1u, RtRestirInitialCandidateCount), RT_RESTIR_MAX_PACKED_M);
 
     [loop]
         for (uint i = 0u; i < candidateCount; ++i)
@@ -2234,43 +2353,46 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
             if (NoL <= 1e-4f || dot(geomNormal, env.wi) <= 0.0f)
                 continue;          
 
-            PbrSplit brdf = EvalEnvBrdfSplit(
-                base,
-                metallic,
-                roughness,
-                worldNormal,
-                V,
-                env.wi);
+            const RtRestirTargetEvaluation target =
+                EvaluateRestirEnvironmentTarget(
+                    restirReceiver,
+                    env.wi,
+                    env.Li);
 
-            float3 unoccluded =
-                env.Li *
-                (brdf.diffuse + brdf.spec) *
-                NoL;
-
-            float targetLum = RtDebugLuminance(unoccluded);
+            const float targetLum =
+                target.combinedTarget;
 
             if (targetLum <= RtRestirMinTarget)
                 continue;
             
-            RtRestirReservoir candidate =
+            RtRestirEnvReservoirPacked candidate =
                 MakeRestirCandidate(
                     env.wi,
-                    env.Li,
                     env.pdf,
                     targetLum,
                     env.index,
-                    currentSurfaceId);          
+                    currentSurfaceId);
 
             float candidateWeight =
                 ReservoirCandidateWeight(
                     targetLum,
                     env.pdf);
 
-            ReservoirUpdate(
+            ReservoirUpdateWeightedTracked(
                 r,
                 candidate,
                 candidateWeight,
+                1u,
                 rrng);
+        }
+        
+        if (ReservoirSampleValid(r))
+        {
+            ReservoirSetState(
+                r,
+                candidateCount,
+                ReservoirAge(r),
+                ReservoirFlags(r));
         }
 
         ReservoirFinalize(
@@ -2279,7 +2401,24 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
             RtRestirMaxWeight,
             RtRestirMathMode);
 
-        g_RestirInitialReservoir[pixelIndex] = r;
+        // Even when every attempted candidate has zero weight, those proposals are
+        // still represented candidates. Preserve their M so temporal reuse can
+        // account for them if valid history supplies the selected sample.
+        if (!ReservoirFinalizedValid(r))
+        {
+            ReservoirClear(r);
+
+            ReservoirAddRepresentedZeroWeightM(
+                r,
+                candidateCount,
+                0u,
+                0u,
+                RtRestirMaxM);
+
+            r.surfaceId = currentSurfaceId;
+        }
+        
+        g_RestirScratchReservoir[pixelIndex] = r;
     }
     
     if (payload.rayType == RT_RAY_PRIMARY_DIFFUSE &&
@@ -2289,7 +2428,16 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         uint2 dim = DispatchRaysDimensions().xy;
         uint pixelIndex = pixel.y * dim.x + pixel.x;
 
-        RtRestirReservoir rr = g_RestirResolveReservoir[pixelIndex];
+        RtRestirEnvReservoirPacked rr =
+        g_RestirResolveReservoir[pixelIndex];
+
+        const float spatialOrTemporalConfidence =
+            saturate(
+                g_RestirConfidence[pixel]);
+
+        // Invalid reservoir, SurfaceId mismatch and failed visibility all leave
+        // this at zero.
+        float resolvedConfidence = 0.0f;
 
         float3 outDiffuse = 0.0f.xxx;
         float3 outSpec = 0.0f.xxx;
@@ -2298,6 +2446,11 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         float debugVisibility = 0.0f;
         float debugDiffuseLum = 0.0f;
         float debugSpecLum = 0.0f;
+        
+        float debugDiffuseShare = 0.0f;
+        float debugSpecShare = 0.0f;
+        float2 debugClampMask = 0.0f.xx;
+        bool debugSpecularStarvation = false;
 
         float3 invalidReason = 0.0f.xxx;
 
@@ -2311,8 +2464,55 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         }
         else
         {
-            float3 wi = SafeNormalize(rr.sampleDir_pdf.xyz);
-            float3 Li = max(rr.sampleLi_target.xyz, 0.0f.xxx);
+            const uint reservoirFlags =
+                ReservoirFlags(rr);
+
+            debugClampMask =
+                float2(
+                    (reservoirFlags &
+                        RT_RESTIR_RESERVOIR_M_CLAMPED) != 0u
+                        ? 1.0f
+                        : 0.0f,
+
+                (reservoirFlags &
+                    RT_RESTIR_RESERVOIR_W_CLAMPED) != 0u
+                    ? 1.0f
+                    : 0.0f);
+
+            
+            const float3 wi = DecodeRestirDirection(rr.packedDirection);
+            const float3 Li =
+                SampleRestirEnvironmentRadiance(
+                    g_RtEnvironmentRadiance,
+                    wi,
+                    RtEnvironment.hasRadianceTexture,
+                    RtEnvFaceSize,
+                    RtEnvironment.lightingIntensity,
+                    RtEnvironment.lightingRotationRadians);
+            
+            const RtRestirTargetEvaluation target =
+                EvaluateRestirEnvironmentTarget(
+                    restirReceiver,
+                    wi,
+                    Li);
+            
+            debugDiffuseShare =
+                target.diffuseShare;
+
+            debugSpecShare =
+                target.specularShare;
+            
+            debugSpecularStarvation =
+                target.diffuseTarget > 1.0e-8f &&
+                target.specularTarget <= 1.0e-8f &&
+                restirReceiver.shadingRoughness < 0.35f &&
+                restirReceiver.specularEligible != 0u;
+            
+            const float W =
+                rr.finalWeight;
+
+            debugW =
+                W;
 
             float NoL = saturate(dot(worldNormal, wi));
 
@@ -2335,44 +2535,46 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
                 invalidReason.b = 1.0f;
             }
 
-            debugVisibility = visible ? 1.0f : 0.0f;
+            debugVisibility =
+                visible
+                ? 1.0f
+                : 0.0f;
+
+            // Combine reuse confidence with current-pixel visibility.
+            resolvedConfidence =
+                visible
+                ? spatialOrTemporalConfidence
+                : 0.0f;
 
             if (visible)
             {
-                PbrSplit brdf = EvalEnvBrdfSplit(
-                base,
-                metallic,
-                roughness,
-                worldNormal,
-                V,
-                wi);
-
-                float W =
-                min(
-                    RtRestirMaxWeight,
-                    max(0.0f, rr.weightSum_M_W.z));
-
-                debugW = W;
-
                 outDiffuse =
-                Li *
-                brdf.diffuse *
-                NoL *
-                W;
+                    target.diffuse *
+                    W;
 
                 outSpec =
-                Li *
-                brdf.spec *
-                NoL *
-                W;
+                    target.specular *
+                    W;
 
-                debugDiffuseLum = RtDebugLuminance(outDiffuse);
-                debugSpecLum = RtDebugLuminance(outSpec);
+                debugDiffuseLum =
+                    RtDebugLuminance(
+                        outDiffuse);
+
+                debugSpecLum =
+                    RtDebugLuminance(
+                        outSpec);
             }
         }
 
         g_RestirResolvedDiffuse[pixel] = float4(outDiffuse, 1.0f);
+
         g_RestirResolvedSpec[pixel] = float4(outSpec, 1.0f);
+
+        // Invalid reservoir, SurfaceId mismatch, back-facing direction and
+        // visibility failure all produce zero confidence.
+        g_RestirConfidence[pixel] =
+            saturate(
+                resolvedConfidence);
 
         if (RtRestirDebugView == 110u)
         {
@@ -2397,6 +2599,70 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         {
             g_Output[pixel] = float4(saturate(invalidReason), 1.0f);
         }
+        else if (RtRestirDebugView == 119u)
+        {
+            float3 debugColor = 0.0f.xxx;
+
+            if (debugSpecularStarvation)
+            {
+                // Magenta = suspicious specular starvation.
+                debugColor =
+                    float3(
+                        1.0f,
+                        0.0f,
+                        1.0f);
+            }
+            else if (debugDiffuseShare > 0.75f)
+            {
+                // Red = diffuse dominant.
+                debugColor =
+                    float3(
+                        1.0f,
+                        0.0f,
+                        0.0f);
+            }
+            else if (debugSpecShare > 0.75f)
+            {
+                // Blue = specular dominant.
+                debugColor =
+                    float3(
+                        0.0f,
+                        0.0f,
+                        1.0f);
+            }
+            else
+            {
+                // Green = balanced.
+                debugColor =
+                    float3(
+                        0.0f,
+                        1.0f,
+                        0.0f);
+            }
+
+            g_Output[pixel] =
+                float4(
+                    debugColor,
+                    1.0f);
+        }
+        else if (RtRestirDebugView == 122u)
+        {
+            // R = M clamped.
+            // G = final W clamped.
+            g_Output[pixel] =
+                float4(
+                    debugClampMask.x,
+                    debugClampMask.y,
+                    0.0f,
+                    1.0f);
+        }
+        else if (RtRestirDebugView == 125u)
+        {
+            g_Output[pixel] =
+                float4(
+                    resolvedConfidence.xxx,
+                    1.0f);
+        }
 
         payload.color = 0.0f.xxx;
         return;
@@ -2413,7 +2679,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         float3 direct = EvalDirectAtSurface(
             base,
             metallic,
-            roughness,
+            shadingRoughness,
             worldNormal,
             V,
             L,
@@ -2422,7 +2688,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         direct += EvalPointLightsAtSurface(
             base,
             metallic,
-            roughness,
+            shadingRoughness,
             worldNormal,
             V,
             worldPos);
@@ -2434,6 +2700,10 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     float3 envNeeDiffuse = 0.0f.xxx;
     float3 envNeeSpec = 0.0f.xxx;
     
+    // Validation-only exact-target reference; Legacy beauty is unchanged.
+    float3 exactTargetReferenceDiffuse = 0.0f.xxx;
+    float3 exactTargetReferenceSpec = 0.0f.xxx;
+    
     uint samplingDebugView = RtSamplingDebugView;
 
     bool useEnvNeeForFinal =
@@ -2444,9 +2714,17 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         IsRtEnvEstimatorDebugView(samplingDebugView) &&
         EnvNeeDebugReady();
 
+    const bool needExactTargetReference =
+        NeedExactTargetReference();
+
+    const bool useEnvNeeForExactTargetReference =
+        needExactTargetReference &&
+        ExactTargetReferenceEnvSamplingReady();
+
     bool shouldComputeEnvNee =
         useEnvNeeForFinal ||
-        useEnvNeeForDebug;
+        useEnvNeeForDebug ||
+        useEnvNeeForExactTargetReference;
 
     if (shouldComputeEnvNee)
     {
@@ -2460,53 +2738,143 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
         if (env.valid)
         {
-            float NdotEnv = saturate(dot(worldNormal, env.wi));
-            float GdotEnv = dot(geomNormal, env.wi);
-
-            if (NdotEnv > 1e-4f && GdotEnv > 0.0f)
+            
+            // Match the packed-direction representation used by ReSTIR.
+            if (needExactTargetReference)
             {
-                bool visible = TraceEnvironmentVisibility(
-                    worldPos,
+                const float3 referenceWi =
+                    DecodeRestirDirection(
+                        PackRestirDirection(
+                            env.wi));
+
+                const float3 referenceLi =
+                    SampleRestirEnvironmentRadiance(
+                        g_RtEnvironmentRadiance,
+                        referenceWi,
+                        RtEnvironment.hasRadianceTexture,
+                        RtEnvFaceSize,
+                        RtEnvironment.lightingIntensity,
+                        RtEnvironment.lightingRotationRadians);
+
+                const float referenceNoL =
+                    saturate(
+                        dot(
+                            worldNormal,
+                            referenceWi));
+
+                const float referenceGeomNoL =
+                    dot(
+                        geomNormal,
+                        referenceWi);
+
+                if (referenceNoL > 1e-4f &&
+                    referenceGeomNoL > 0.0f)
+                {
+                    const bool referenceVisible =
+                        TraceEnvironmentVisibility(
+                            worldPos,
+                            geomNormal,
+                            referenceWi);
+
+                    if (referenceVisible)
+                    {
+                        const RtRestirTargetEvaluation referenceTarget =
+                            EvaluateRestirEnvironmentTarget(
+                                restirReceiver,
+                                referenceWi,
+                                referenceLi);
+
+                        const float referenceInvPdf =
+                            1.0f /
+                            max(
+                                RtEnvPdfEpsilon,
+                                env.pdf);
+
+                        exactTargetReferenceDiffuse =
+                            referenceTarget.diffuse *
+                            referenceInvPdf;
+
+                        exactTargetReferenceSpec =
+                            referenceTarget.specular *
+                            referenceInvPdf;
+                    }
+                }
+            }
+            
+            
+            float NdotEnv =
+                saturate(
+                    dot(
+                        worldNormal,
+                        env.wi));
+
+            float GdotEnv =
+                dot(
                     geomNormal,
                     env.wi);
+
+            if (NdotEnv > 1e-4f &&
+                GdotEnv > 0.0f)
+            {
+                bool visible =
+                    TraceEnvironmentVisibility(
+                        worldPos,
+                        geomNormal,
+                        env.wi);
 
                 if (visible)
                 {
                     bool allowSpecEnvNee =
-                        roughness >= RtEnvDeltaRoughnessCutoff;
-                    
-                    PbrSplit envBrdf = EvalEnvBrdfSplit(
-                        base,
-                        metallic,
-                        roughness,
-                        worldNormal,
-                        V,
-                        env.wi);
+                        materialRoughness >=
+                        RtEnvDeltaRoughnessCutoff;
 
-                    float pdfDiffuse =
-                    pDiffuseSafe *
-                    PdfDiffuseBrdf(
-                        worldNormal,
-                        env.wi);
-
-                    float pdfSpec = allowSpecEnvNee
-                    ? pSpecSafe *
-                        PdfSpecularGGXBrdf(
-                            roughness,
+                    PbrEnvironmentBrdfSplit envBrdf =
+                        EvaluateEnvironmentBrdfSplit(
+                            diffuseAlbedo,
+                            F0,
+                            shadingRoughness,
                             worldNormal,
                             V,
-                            env.wi)
-                    : 0.0f;
+                            env.wi);
 
-                    float wDiffuse = RtUseEnvMIS != 0u
-                    ? PowerHeuristicN(env.pdf, pdfDiffuse, RtEnvMISPower)
-                    : 1.0f;
+                    float pdfDiffuse =
+                        pDiffuseSafe *
+                        PdfDiffuseBrdf(
+                            worldNormal,
+                            env.wi);
 
-                    float wSpec = RtUseEnvMIS != 0u && allowSpecEnvNee
-                    ? PowerHeuristicN(env.pdf, pdfSpec, RtEnvMISPower)
-                    : 1.0f;
+                    float pdfSpec =
+                        allowSpecEnvNee
+                        ? pSpecSafe *
+                            PdfSpecularGGXBrdf(
+                                shadingRoughness,
+                                worldNormal,
+                                V,
+                                env.wi)
+                        : 0.0f;
 
-                    float invPdf = 1.0f / max(RtEnvPdfEpsilon, env.pdf);
+                    float wDiffuse =
+                        RtUseEnvMIS != 0u
+                        ? PowerHeuristicN(
+                            env.pdf,
+                            pdfDiffuse,
+                            RtEnvMISPower)
+                        : 1.0f;
+
+                    float wSpec =
+                        RtUseEnvMIS != 0u &&
+                        allowSpecEnvNee
+                        ? PowerHeuristicN(
+                            env.pdf,
+                            pdfSpec,
+                            RtEnvMISPower)
+                        : 1.0f;
+
+                    float invPdf =
+                        1.0f /
+                        max(
+                            RtEnvPdfEpsilon,
+                            env.pdf);
 
                     envNeeDiffuse =
                         env.Li *
@@ -2518,21 +2886,55 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
                     if (allowSpecEnvNee)
                     {
                         envNeeSpec =
-                        env.Li *
-                        envBrdf.spec *
-                        NdotEnv *
-                        wSpec *
-                        invPdf;
+                            env.Li *
+                            envBrdf.specular *
+                            NdotEnv *
+                            wSpec *
+                            invPdf;
                     }
 
                     if (RtEnvNeeFireflyGuard != 0u)
                     {
-                        float maxNee = max(1e-4f, RtEnvNeeMaxRadiance);
-                        envNeeDiffuse = min(envNeeDiffuse, maxNee.xxx);
-                        envNeeSpec = min(envNeeSpec, maxNee.xxx);
+                        float maxNee =
+                            max(
+                                1e-4f,
+                                RtEnvNeeMaxRadiance);
+
+                        envNeeDiffuse =
+                            min(
+                                envNeeDiffuse,
+                                maxNee.xxx);
+
+                        envNeeSpec =
+                            min(
+                                envNeeSpec,
+                                maxNee.xxx);
                     }
                 }
             }
+        }
+    }
+        
+    if (needExactTargetReference)
+    {
+        if (payload.rayType ==
+            RT_RAY_PRIMARY_DIFFUSE)
+        {
+            g_ExactTargetReferenceDiffuse[
+                DispatchRaysIndex().xy] =
+                    float4(
+                        exactTargetReferenceDiffuse,
+                        1.0f);
+        }
+
+        if (payload.rayType ==
+            RT_RAY_PRIMARY_SPECULAR)
+        {
+            g_ExactTargetReferenceSpec[
+                DispatchRaysIndex().xy] =
+                    float4(
+                        exactTargetReferenceSpec,
+                        1.0f);
         }
     }
 
@@ -2546,7 +2948,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
     if (DebugView == 2)
     {
-        payload.color = roughness.xxx;
+        payload.color = shadingRoughness.xxx;
         return;
     }
 
@@ -2584,8 +2986,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
         payload.color = float3(frac(baseUv), 0.0f);
         return;
     }
-    
-
+   
     float3 indirectDiffuse = 0.0f.xxx;
     float3 indirectSpec = 0.0f.xxx;
     float3 lobeVis = 0.0f.xxx;
@@ -2605,10 +3006,6 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
     if (allowIndirect)
     {
-        //float3 diffuseAlbedo = base * (1.0f - metallic);
-        //float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
-        //float pSpec = clamp(Max3(F0), 0.05f, 0.95f);
-
         float xi = Rand01(payload.rng);
         bool chooseSpec = (xi < pSpecSafe);
 
@@ -2631,7 +3028,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
         if (chooseSpec)
         {
-            float alpha = max(roughness * roughness, 0.002f);
+            float alpha = max(shadingRoughness * shadingRoughness, 0.002f);
 
             float2 u = float2(Rand01(payload.rng), Rand01(payload.rng));
             float3 localH = SampleGGXHalfVector(u, alpha);
@@ -2667,16 +3064,16 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
                 if (brdfRayMissedEnvironment)
                 {
-                    if (!EnvBrdfEnvironmentContributionEnabled(true, roughness))
+                    if (!EnvBrdfEnvironmentContributionEnabled(true, materialRoughness))
                     {
                         bounce.color = 0.0f.xxx;
                     }
-                    else if (EnvBrdfEnvironmentMisEnabled(true, roughness, samplingDebugView))
+                    else if (EnvBrdfEnvironmentMisEnabled(true, materialRoughness, samplingDebugView))
                     {
                         float pdfBrdf =
                         pSpecSafe *
                         PdfSpecularGGXBrdf(
-                            roughness,
+                            shadingRoughness,
                             worldNormal,
                             V,
                             wi);
@@ -2691,7 +3088,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
                     }
                 }
 
-                float G = G_Smith(NdotV, NdotL, roughness);
+                float G = G_Smith(NdotV, NdotL, shadingRoughness);
                 float3 F = F_Schlick(VdotH, F0);
 
                 // Simplified GGX importance-sampling estimator.
@@ -2708,6 +3105,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
                     envMisWeight /
                     max(1e-4f, pSpecSafe);
                 payload.rng = bounce.rng;
+               
             }
         }
         else
@@ -2740,11 +3138,11 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
 
                 if (brdfRayMissedEnvironment)
                 {
-                    if (!EnvBrdfEnvironmentContributionEnabled(false, roughness))
+                    if (!EnvBrdfEnvironmentContributionEnabled(false, materialRoughness))
                     {
                         bounce.color = 0.0f.xxx;
                     }
-                    else if (EnvBrdfEnvironmentMisEnabled(false, roughness, samplingDebugView))
+                    else if (EnvBrdfEnvironmentMisEnabled(false, materialRoughness, samplingDebugView))
                     {
                         float pdfBrdf =
                             pDiffuseSafe *
@@ -2835,7 +3233,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
             if (envDbg.valid)
             {
                 bool allowSpecEnvNee =
-                    roughness >= RtEnvDeltaRoughnessCutoff;
+                    materialRoughness >= RtEnvDeltaRoughnessCutoff;
 
                 float pdfDiffuse =
                     pDiffuseSafe *
@@ -2846,7 +3244,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
                 float pdfSpec = allowSpecEnvNee
                     ? pSpecSafe *
                         PdfSpecularGGXBrdf(
-                            roughness,
+                            shadingRoughness,
                             worldNormal,
                             V,
                             envDbg.wi)
@@ -2922,7 +3320,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     PbrSplit directSplit = EvalDirectPbrSplit(
         base,
         metallic,
-        roughness,
+        shadingRoughness,
         worldNormal,
         V,
         L);
@@ -2935,7 +3333,7 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     PbrSplit pointSplit = EvalPointLightsPbrSplitAtSurface(
         base,
         metallic,
-        roughness,
+        shadingRoughness,
         worldNormal,
         V,
         worldPos);
@@ -2946,15 +3344,32 @@ void ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttribut
     float3 ambient =
         base * 0.03f * ao;
 
-    float3 envDiffuseTerm =
-        useEnvNeeForFinal
+    float3 envDiffuseTerm = 0.0f.xxx;
+    float3 envSpecTerm = 0.0f.xxx;
+
+    if (RestirOwnsDirectEnvironment())
+    {
+        // ReSTIR resolve owns diffuse and non-delta specular environment lighting.
+        envDiffuseTerm = 0.0f.xxx;
+
+        // Preserve only the near-delta primary specular fallback.
+        envSpecTerm =
+            materialRoughness < RtRestirDeltaRoughnessCutoff
+                ? iblSpecular
+                : 0.0f.xxx;
+    }
+    else
+    {
+        envDiffuseTerm =
+            useEnvNeeForFinal
             ? envNeeDiffuse
             : iblDiffuse;
 
-    float3 envSpecTerm =
-        useEnvNeeForFinal
+        envSpecTerm =
+            useEnvNeeForFinal
             ? envNeeSpec
             : iblSpecular;
+    }
 
     float3 sampleDiffuse =
         ambient +

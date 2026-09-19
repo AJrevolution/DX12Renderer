@@ -189,6 +189,15 @@
     <ClInclude Include="Source\Renderer\Passes\SkyboxPass.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\RtRestirComposeCurrentPass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Renderer\RtRestirGpuProfiler.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Renderer\Passes\RtRestirMetricsPass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Window.cpp">
@@ -329,6 +338,15 @@
     <ClCompile Include="Source\Renderer\Passes\SkyboxPass.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\RtRestirComposeCurrentPass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Renderer\RtRestirGpuProfiler.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Renderer\Passes\RtRestirMetricsPass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -339,6 +357,11 @@
     <None Include="Assets\Shaders\HLSL\MaterialSampling.hlsli" />
     <None Include="Assets\Shaders\HLSL\MaterialConstants.hlsli" />
     <None Include="Assets\Scenes\default_scene.json" />
+    <None Include="Assets\Shaders\HLSL\RtRestirEnvironment.hlsli" />
+    <None Include="Assets\Shaders\HLSL\RtRestirTarget.hlsli" />
+    <None Include="Assets\Shaders\HLSL\RtRestirRejection.hlsli" />
+    <None Include="Assets\Shaders\HLSL\RtRestirReceiver.hlsli" />
+    <None Include="Assets\Shaders\HLSL\RtPrimaryJitter.hlsli" />
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="Assets\Shaders\HLSL\Triangle_VS.hlsl">
@@ -370,5 +393,7 @@
     <CustomBuild Include="Assets\Shaders\HLSL\Shadow_FS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\Skybox_PS.hlsl" />
     <CustomBuild Include="Assets\Shaders\HLSL\Skybox_VS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\RtRestirComposeCurrent_CS.hlsl" />
+    <CustomBuild Include="Assets\Shaders\HLSL\RtRestirMetrics_CS.hlsl" />
   </ItemGroup>
 </Project>

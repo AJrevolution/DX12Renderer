@@ -109,6 +109,8 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
     //Command Queue
     m_graphicsQueue.Initialize(m_device.GetDevice(), D3D12_COMMAND_LIST_TYPE_DIRECT);
 
+    const uint64_t graphicsTimestampFrequency = m_graphicsQueue.GetTimestampFrequency();
+
     //Timing
     m_frameTimer.Initialize(m_device.GetDevice(), kFrameCount);
 
@@ -131,7 +133,7 @@ bool Application::Initialize(uint32_t width, uint32_t height, const wchar_t* tit
         CommandList::SetGlobalState(m_swapChain.GetBuffer(i), D3D12_RESOURCE_STATE_PRESENT);
     }
     
-    m_renderer.Initialize(m_device.GetDevice(), m_swapChain.GetFormat(), kFrameCount);
+    m_renderer.Initialize(m_device.GetDevice(), m_swapChain.GetFormat(), kFrameCount, graphicsTimestampFrequency);
 
     
     //Called once swapchain has stored initial window size to ensure DepthBuffer matches
@@ -215,6 +217,8 @@ void Application::HandleDebugInput()
     // 0  = final shaded output
     // Q = dump current camera as manifest camera JSON
 	// R = toggle RT accumulation on/off in Raytrace mode
+    // V = cycle ReSTIR validation mode
+    // M = cycle ReSTIR metrics capture point
     // F1: Reload scene authoring fields from default_scene.json
     // F6 = previous selectable debug view
     // F7 = next selectable debug view
@@ -223,7 +227,7 @@ void Application::HandleDebugInput()
 
     if (m_window.ConsumeKeyPress('0'))
     {
-        if (m_renderer.SetDebugView(0))
+        if (SetRendererDebugViewGpuSafe(0))
         {
             LogSelectedDebugView(m_renderer);
         }
@@ -273,6 +277,21 @@ void Application::HandleDebugInput()
         DebugOutput(std::format(
             "RT accumulation {}",
             m_renderer.IsRtAccumulationEnabled() ? "enabled" : "disabled"));
+    }
+
+    if (m_window.ConsumeKeyPress('V'))
+    {
+        // Validation-mode changes can lazily materialize or change the
+        // active interpretation of shared ReSTIR DXR UAV descriptors.
+        // Synchronize all frames before the transition.
+        m_graphicsQueue.Flush();
+
+        m_renderer.CycleRtRestirValidationMode();
+    }
+
+    if (m_window.ConsumeKeyPress('M'))
+    {
+        m_renderer.CycleRtRestirMetricsCapturePoint();
     }
 }
 
@@ -403,7 +422,7 @@ void Application::SelectRelativeDebugView(int direction)
         if (!m_renderer.IsDebugViewSelectable(candidate.id))
             continue;
 
-        if (m_renderer.SetDebugView(candidate.id))
+        if (SetRendererDebugViewGpuSafe(candidate.id))
         {
             LogSelectedDebugView(m_renderer);
         }
@@ -496,4 +515,24 @@ void Application::Render()
     m_frameTimer.Resolve(m_cmdList.Get(), m_frameIndex);
 
     EndFrame();
+}
+
+bool Application::SetRendererDebugViewGpuSafe(
+    uint32_t id)
+{
+    if (m_renderer.GetDebugView() == id)
+        return true;
+
+    if (!m_renderer.IsDebugViewSelectable(id))
+        return false;
+
+    // Renderer owns a single shader-visible DXR UAV table shared by
+    // multiple frames in flight. A debug-view change may lazily
+    // materialize ReSTIR UAV resources and overwrite u9-u16.
+    //
+    // Ensure no previously submitted command list can still reference
+    // the old descriptor contents before allowing that transition.
+    m_graphicsQueue.Flush();
+
+    return m_renderer.SetDebugView(id);
 }

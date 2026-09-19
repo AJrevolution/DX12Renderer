@@ -28,6 +28,7 @@ private:
     void SelectRelativeDebugView(int direction);
     void BeginFrame();
     void EndFrame();
+    bool SetRendererDebugViewGpuSafe(uint32_t id);
 
 private:
     static constexpr uint32_t kFrameCount = 3;

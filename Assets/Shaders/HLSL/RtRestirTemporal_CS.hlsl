@@ -1,12 +1,17 @@
 #include "Common.hlsli"
 #include "RtReservoir.hlsli"
+#include "RtRestirEnvironment.hlsli"
+#include "RtRestirTarget.hlsli"
+#include "RtRestirRejection.hlsli"
+#include "RtPrimaryJitter.hlsli"
 
 // RT DebugView ownership for this pass:
 //   106 = previous-frame reservoir reuse accepted mask
 //   107 = R: normalized M, G: normalized age, B: reuse confidence
+//   118 = temporal rejection reasons
 
-StructuredBuffer<RtRestirReservoir> g_CurrInitialReservoir : register(t0);
-StructuredBuffer<RtRestirReservoir> g_PrevTemporalReservoir : register(t1);
+StructuredBuffer<RtRestirEnvReservoirPacked> g_CurrScratchReservoir : register(t0);
+StructuredBuffer<RtRestirEnvReservoirPacked> g_PrevTemporalReservoir : register(t1);
 
 Texture2D<float4> g_CurrNormal : register(t2);
 Texture2D<float> g_CurrDepth : register(t3);
@@ -19,8 +24,15 @@ Texture2D<float> g_PrevDepth : register(t8);
 Texture2D<float> g_PrevViewZ : register(t9);
 Texture2D<uint> g_PrevSurfaceId : register(t10);
 
-RWStructuredBuffer<RtRestirReservoir> g_OutTemporalReservoir : register(u0);
+Texture2D<float4> g_CurrDiffuseAlbedo : register(t11);
+Texture2D<float4> g_CurrSpecularF0 : register(t12);
+Texture2D<float4> g_RestirEnvironmentRadiance : register(t13);
+Texture2D<float4> g_CurrRestirReceiver : register(t14);
+
+RWStructuredBuffer<RtRestirEnvReservoirPacked> g_OutTemporalReservoir : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
+RWTexture2D<float> g_OutTemporalConfidence : register(u2);
+RWTexture2D<uint> g_OutRejectionReason : register(u3);
 
 static const uint SURFACE_ID_INVALID = 0xFFFFFFFFu;
 
@@ -50,6 +62,19 @@ cbuffer RtRestirTemporalConstants : register(b0)
 
     uint MathMode;
     uint3 _padMath;
+    
+    // Receiver reconstruction and exact-target evaluation.
+    row_major float4x4 InverseViewProjection;
+
+    float DeltaRoughnessCutoff;
+    uint PrimarySampleIndex;
+    uint PrimaryResetId;
+    uint PrimaryJitterEnabled;
+
+    uint HasEnvironmentRadiance;
+    float LightingIntensity;
+    float LightingRotationRadians;
+    uint EnvironmentFaceSize;
 };
 
 uint HashUintRtRestir(uint x)
@@ -83,27 +108,142 @@ bool SurfaceIdValid(uint id)
     return id != SURFACE_ID_INVALID;
 }
 
-bool CurrentGuideValid(uint2 pixel)
+RtRestirReceiver LoadTemporalReceiver(
+    uint2 pixel)
 {
-    const uint surfaceId = g_CurrSurfaceId[pixel];
-    const float depth = g_CurrDepth[pixel];
-    const float viewZ = g_CurrViewZ[pixel];
+    RtRestirReceiver receiver;
 
-    return
-        SurfaceIdValid(surfaceId) &&
-        depth < 0.9999f &&
-        DistanceValid(viewZ);
+    const float4 receiverNormalRoughness =
+        g_CurrRestirReceiver[pixel];
+
+    const float4 diffuseAlbedo =
+        g_CurrDiffuseAlbedo[pixel];
+
+    const float4 specularF0 =
+        g_CurrSpecularF0[pixel];
+
+    receiver.normal =
+        SafeNormalize(
+            receiverNormalRoughness.xyz *
+            2.0f -
+            1.0f);
+
+    const float2 primaryJitter =
+        PrimaryJitterEnabled != 0u
+        ? RtPrimaryPixelJitter(
+            pixel,
+            PrimarySampleIndex,
+            PrimaryResetId)
+        : 0.0f.xx;
+
+    receiver.viewDirection =
+        ReconstructRestirPrimaryViewDirection(
+            pixel,
+            InvResolution,
+            primaryJitter,
+            InverseViewProjection);
+
+    receiver.diffuseAlbedo =
+        max(
+            diffuseAlbedo.rgb,
+            0.0f.xxx);
+
+    receiver.specularF0 =
+        max(
+            specularF0.rgb,
+            0.0f.xxx);
+
+    receiver.materialRoughness =
+        saturate(
+            receiverNormalRoughness.a);
+
+    receiver.shadingRoughness =
+        PbrShadingRoughnessFromMaterial(
+            receiver.materialRoughness);
+    
+    receiver.surfaceId =
+        g_CurrSurfaceId[pixel];
+
+    receiver.valid =
+        receiver.surfaceId !=
+            SURFACE_ID_INVALID &&
+        specularF0.a > 0.0f &&
+        RestirFinite3(receiver.normal) &&
+        RestirFinite3(receiver.viewDirection) &&
+        RestirFinite3(receiver.diffuseAlbedo) &&
+        RestirFinite3(receiver.specularF0)
+        ? 1u
+        : 0u;
+
+    receiver.specularEligible =
+        RestirSpecularEligibleFromAov(
+            receiver.materialRoughness,
+            DeltaRoughnessCutoff)
+        ? 1u
+        : 0u;
+
+    return receiver;
+}
+
+bool CurrentGuideValid(
+    uint2 pixel,
+    out uint rejectionReason)
+{
+    rejectionReason = 0u;
+
+    const uint surfaceId =
+        g_CurrSurfaceId[pixel];
+
+    const float depth =
+        g_CurrDepth[pixel];
+
+    const float viewZ =
+        g_CurrViewZ[pixel];
+
+    if (!SurfaceIdValid(surfaceId))
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_SURFACE_ID;
+    }
+
+    if (!RtReservoirFiniteScalar(depth) ||
+        depth >= 0.9999f)
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_DEPTH;
+    }
+
+    if (!DistanceValid(viewZ))
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_VIEWZ;
+    }
+
+    return rejectionReason == 0u;
 }
 
 bool EvaluateTemporalGuideWeight(
     uint2 currPixel,
     uint2 prevPixel,
-    out float reuseWeight)
+    out float reuseWeight,
+    out uint rejectionReason)
 {
+    rejectionReason = 0u;
     reuseWeight = 0.0f;
 
-    if (SurfaceIdHistoryValid == 0u || ViewZHistoryValid == 0u)
-        return false;
+    if (SurfaceIdHistoryValid == 0u)
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_INVALID_HISTORY |
+            RT_RESTIR_REJECT_SURFACE_ID;
+    }
+
+    if (ViewZHistoryValid == 0u)
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_INVALID_HISTORY |
+            RT_RESTIR_REJECT_VIEWZ;
+    }
 
     const uint currId = g_CurrSurfaceId[currPixel];
     const uint prevId = g_PrevSurfaceId[prevPixel];
@@ -112,20 +252,29 @@ bool EvaluateTemporalGuideWeight(
         !SurfaceIdValid(prevId) ||
         currId != prevId)
     {
-        return false;
+        rejectionReason |=
+            RT_RESTIR_REJECT_SURFACE_ID;
     }
 
     const float currDepth = g_CurrDepth[currPixel];
     const float prevDepth = g_PrevDepth[prevPixel];
 
-    if (currDepth >= 0.9999f || prevDepth >= 0.9999f)
-        return false;
+    if (!RtReservoirFiniteScalar(currDepth) ||
+        !RtReservoirFiniteScalar(prevDepth) ||
+        currDepth >= 0.9999f ||
+        prevDepth >= 0.9999f)
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_DEPTH;
+    }
 
     const float currViewZ = g_CurrViewZ[currPixel];
     const float prevViewZ = g_PrevViewZ[prevPixel];
 
     if (!DistanceValid(currViewZ) || !DistanceValid(prevViewZ))
-        return false;
+    {
+        rejectionReason |= RT_RESTIR_REJECT_VIEWZ;
+    }
 
     const float4 currNR = g_CurrNormal[currPixel];
     const float4 prevNR = g_PrevNormal[prevPixel];
@@ -133,10 +282,12 @@ bool EvaluateTemporalGuideWeight(
     const float3 prevNormal = UnpackNormal(prevNR);
     const float normalDot = saturate(dot(currNormal, prevNormal));
 
-    // SurfaceId is a hard identity gate. The remaining guide tests protect
-    // against animation, disocclusion, and large geometric changes within an ID.
-    if (normalDot < 0.95f)
-        return false;
+    if (!RtReservoirFiniteScalar(normalDot) ||
+            normalDot < 0.95f)
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_NORMAL;
+    }
 
     const float currRoughness = saturate(currNR.a);
     const float prevRoughness = saturate(prevNR.a);
@@ -173,6 +324,35 @@ bool EvaluateTemporalGuideWeight(
 
     const float viewZWeight =
         DistanceSimilarityWeight(currNormZ, prevNormZ, viewZSigma);
+    
+    if (!RtReservoirFiniteScalar(normalWeight))
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_NORMAL;
+    }
+
+    if (!RtReservoirFiniteScalar(depthWeight))
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_DEPTH;
+    }
+
+    if (!RtReservoirFiniteScalar(roughnessWeight))
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_ROUGHNESS;
+    }
+
+    if (!RtReservoirFiniteScalar(viewZWeight))
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_VIEWZ;
+    }
+
+    if (rejectionReason != 0u)
+    {
+        return false;
+    }
 
     reuseWeight =
         normalWeight *
@@ -180,49 +360,124 @@ bool EvaluateTemporalGuideWeight(
         roughnessWeight *
         viewZWeight;
 
-    return
-        RtReservoirFiniteScalar(reuseWeight) &&
-        reuseWeight > 0.0f;
+    if (!RtReservoirFiniteScalar(reuseWeight) ||
+            reuseWeight <= 0.0f)
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_CONFIDENCE;
+
+        reuseWeight = 0.0f;
+        return false;
+    }
+
+    return true;
 }
 
-bool RetargetPreviousReservoir(
-    inout RtRestirReservoir previous,
-    uint2 currPixel,
-    uint2 prevPixel,
-    out float currentTarget)
+bool EvaluatePreviousAtCurrentReceiver(
+    inout RtRestirEnvReservoirPacked previous,
+    uint2 currentPixel,
+    out RtRestirTargetEvaluation evaluation,
+    out float sourceToReceiverRatio)
 {
-    currentTarget = 0.0f;
+    evaluation =
+        RestirZeroTarget();
+
+    sourceToReceiverRatio =
+        0.0f;
 
     if (!ReservoirFinalizedValid(previous))
         return false;
 
-    const float3 currNormal =
-        UnpackNormal(g_CurrNormal[currPixel]);
+    const RtRestirReceiver receiver =
+        LoadTemporalReceiver(
+            currentPixel);
 
-    const float3 prevNormal =
-        UnpackNormal(g_PrevNormal[prevPixel]);
-
-    const float3 wi = SafeNormalize(previous.sampleDir_pdf.xyz);
-    const float currNoL = saturate(dot(currNormal, wi));
-    const float prevNoL = saturate(dot(prevNormal, wi));
-
-    if (currNoL <= 1.0e-4f || prevNoL <= 1.0e-4f)
+    if (receiver.valid == 0u)
         return false;
 
-    const float cosineRatio = currNoL / prevNoL;
+    const float3 wi =
+        DecodeRestirDirection(
+            previous.packedDirection);
 
-    // The hard normal/roughness/SurfaceId gates make this receiver-domain
-    // retarget conservative. SurfaceId includes object/material identity, while
-    // this ratio corrects the selected sample's dominant geometric target term.
-    if (!RtReservoirFiniteScalar(cosineRatio) ||
-        cosineRatio < 0.5f ||
-        cosineRatio > 2.0f)
+    const float3 Li =
+        SampleRestirEnvironmentRadiance(
+            g_RestirEnvironmentRadiance,
+            wi,
+            HasEnvironmentRadiance,
+            EnvironmentFaceSize,
+            LightingIntensity,
+            LightingRotationRadians);
+
+    evaluation =
+        EvaluateRestirEnvironmentTarget(
+            receiver,
+            wi,
+            Li);
+
+    if (evaluation.combinedTarget <=
+        RT_RESTIR_MIN_TARGET)
     {
         return false;
     }
 
-    currentTarget = ReservoirTarget(previous) * cosineRatio;
-    return ReservoirRetarget(previous, currentTarget);
+    sourceToReceiverRatio =
+        previous.selectedTarget /
+        max(
+            RT_RESTIR_MIN_TARGET,
+            evaluation.combinedTarget);
+
+    if (!ReservoirRetarget(
+            previous,
+            evaluation.combinedTarget,
+            receiver.surfaceId))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+float RestirTargetRatioConfidence(
+    float targetRatio)
+{
+    return exp(
+        -abs(
+            log2(
+                max(
+                    targetRatio,
+                    1.0e-4f))));
+}
+
+float ComputeTemporalRestirConfidence(
+    RtRestirEnvReservoirPacked reservoir,
+    float guideWeight,
+    float targetRatio)
+{
+    if (!ReservoirFinalizedValid(reservoir))
+        return 0.0f;
+
+    const float mConfidence =
+        saturate(
+            float(ReservoirM(reservoir)) /
+            max(1.0f, MaxM));
+
+    const float ageConfidence =
+        MaxAge > 0.0f
+        ? 1.0f -
+            saturate(
+                float(ReservoirAge(reservoir)) /
+                MaxAge)
+        : 1.0f;
+
+    const float ratioConfidence =
+        RestirTargetRatioConfidence(
+            targetRatio);
+
+    return saturate(
+        guideWeight *
+        lerp(0.35f, 1.0f, mConfidence) *
+        lerp(0.50f, 1.0f, ageConfidence) *
+        ratioConfidence);
 }
 
 float3 Heat(float v)
@@ -248,11 +503,45 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
 
     const uint pixelIndex = pixel.y * width + pixel.x;
-    const RtRestirReservoir current =
-        g_CurrInitialReservoir[pixelIndex];
+    const RtRestirReceiver currentReceiver =
+        LoadTemporalReceiver(pixel);
 
-    RtRestirReservoir outputReservoir;
+    const RtRestirEnvReservoirPacked current =
+        g_CurrScratchReservoir[pixelIndex];
+
+    RtRestirEnvReservoirPacked outputReservoir;
     ReservoirClear(outputReservoir);
+    
+    // An empty current reservoir can still represent candidate attempts with
+    // zero total weight. Seed output M with those attempts so that, if temporal
+    // history supplies a valid selected sample, final W is normalized by both
+    // the current zero-weight candidates and the reused history.
+    const uint currentRepresentedM =
+        ReservoirM(current);
+
+    if (!ReservoirFinalizedValid(current) &&
+        !ReservoirSampleValid(current) &&
+        currentReceiver.valid != 0u &&
+        currentRepresentedM > 0u)
+    {
+        ReservoirAddRepresentedZeroWeightM(
+            outputReservoir,
+            currentRepresentedM,
+            ReservoirAge(current),
+            ReservoirFlags(current),
+            MaxM);
+
+        outputReservoir.surfaceId = currentReceiver.surfaceId;
+    }
+
+    
+    uint rejectionReason = 0u;
+
+    if (currentReceiver.valid == 0u)
+    {
+        rejectionReason |=
+            RT_RESTIR_REJECT_RECEIVER;
+    }
 
     uint rng =
         HashUintRtRestir(
@@ -263,10 +552,19 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     bool usedPrevious = false;
 
+    // Defaults describe a valid current-frame-only reservoir:
+    // no guide disagreement and no target-ratio disagreement.
+    float confidenceGuideWeight = 1.0f;
+    float confidenceTargetRatio = 1.0f;
+
     if (ReservoirFinalizedValid(current))
     {
-        const float currentM =
-            max(1.0f, min(current.weightSum_M_W.y, MaxM));
+        const uint currentM =
+            max(
+                1u,
+                min(
+                    ReservoirM(current),
+                    uint(MaxM)));
 
         const float currentWeight =
             ReservoirReuseWeight(
@@ -274,83 +572,307 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
                 ReservoirTarget(current),
                 currentM);
 
-        ReservoirUpdateWeighted(
+        ReservoirUpdateWeightedTracked(
             outputReservoir,
             current,
             currentWeight,
             currentM,
             rng);
     }
+            
+    // Evaluate all applicable temporal-reuse conditions so debug 118 can
+    // contain multiple simultaneous rejection causes.
+    const bool historyAvailable =
+        TemporalEnabled != 0u &&
+        HistoryValid != 0u;
 
-    // A failed current environment candidate does not invalidate the visible
-    // surface. Stable previous history may still provide a valid candidate.
-    if (TemporalEnabled != 0u &&
-        HistoryValid != 0u &&
-        CurrentGuideValid(pixel))
+    if (!historyAvailable)
     {
-        const float2 prevUV = g_CurrPrevUV[pixel];
+        rejectionReason |=
+            RT_RESTIR_REJECT_INVALID_HISTORY;
+    }
 
-        if (PrevUVValid(prevUV))
+    uint currentGuideReason = 0u;
+
+    const bool currentGuideValid =
+        CurrentGuideValid(
+            pixel,
+            currentGuideReason);
+
+    rejectionReason |=
+        currentGuideReason;
+
+    if (historyAvailable)
+    {
+        const float2 prevUV =
+            g_CurrPrevUV[pixel];
+
+        const bool uvValid =
+            PrevUVValid(prevUV);
+
+        if (!uvValid)
+        {
+            rejectionReason |=
+                RT_RESTIR_REJECT_INVALID_UV;
+        }
+
+        if (uvValid)
         {
             const uint2 prevPixel =
                 min(
-                    uint2(prevUV * float2(width, height)),
-                    uint2(width - 1u, height - 1u));
+                    uint2(
+                        prevUV *
+                        float2(width, height)),
+                    uint2(
+                        width - 1u,
+                        height - 1u));
 
             const uint prevIndex =
-                prevPixel.y * width + prevPixel.x;
+                prevPixel.y * width +
+                prevPixel.x;
 
-            RtRestirReservoir previous =
+            RtRestirEnvReservoirPacked previous =
                 g_PrevTemporalReservoir[prevIndex];
 
-            float guideWeight = 0.0f;
-            float currentTarget = 0.0f;
+            const bool previousValid =
+                ReservoirFinalizedValid(previous);
 
-            if (ReservoirFinalizedValid(previous) &&
-                EvaluateTemporalGuideWeight(pixel, prevPixel, guideWeight) &&
-                guideWeight >= ReprojectMinWeight &&
-                float(previous.age) < MaxAge &&
-                RetargetPreviousReservoir(
-                    previous,
+            const uint previousRepresentedM = ReservoirM(previous);
+
+            const bool previousMOnly =
+                !previousValid &&
+                !ReservoirSampleValid(previous) &&
+                previousRepresentedM > 0u;
+
+            if (!previousValid && !previousMOnly)
+            {
+                rejectionReason |= RT_RESTIR_REJECT_INVALID_HISTORY;
+            }
+            
+            const bool previousAgeValid =
+                (previousValid || previousMOnly) &&
+                float(ReservoirAge(previous)) <
+                    MaxAge;
+
+            if ((previousValid || previousMOnly) && !previousAgeValid)
+            {
+                rejectionReason |= RT_RESTIR_REJECT_AGE;
+            }
+
+            float guideWeight = 0.0f;
+            uint guideReason = 0u;
+
+            const bool guideValid =
+                EvaluateTemporalGuideWeight(
                     pixel,
                     prevPixel,
-                    currentTarget))
+                    guideWeight,
+                    guideReason);
+
+            rejectionReason |=
+                guideReason;
+
+            const bool confidenceValid =
+                guideValid &&
+                RtReservoirFiniteScalar(guideWeight) &&
+                guideWeight >= ReprojectMinWeight;          
+
+            const bool previousMOnlyHistory =
+                previousMOnly &&
+                previousAgeValid;
+
+            if (previousMOnlyHistory &&
+                currentReceiver.valid != 0u &&
+                currentGuideValid &&
+                guideValid &&
+                confidenceValid)
             {
-                previous.flags |= RT_RESTIR_RESERVOIR_REPROJECTED;
-                previous.age = min(previous.age + 1u, 0xFFFFFFFEu);
-                previous.weightSum_M_W.w = guideWeight;
+                const uint carriedAge =
+                    min(
+                        ReservoirAge(previous) + 1u,
+                        RT_RESTIR_MAX_PACKED_AGE);
 
-                const float previousM =
-                    max(1.0f, min(previous.weightSum_M_W.y, MaxM));
+                ReservoirAddRepresentedZeroWeightM(
+                    outputReservoir,
+                    previousRepresentedM,
+                    carriedAge,
+                    ReservoirFlags(previous),
+                    MaxM);
+            }
 
-                // Guide confidence is a hard acceptance gate and debug/confidence signal.
-                // It must not scale the mathematical RIS weight.
+            if (!confidenceValid)
+            {
+                rejectionReason |=
+                    RT_RESTIR_REJECT_CONFIDENCE;
+            }
+
+            RtRestirTargetEvaluation evaluation =
+                RestirZeroTarget();
+
+            float sourceToReceiverRatio = 0.0f;
+
+            bool targetValid = false;
+
+            if (previousValid &&
+                currentReceiver.valid != 0u)
+            {
+                targetValid =
+                    EvaluatePreviousAtCurrentReceiver(
+                        previous,
+                        pixel,
+                        evaluation,
+                        sourceToReceiverRatio);
+
+                if (!targetValid)
+                {
+                    rejectionReason |=
+                        RT_RESTIR_REJECT_TARGET;
+                }
+            }
+
+            const bool reuseAccepted =
+                currentGuideValid &&
+                previousValid &&
+                previousAgeValid &&
+                guideValid &&
+                confidenceValid &&
+                targetValid;
+
+            if (reuseAccepted)
+            {
+                const uint previousAge =
+                    min(
+                        ReservoirAge(previous) + 1u,
+                        RT_RESTIR_MAX_PACKED_AGE);
+
+                const uint previousFlags =
+                    ReservoirFlags(previous) |
+                    RT_RESTIR_RESERVOIR_REPROJECTED;
+
+                ReservoirSetState(
+                    previous,
+                    ReservoirM(previous),
+                    previousAge,
+                    previousFlags);
+
+                const uint previousM =
+                    max(
+                        1u,
+                        min(
+                            ReservoirM(previous),
+                            uint(MaxM)));
+
                 const float previousWeight =
                     ReservoirReuseWeight(
                         previous,
-                        currentTarget,
+                        evaluation.combinedTarget,
                         previousM);
-                
-                const RtReservoirUpdateResult updateResult =
-                    ReservoirUpdateWeightedTracked(
-                        outputReservoir,
-                        previous,
-                        previousWeight,
-                        previousM,
-                        rng);
-                
-                usedPrevious =
-                    updateResult.accepted != 0u;
+
+                if (!RtReservoirFiniteScalar(
+                    previousWeight) || previousWeight <= 0.0f)
+                {
+                    rejectionReason |= RT_RESTIR_REJECT_TARGET;
+                }
+                else
+                {
+                    // Guide confidence controls reuse eligibility and diagnostics;
+                    // it does not scale represented energy.
+                    const RtReservoirUpdateResult updateResult =
+                        ReservoirUpdateWeightedTracked(
+                            outputReservoir,
+                            previous,
+                            previousWeight,
+                            previousM,
+                            rng);
+
+                    if (updateResult.accepted != 0u)
+                    {
+                        // Debug 106 indicates that temporal history participated.
+                        usedPrevious = true;
+
+                        // Age advances whenever temporal history participates,
+                        // regardless of which sample RIS ultimately selects.
+                        const uint temporalFlags =
+                            ReservoirFlags(outputReservoir) |
+                            RT_RESTIR_RESERVOIR_REPROJECTED;
+
+                        ReservoirSetState(
+                            outputReservoir,
+                            ReservoirM(outputReservoir),
+                            previousAge,
+                            temporalFlags);
+                    }
+
+                    if (updateResult.selected != 0u)
+                    {
+                        // Confidence describes the sample selected by RIS.
+                        confidenceGuideWeight =
+                            saturate(guideWeight);
+
+                        confidenceTargetRatio =
+                            sourceToReceiverRatio;
+                    }
+                }
             }
         }
     }
+    
+    // Preserve M-only state across frames. A reservoir with represented M but
+    // no selected sample is intentionally not finalized-valid, but its zero-weight
+    // candidate attempts still belong in future temporal normalization.
+    const bool hadSampleBeforeFinalize = ReservoirSampleValid(outputReservoir);
 
-    ReservoirFinalize(outputReservoir, MaxM, MaxWeight, MathMode);
+    const uint representedMBeforeFinalize = ReservoirM(outputReservoir);
+
+    const uint representedAgeBeforeFinalize = ReservoirAge(outputReservoir);
+
+    const uint representedFlagsBeforeFinalize = ReservoirFlags(outputReservoir);
+
+    ReservoirFinalize(
+        outputReservoir,
+        MaxM,
+        MaxWeight,
+        MathMode);
 
     if (!ReservoirFinalizedValid(outputReservoir))
+    {
         ReservoirClear(outputReservoir);
 
-    g_OutTemporalReservoir[pixelIndex] = outputReservoir;
+        if (!hadSampleBeforeFinalize &&
+            currentReceiver.valid != 0u &&
+            representedMBeforeFinalize > 0u)
+        {
+            ReservoirSetState(
+                outputReservoir,
+                representedMBeforeFinalize,
+                representedAgeBeforeFinalize,
+                representedFlagsBeforeFinalize &
+                    RT_RESTIR_RESERVOIR_CLAMP_MASK);
+
+            outputReservoir.surfaceId = currentReceiver.surfaceId;
+        }
+    }
+
+    if (ReservoirFinalizedValid(outputReservoir))
+    {
+        outputReservoir.surfaceId =
+            currentReceiver.surfaceId;
+    }
+
+    const float temporalConfidence =
+        ComputeTemporalRestirConfidence(
+            outputReservoir,
+            confidenceGuideWeight,
+            confidenceTargetRatio);
+
+    g_OutTemporalReservoir[pixelIndex] =
+        outputReservoir;
+
+    g_OutTemporalConfidence[pixel] =
+        temporalConfidence;
+
+    g_OutRejectionReason[pixel] =
+        rejectionReason;
 
     if (DebugView == 106u)
     {
@@ -359,18 +881,36 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
     else if (DebugView == 107u)
     {
-        const bool valid = ReservoirFinalizedValid(outputReservoir);
-        const float normalizedM = valid
-            ? saturate(outputReservoir.weightSum_M_W.y / max(1.0f, MaxM))
-            : 0.0f;
-        const float normalizedAge = valid && MaxAge > 0.0f
-            ? saturate(float(outputReservoir.age) / MaxAge)
-            : 0.0f;
-        const float confidence = valid
-            ? saturate(outputReservoir.weightSum_M_W.w)
-            : 0.0f;
+        const bool valid =
+            ReservoirFinalizedValid(outputReservoir);
 
+        const float normalizedM =
+            valid
+                ? saturate(
+                    float(ReservoirM(outputReservoir)) /
+                    max(1.0f, MaxM))
+                : 0.0f;
+
+        const float normalizedAge =
+            valid && MaxAge > 0.0f
+                ? saturate(
+                    float(ReservoirAge(outputReservoir)) /
+                    MaxAge)
+                : 0.0f;
+
+        const float confidence =
+            valid
+                ? temporalConfidence
+                : 0.0f;
+
+        g_Output[pixel] = float4(normalizedM, normalizedAge, confidence, 1.0f);
+    }
+    else if (DebugView == 118u)
+    {
         g_Output[pixel] =
-            float4(normalizedM, normalizedAge, confidence, 1.0f);
+            float4(
+                RestirRejectionDebugColor(
+                    rejectionReason),
+                1.0f);
     }
 }

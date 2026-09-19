@@ -48,6 +48,7 @@ Texture2D<float> g_PrevViewZ : register(t10);
 Texture2D<float> g_PrevViewZConf : register(t11);
 Texture2D<uint> g_CurrSurfaceId : register(t12);
 Texture2D<uint> g_PrevSurfaceId : register(t13);
+Texture2D<float> g_RestirConfidence : register(t14);
 
 RWTexture2D<float4> g_HistoryOut : register(u0); // linear
 RWTexture2D<float4> g_Output : register(u1); // display
@@ -124,6 +125,10 @@ cbuffer RtTemporalConstants : register(b0)
     float MinStableHistoryForClamp;
     float ConfidenceDebugScale;
     float _padShape0;
+    
+    uint EnableRestirConfidence;
+    float RestirConfidenceFloor;
+    uint2 _padRestirConfidence;
 };
 
 float3 UnpackNormal(float4 packed)
@@ -485,7 +490,7 @@ void main(uint3 dtid : SV_DispatchThreadID)
     
     uint currSurfaceId = g_CurrSurfaceId[pixel];
     
-    float signalConfidence = validReuse ? 1.0f : 0.0f;
+    float signalConfidence = 0.0f;
     float signalColorConfidence = 0.0f;
     float antiLagAlphaMultiplier = 1.0f;
     float shapedHistoryLenDebug = 1.0f;
@@ -753,7 +758,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
         max(prevMoments.y - prevMoments.x * prevMoments.x, 0.0f);
     }
 
-    if (EnableSignalConfidence != 0u && validReuse)
+    if (EnableSignalConfidence != 0u &&
+        validReuse)
     {
         float currLumForConfidence = SafeLuminance(currColor);
         float prevLumForConfidence = SafeLuminance(prevClamped);
@@ -779,6 +785,29 @@ void main(uint3 dtid : SV_DispatchThreadID)
         signalColorConfidence = 0.0f;
     }
     
+    // If normal signal-confidence shaping is disabled, valid temporal reuse
+    // starts fully trusted before any optional ReSTIR confidence shaping.
+    if (EnableSignalConfidence == 0u)
+    {
+        signalConfidence =
+            validReuse
+            ? 1.0f
+            : 0.0f;
+    }
+
+    if (validReuse && EnableRestirConfidence != 0u)
+    {
+        const float restirConfidence =
+            saturate(
+                g_RestirConfidence[pixel]);
+
+        signalConfidence *=
+            lerp(
+                saturate(RestirConfidenceFloor),
+                1.0f,
+                restirConfidence);
+    }
+    
     if (validReuse)
     {
         float prevVar = max(prevMoments.y - prevMoments.x * prevMoments.x, 0.0f);
@@ -793,7 +822,8 @@ void main(uint3 dtid : SV_DispatchThreadID)
         newLen = min(prevLen + inc, 255.0f);
     }
 
-    if (EnableSignalConfidence != 0u)
+    if (EnableSignalConfidence != 0u ||
+        EnableRestirConfidence != 0u)
     {
         if (validReuse)
         {
@@ -856,27 +886,39 @@ void main(uint3 dtid : SV_DispatchThreadID)
             alphaUsed = saturate(alphaUsed * (1.0f + VarianceAlphaBoost * varNorm));
         }
         
-        if (EnableSignalConfidence != 0u && validReuse)
-        {
+        if (validReuse &&
+            (EnableSignalConfidence != 0u ||
+             EnableRestirConfidence != 0u))
+        {                       
             float baseAlpha = saturate(alphaUsed);
 
             // alphaUsed is history weight because final blend is:
             // history = lerp(currColor, prevClamped, alphaUsed)
             // Low confidence should therefore reduce history weight.
             float responsiveAlpha =
-                saturate(baseAlpha / (1.0f + ResponsiveAlphaBoost * (1.0f - signalConfidence)));
+                saturate(
+                    baseAlpha /
+                    (1.0f +
+                        ResponsiveAlphaBoost *
+                        (1.0f - signalConfidence)));
 
             float stableAlpha =
-                lerp(responsiveAlpha, baseAlpha, signalConfidence);
+                lerp(
+                    responsiveAlpha,
+                    baseAlpha,
+                    signalConfidence);
 
             float shapedAlpha =
-            lerp(
-                stableAlpha,
-                responsiveAlpha,
-                saturate(AntiLagStrength * (1.0f - signalConfidence)));
+                lerp(
+                    stableAlpha,
+                    responsiveAlpha,
+                    saturate(
+                        AntiLagStrength *
+                        (1.0f - signalConfidence)));
 
             antiLagAlphaMultiplier =
-                shapedAlpha / max(baseAlpha, 1e-4f);
+                shapedAlpha /
+                max(baseAlpha, 1e-4f);
 
             alphaUsed = shapedAlpha;
         }

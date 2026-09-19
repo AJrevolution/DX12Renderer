@@ -40,6 +40,97 @@ struct PbrInputs
     float roughness;
 };
 
+float PbrShadingRoughnessFromMaterial(
+    float materialRoughness)
+{
+    return max(
+        0.045f,
+        saturate(materialRoughness));
+}
+
+struct PbrEnvironmentBrdfSplit
+{
+    float3 diffuse;
+    float3 specular;
+};
+
+PbrEnvironmentBrdfSplit
+EvaluateEnvironmentBrdfSplit(
+    float3 diffuseAlbedo,
+    float3 specularF0,
+    float shadingRoughness,
+    float3 N,
+    float3 V,
+    float3 L)
+{
+    PbrEnvironmentBrdfSplit result;
+    result.diffuse = 0.0f.xxx;
+    result.specular = 0.0f.xxx;
+
+    N = SafeNormalize(N);
+    V = SafeNormalize(V);
+    L = SafeNormalize(L);
+
+    const float NoL =
+        saturate(dot(N, L));
+
+    const float NoV =
+        saturate(dot(N, V));
+
+    if (NoL <= 1.0e-4f ||
+        NoV <= 1.0e-4f)
+    {
+        return result;
+    }
+
+    const float3 H =
+        SafeNormalize(V + L);
+
+    const float NoH =
+        saturate(dot(N, H));
+
+    const float VoH =
+        saturate(dot(V, H));
+
+    if (NoH <= 1.0e-4f ||
+        VoH <= 1.0e-4f)
+    {
+        return result;
+    }
+
+    const float roughness =
+        saturate(shadingRoughness);
+
+    const float3 F =
+        F_Schlick(
+            VoH,
+            saturate(specularF0));
+
+    const float D =
+        D_GGX(
+            NoH,
+            roughness);
+
+    const float G =
+        G_Smith(
+            NoV,
+            NoL,
+            roughness);
+
+    result.diffuse =
+        (1.0f.xxx - F) *
+        max(diffuseAlbedo, 0.0f.xxx) /
+        PI;
+
+    result.specular =
+        (D * G * F) /
+        max(
+            1.0e-4f,
+            4.0f * NoV * NoL);
+
+    return result;
+}
+
 #ifndef MAX_POINT_LIGHTS
 #define MAX_POINT_LIGHTS 8
 #endif

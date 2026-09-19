@@ -8,21 +8,39 @@ static const uint RT_RESTIR_RESERVOIR_VISIBLE = 1u << 1;
 static const uint RT_RESTIR_RESERVOIR_FALLBACK = 1u << 2;
 static const uint RT_RESTIR_RESERVOIR_REPROJECTED = 1u << 3;
 static const uint RT_RESTIR_RESERVOIR_SPATIAL = 1u << 4;
+static const uint RT_RESTIR_RESERVOIR_M_CLAMPED = 1u << 5;
+static const uint RT_RESTIR_RESERVOIR_W_CLAMPED = 1u << 6;
+static const uint RT_RESTIR_RESERVOIR_TARGET_EXACT = 1u << 7;
+
+static const uint RT_RESTIR_RESERVOIR_CLAMP_MASK =
+    RT_RESTIR_RESERVOIR_M_CLAMPED |
+    RT_RESTIR_RESERVOIR_W_CLAMPED;
 
 static const uint RT_RESTIR_MATH_REFERENCE = 0u;
 static const uint RT_RESTIR_MATH_ROBUST = 1u;
 
+static const uint RT_RESTIR_M_MASK = 0x00000FFFu;
+static const uint RT_RESTIR_AGE_MASK = 0x000FF000u;
+static const uint RT_RESTIR_FLAGS_MASK = 0x0FF00000u;
+
+static const uint RT_RESTIR_MAX_PACKED_M = 4095u;
+static const uint RT_RESTIR_MAX_PACKED_AGE = 255u;
+
 static const float RT_RESTIR_MIN_PDF = 1.0e-8f;
 static const float RT_RESTIR_MIN_TARGET = 1.0e-8f;
 
-struct RtRestirReservoir
+struct RtRestirEnvReservoirPacked
 {
-    float4 sampleDir_pdf; // xyz = world-space wi, w = source solid-angle PDF
-    float4 sampleLi_target; // xyz = lighting-environment Li, w = target luminance
-    float4 weightSum_M_W; // x = weightSum, y = M, z = final W, w = confidence
-    uint sampleIndex; // environment alias-table/debug index
-    uint flags;
-    uint age;
+    uint packedDirection;
+    uint sampleIndex;
+
+    float sourcePdf;
+    float selectedTarget;
+
+    float weightSum;
+    float finalWeight;
+
+    uint packedState;
     uint surfaceId;
 };
 
@@ -38,9 +56,175 @@ uint RtReservoirLcg(inout uint s)
     return s;
 }
 
-float RtReservoirRand01(inout uint s)
+float RtReservoirRand01(inout uint state)
 {
-    return (RtReservoirLcg(s) & 0x00FFFFFFu) / 16777216.0f;
+    return float(RtReservoirLcg(state) & 0x00FFFFFFu) / 16777216.0f;
+}
+
+float2 RestirSignNotZero(float2 value)
+{
+    return float2(
+        value.x >= 0.0f ? 1.0f : -1.0f,
+        value.y >= 0.0f ? 1.0f : -1.0f);
+}
+
+uint PackRestirDirection(float3 direction)
+{
+    float3 n =
+        SafeNormalize(direction);
+
+    n /=
+        max(
+            abs(n.x) +
+            abs(n.y) +
+            abs(n.z),
+            1.0e-8f);
+
+    float2 oct = n.xy;
+
+    if (n.z < 0.0f)
+    {
+        oct =
+            (1.0f.xx - abs(oct.yx)) *
+            RestirSignNotZero(oct);
+    }
+
+    const int2 encoded =
+        int2(
+            round(
+                clamp(
+                    oct,
+                    -1.0f.xx,
+                    1.0f.xx) *
+                32767.0f));
+
+    return
+        (uint(encoded.x) & 0xFFFFu) |
+        ((uint(encoded.y) & 0xFFFFu) << 16u);
+}
+
+float3 DecodeRestirDirection(uint packed)
+{
+    const int encodedX =
+        (int) (packed << 16u) >> 16;
+
+    const int encodedY =
+        (int) packed >> 16;
+
+    const float2 oct =
+        float2(
+            encodedX,
+            encodedY) /
+        32767.0f;
+
+    float3 direction =
+        float3(
+            oct,
+            1.0f -
+            abs(oct.x) -
+            abs(oct.y));
+
+    if (direction.z < 0.0f)
+    {
+        direction.xy =
+            (1.0f.xx -
+                abs(direction.yx)) *
+            RestirSignNotZero(
+                direction.xy);
+    }
+
+    return SafeNormalize(direction);
+}
+
+uint ReservoirM(
+    RtRestirEnvReservoirPacked reservoir)
+{
+    return
+        reservoir.packedState &
+        RT_RESTIR_M_MASK;
+}
+
+uint ReservoirAge(
+    RtRestirEnvReservoirPacked reservoir)
+{
+    return
+        (reservoir.packedState >> 12u) &
+        0xFFu;
+}
+
+uint ReservoirFlags(
+    RtRestirEnvReservoirPacked reservoir)
+{
+    return
+        (reservoir.packedState >> 20u) &
+        0xFFu;
+}
+
+void ReservoirSetState(
+    inout RtRestirEnvReservoirPacked reservoir,
+    uint M,
+    uint age,
+    uint flags)
+{
+    reservoir.packedState =
+        min(M, RT_RESTIR_MAX_PACKED_M) |
+        (min(age, RT_RESTIR_MAX_PACKED_AGE) << 12u) |
+        ((flags & 0xFFu) << 20u);
+}
+
+void ReservoirAddRepresentedZeroWeightM(
+    inout RtRestirEnvReservoirPacked reservoir,
+    uint additionalM,
+    uint representedAge,
+    uint representedFlags,
+    float maxM)
+{
+    if (additionalM == 0u)
+        return;
+
+    const uint oldM =
+        ReservoirM(reservoir);
+
+    const uint effectiveMaxM =
+        min(
+            uint(max(1.0f, maxM)),
+            RT_RESTIR_MAX_PACKED_M);
+
+    const uint proposedM =
+        oldM + additionalM;
+
+    const uint storedM =
+        min(
+            proposedM,
+            effectiveMaxM);
+
+    // Preserve the represented average weight when M is capped.
+    if (storedM < proposedM &&
+        reservoir.weightSum > 0.0f)
+    {
+        reservoir.weightSum *=
+            float(storedM) /
+            float(proposedM);
+    }
+
+    uint flags =
+        ReservoirFlags(reservoir) |
+        (representedFlags &
+            RT_RESTIR_RESERVOIR_CLAMP_MASK);
+
+    if (storedM < proposedM)
+    {
+        flags |=
+            RT_RESTIR_RESERVOIR_M_CLAMPED;
+    }
+
+    ReservoirSetState(
+        reservoir,
+        storedM,
+        max(
+            ReservoirAge(reservoir),
+            representedAge),
+        flags);
 }
 
 bool RtReservoirFiniteScalar(float v)
@@ -64,100 +248,117 @@ bool RtReservoirFiniteFloat4(float4 value)
         RtReservoirFiniteScalar(value.z) &&
         RtReservoirFiniteScalar(value.w);
 }
-
-bool ReservoirSampleValid(RtRestirReservoir reservoir)
+bool ReservoirSampleValid(
+    RtRestirEnvReservoirPacked reservoir)
 {
-    const float directionLengthSq =
-        dot(reservoir.sampleDir_pdf.xyz, reservoir.sampleDir_pdf.xyz);
+    const uint flags =
+        ReservoirFlags(reservoir);
 
     return
-        (reservoir.flags & RT_RESTIR_RESERVOIR_VALID) != 0u &&
-        RtReservoirFiniteFloat4(reservoir.sampleDir_pdf) &&
-        RtReservoirFiniteFloat4(reservoir.sampleLi_target) &&
-        directionLengthSq > RT_RESTIR_MIN_PDF &&
-        reservoir.sampleDir_pdf.w > RT_RESTIR_MIN_PDF &&
-        reservoir.sampleLi_target.w > RT_RESTIR_MIN_TARGET;
+        (flags &
+            RT_RESTIR_RESERVOIR_VALID) != 0u &&
+        RtReservoirFiniteScalar(
+            reservoir.sourcePdf) &&
+        RtReservoirFiniteScalar(
+            reservoir.selectedTarget) &&
+        reservoir.sourcePdf >
+            RT_RESTIR_MIN_PDF &&
+        reservoir.selectedTarget >
+            RT_RESTIR_MIN_TARGET;
 }
 
-// Temporal history, spatial history, resolve, and debug inspection must only
-// consume finalized reservoirs. Raw candidates have weightSum == 0 and W == 0.
 bool ReservoirFinalizedValid(
-    RtRestirReservoir reservoir)
+    RtRestirEnvReservoirPacked reservoir)
 {
     return
         ReservoirSampleValid(reservoir) &&
-        RtReservoirFiniteFloat4(reservoir.weightSum_M_W) &&
-        reservoir.weightSum_M_W.x > 0.0f &&
-        reservoir.weightSum_M_W.y > 0.0f &&
-        reservoir.weightSum_M_W.z > 0.0f &&
-        reservoir.weightSum_M_W.w >= 0.0f;
+        RtReservoirFiniteScalar(
+            reservoir.weightSum) &&
+        RtReservoirFiniteScalar(
+            reservoir.finalWeight) &&
+        reservoir.weightSum > 0.0f &&
+        reservoir.finalWeight > 0.0f &&
+        ReservoirM(reservoir) > 0u;
 }
 
-void ReservoirClear(out RtRestirReservoir r)
+void ReservoirClear(
+    out RtRestirEnvReservoirPacked reservoir)
 {
-    r.sampleDir_pdf = 0.0f.xxxx;
-    r.sampleLi_target = 0.0f.xxxx;
-    r.weightSum_M_W = 0.0f.xxxx;
-    r.sampleIndex = 0u;
-    r.flags = 0u;
-    r.age = 0u;
-    r.surfaceId = 0xFFFFFFFFu;
+    reservoir.packedDirection = 0u;
+    reservoir.sampleIndex = 0u;
+
+    reservoir.sourcePdf = 0.0f;
+    reservoir.selectedTarget = 0.0f;
+
+    reservoir.weightSum = 0.0f;
+    reservoir.finalWeight = 0.0f;
+
+    reservoir.packedState = 0u;
+    reservoir.surfaceId = 0xFFFFFFFFu;
 }
 
-float ReservoirTarget(RtRestirReservoir reservoir)
+float ReservoirTarget(RtRestirEnvReservoirPacked reservoir)
 {
-    return RtReservoirFiniteScalar(reservoir.sampleLi_target.w)
-        ? max(0.0f, reservoir.sampleLi_target.w)
+    return
+        RtReservoirFiniteScalar(
+            reservoir.selectedTarget)
+        ? max(
+            0.0f,
+            reservoir.selectedTarget)
         : 0.0f;
 }
 
 float ReservoirSourcePdf(
-    RtRestirReservoir reservoir)
+    RtRestirEnvReservoirPacked reservoir)
 {
-    return RtReservoirFiniteScalar(
-        reservoir.sampleDir_pdf.w)
-        ? max(0.0f, reservoir.sampleDir_pdf.w)
+    return
+        RtReservoirFiniteScalar(
+            reservoir.sourcePdf)
+        ? max(
+            0.0f,
+            reservoir.sourcePdf)
         : 0.0f;
 }
 
-float ReservoirCandidateWeight(float targetLuminance, float sourcePdf)
+float ReservoirCandidateWeight(
+    float target,
+    float sourcePdf)
 {
-    if (!RtReservoirFiniteScalar(targetLuminance) ||
+    if (!RtReservoirFiniteScalar(target) ||
         !RtReservoirFiniteScalar(sourcePdf) ||
-        targetLuminance <= RT_RESTIR_MIN_TARGET ||
+        target <= RT_RESTIR_MIN_TARGET ||
         sourcePdf <= RT_RESTIR_MIN_PDF)
     {
         return 0.0f;
     }
 
-    const float weight = targetLuminance / sourcePdf;
-    return RtReservoirFiniteScalar(weight) && weight > 0.0f
+    const float weight =
+        target / sourcePdf;
+
+    return
+        RtReservoirFiniteScalar(weight) &&
+        weight > 0.0f
         ? weight
         : 0.0f;
 }
 
-// Converts a finalized source reservoir into a weighted candidate evaluated
-// at the receiving surface.
-//
-// This is source.W * source.M * targetAtReceiver.
 float ReservoirReuseWeight(
-    RtRestirReservoir reservoir,
+    RtRestirEnvReservoirPacked reservoir,
     float currentTarget,
-    float candidateM)
+    uint candidateM)
 {
     if (!ReservoirFinalizedValid(reservoir) ||
         !RtReservoirFiniteScalar(currentTarget) ||
-        !RtReservoirFiniteScalar(candidateM) ||
         currentTarget <= RT_RESTIR_MIN_TARGET ||
-        candidateM <= 0.0f)
+        candidateM == 0u)
     {
         return 0.0f;
     }
 
     const float weight =
-        reservoir.weightSum_M_W.z *
+        reservoir.finalWeight *
         currentTarget *
-        candidateM;
+        float(candidateM);
 
     return
         RtReservoirFiniteScalar(weight) &&
@@ -167,83 +368,90 @@ float ReservoirReuseWeight(
 }
 
 bool ReservoirRetarget(
-    inout RtRestirReservoir reservoir,
-    float currentTarget)
+    inout RtRestirEnvReservoirPacked reservoir,
+    float receiverTarget,
+    uint receiverSurfaceId)
 {
     if (!ReservoirFinalizedValid(reservoir) ||
-        !RtReservoirFiniteScalar(currentTarget) ||
-        currentTarget <= RT_RESTIR_MIN_TARGET)
+        !RtReservoirFiniteScalar(receiverTarget) ||
+        receiverTarget <= RT_RESTIR_MIN_TARGET)
     {
         return false;
     }
 
-    reservoir.sampleLi_target.w =
-        currentTarget;
+    reservoir.selectedTarget =
+        receiverTarget;
+
+    reservoir.surfaceId =
+        receiverSurfaceId;
+
+    const uint flags =
+        ReservoirFlags(reservoir) |
+        RT_RESTIR_RESERVOIR_TARGET_EXACT;
+
+    ReservoirSetState(
+        reservoir,
+        ReservoirM(reservoir),
+        ReservoirAge(reservoir),
+        flags);
 
     return true;
 }
 
-RtRestirReservoir MakeRestirCandidate(
+RtRestirEnvReservoirPacked MakeRestirCandidate(
     float3 wi,
-    float3 Li,
     float sourcePdf,
-    float targetLuminance,
+    float target,
     uint sampleIndex,
     uint surfaceId)
 {
-    RtRestirReservoir reservoir;
-    ReservoirClear(reservoir);
+    RtRestirEnvReservoirPacked candidate;
+    ReservoirClear(candidate);
 
-    const float directionLengthSq =
-        dot(wi, wi);
-
-    if (!RtReservoirFiniteFloat3(wi) ||
-        !RtReservoirFiniteFloat3(Li) ||
+    if (any(isnan(wi)) ||
+        any(isinf(wi)) ||
+        dot(wi, wi) <= 1.0e-8f ||
         !RtReservoirFiniteScalar(sourcePdf) ||
-        !RtReservoirFiniteScalar(targetLuminance) ||
-        directionLengthSq <= RT_RESTIR_MIN_PDF ||
+        !RtReservoirFiniteScalar(target) ||
         sourcePdf <= RT_RESTIR_MIN_PDF ||
-        targetLuminance <= RT_RESTIR_MIN_TARGET)
+        target <= RT_RESTIR_MIN_TARGET)
     {
-        return reservoir;
+        return candidate;
     }
 
-    reservoir.sampleDir_pdf =
-        float4(
-            wi * rsqrt(directionLengthSq),
-            sourcePdf);
+    candidate.packedDirection =
+        PackRestirDirection(wi);
 
-    reservoir.sampleLi_target =
-        float4(
-            max(Li, 0.0f.xxx),
-            targetLuminance);
+    candidate.sampleIndex =
+        sampleIndex;
 
-    // Raw candidate:
-    //   M = 1
-    //   weightSum = 0
-    //   W = 0
-    //
-    // It is sample-valid but not finalized-valid.
-    reservoir.weightSum_M_W =
-        float4(
-            0.0f,
-            1.0f,
-            0.0f,
-            1.0f);
+    candidate.sourcePdf =
+        sourcePdf;
 
-    reservoir.sampleIndex = sampleIndex;
-    reservoir.flags = RT_RESTIR_RESERVOIR_VALID;
-    reservoir.age = 0u;
-    reservoir.surfaceId = surfaceId;
+    candidate.selectedTarget =
+        target;
 
-    return reservoir;
+    candidate.weightSum = 0.0f;
+    candidate.finalWeight = 0.0f;
+
+    candidate.surfaceId =
+        surfaceId;
+
+    ReservoirSetState(
+        candidate,
+        1u,
+        0u,
+        RT_RESTIR_RESERVOIR_VALID |
+        RT_RESTIR_RESERVOIR_TARGET_EXACT);
+
+    return candidate;
 }
 
 RtReservoirUpdateResult ReservoirUpdateWeightedTracked(
-    inout RtRestirReservoir reservoir,
-    RtRestirReservoir candidate,
+    inout RtRestirEnvReservoirPacked reservoir,
+    RtRestirEnvReservoirPacked candidate,
     float candidateWeight,
-    float candidateM,
+    uint candidateM,
     inout uint rng)
 {
     RtReservoirUpdateResult result;
@@ -252,152 +460,180 @@ RtReservoirUpdateResult ReservoirUpdateWeightedTracked(
 
     if (!ReservoirSampleValid(candidate) ||
         !RtReservoirFiniteScalar(candidateWeight) ||
-        !RtReservoirFiniteScalar(candidateM) ||
         candidateWeight <= 0.0f ||
-        candidateM <= 0.0f)
+        candidateM == 0u)
     {
         return result;
     }
 
-    const float newWeightSum =
-        reservoir.weightSum_M_W.x +
+    const float oldWeightSum =
+        max(
+            0.0f,
+            reservoir.weightSum);
+
+    const float proposedWeightSum =
+        oldWeightSum +
         candidateWeight;
 
-    const float newM =
-        reservoir.weightSum_M_W.y +
-        candidateM;
+    const uint oldM =
+        ReservoirM(reservoir);
 
-    if (!RtReservoirFiniteScalar(newWeightSum) ||
-        !RtReservoirFiniteScalar(newM) ||
-        newWeightSum <= 0.0f ||
-        newM <= 0.0f)
+    const uint proposedM =
+        oldM + candidateM;
+
+    if (!RtReservoirFiniteScalar(
+            proposedWeightSum) ||
+        proposedWeightSum <= 0.0f ||
+        proposedM == 0u)
     {
         ReservoirClear(reservoir);
         return result;
     }
 
-    reservoir.weightSum_M_W.x =
-        newWeightSum;
+    const uint storedM =
+        min(
+            proposedM,
+            RT_RESTIR_MAX_PACKED_M);
 
-    reservoir.weightSum_M_W.y =
-        newM;
+    const float storageScale =
+        float(storedM) /
+        float(proposedM);
 
-    result.accepted = 1u;
+    const float storedWeightSum =
+        proposedWeightSum *
+        storageScale;
+
+    if (!RtReservoirFiniteScalar(
+            storedWeightSum) ||
+        storedWeightSum <= 0.0f)
+    {
+        ReservoirClear(reservoir);
+        return result;
+    }
 
     const float selectionProbability =
-        saturate(candidateWeight / newWeightSum);
+        saturate(
+            candidateWeight /
+            proposedWeightSum);
+    
+    const uint representedClampFlags =
+        (ReservoirFlags(reservoir) |
+         ReservoirFlags(candidate)) &
+        RT_RESTIR_RESERVOIR_CLAMP_MASK;
+
+    uint selectedAge =
+        ReservoirAge(reservoir);
+
+    uint selectedFlags =
+        ReservoirFlags(reservoir);
 
     if (RtReservoirRand01(rng) <
         selectionProbability)
     {
-        reservoir.sampleDir_pdf =
-            candidate.sampleDir_pdf;
-
-        reservoir.sampleLi_target =
-            candidate.sampleLi_target;
+        reservoir.packedDirection =
+            candidate.packedDirection;
 
         reservoir.sampleIndex =
             candidate.sampleIndex;
 
+        reservoir.sourcePdf =
+            candidate.sourcePdf;
+
+        reservoir.selectedTarget =
+            candidate.selectedTarget;
+
         reservoir.surfaceId =
             candidate.surfaceId;
 
-        reservoir.flags =
-            candidate.flags |
-            RT_RESTIR_RESERVOIR_VALID;
+        selectedAge =
+            ReservoirAge(candidate);
 
-        reservoir.age =
-            candidate.age;
-
-        reservoir.weightSum_M_W.w =
-            RtReservoirFiniteScalar(
-                candidate.weightSum_M_W.w)
-            ? max(
-                0.0f,
-                candidate.weightSum_M_W.w)
-            : 0.0f;
+        selectedFlags =
+            ReservoirFlags(candidate);
 
         result.selected = 1u;
     }
+    selectedFlags |= representedClampFlags;
 
+    if (storedM < proposedM)
+    {
+        selectedFlags |= RT_RESTIR_RESERVOIR_M_CLAMPED;
+    }
+
+    reservoir.weightSum =
+        storedWeightSum;
+
+    reservoir.finalWeight =
+        0.0f;
+
+    ReservoirSetState(
+        reservoir,
+        storedM,
+        selectedAge,
+        selectedFlags |
+        RT_RESTIR_RESERVOIR_VALID);
+
+    result.accepted = 1u;
     return result;
 }
 
-void ReservoirUpdateWeighted(
-    inout RtRestirReservoir reservoir,
-    RtRestirReservoir candidate,
-    float candidateWeight,
-    float candidateM,
-    inout uint rng)
-{
-    ReservoirUpdateWeightedTracked(
-        reservoir,
-        candidate,
-        candidateWeight,
-        candidateM,
-        rng);
-}
-
-
-void ReservoirUpdate(
-    inout RtRestirReservoir reservoir,
-    RtRestirReservoir candidate,
-    float candidateWeight,
-    inout uint rng)
-{
-    ReservoirUpdateWeighted(
-        reservoir,
-        candidate,
-        candidateWeight,
-        1.0f,
-        rng);
-}
-
 void ReservoirFinalize(
-    inout RtRestirReservoir reservoir,
-    float maxM,
-    float maxWeight,
+    inout RtRestirEnvReservoirPacked reservoir,
+    float configuredMaxM,
+    float configuredMaxWeight,
     uint mathMode)
 {
     const float target =
         ReservoirTarget(reservoir);
 
-    const float sourceM =
-        reservoir.weightSum_M_W.y;
+    const uint sourceM =
+        ReservoirM(reservoir);
 
-    const float safeMaxM =
-        max(1.0f, maxM);
+    const uint effectiveMaxM =
+        min(
+            uint(max(
+                1.0f,
+                configuredMaxM)),
+            RT_RESTIR_MAX_PACKED_M);
 
     if (!ReservoirSampleValid(reservoir) ||
-        !RtReservoirFiniteScalar(sourceM) ||
         !RtReservoirFiniteScalar(
-            reservoir.weightSum_M_W.x) ||
+            reservoir.weightSum) ||
+        reservoir.weightSum <= 0.0f ||
         target <= RT_RESTIR_MIN_TARGET ||
-        sourceM <= 0.0f ||
-        reservoir.weightSum_M_W.x <= 0.0f)
+        sourceM == 0u)
     {
         ReservoirClear(reservoir);
         return;
     }
 
-    // Preserve represented average candidate weight when M is capped.
-    const float clampedM =
-        min(sourceM, safeMaxM);
+    const uint clampedM =
+        min(
+            sourceM,
+            effectiveMaxM);
 
-    const float mScale =
-        clampedM / sourceM;
+    uint flags =
+        ReservoirFlags(reservoir);
 
-    reservoir.weightSum_M_W.x *=
-        mScale;
+    if (clampedM < sourceM)
+    {
+        const float mScale =
+            float(clampedM) /
+            float(sourceM);
 
-    reservoir.weightSum_M_W.y =
-        clampedM;
+        reservoir.weightSum *=
+            mScale;
+
+        flags |=
+            RT_RESTIR_RESERVOIR_M_CLAMPED;
+    }
 
     const float finalWeight =
-        reservoir.weightSum_M_W.x /
+        reservoir.weightSum /
         max(
             RT_RESTIR_MIN_TARGET,
-            clampedM * target);
+            float(clampedM) *
+            target);
 
     if (!RtReservoirFiniteScalar(finalWeight) ||
         finalWeight <= 0.0f)
@@ -406,31 +642,43 @@ void ReservoirFinalize(
         return;
     }
 
-    if (mathMode == RT_RESTIR_MATH_REFERENCE)
+    if (mathMode ==
+        RT_RESTIR_MATH_REFERENCE)
     {
-        // Unclamped diagnostic mode. This still uses the R1 cosine-retargeted
-        // receiver target and must not be described as an unbiased reference.
-        reservoir.weightSum_M_W.z =
+        reservoir.finalWeight =
             finalWeight;
     }
     else
     {
         const float safeMaxWeight =
-            max(1.0f, maxWeight);
+            max(
+                1.0f,
+                configuredMaxWeight);
 
-        reservoir.weightSum_M_W.z =
+        reservoir.finalWeight =
             min(
-                safeMaxWeight,
-                finalWeight);
+                finalWeight,
+                safeMaxWeight);
+
+        if (finalWeight >
+            safeMaxWeight)
+        {
+            flags |=
+                RT_RESTIR_RESERVOIR_W_CLAMPED;
+        }
     }
 
-    reservoir.flags |=
-    RT_RESTIR_RESERVOIR_VALID;
+    ReservoirSetState(
+        reservoir,
+        clampedM,
+        ReservoirAge(reservoir),
+        flags |
+        RT_RESTIR_RESERVOIR_VALID);
 
     if (!ReservoirFinalizedValid(reservoir))
     {
         ReservoirClear(reservoir);
-        return;
     }
 }
+
 #endif

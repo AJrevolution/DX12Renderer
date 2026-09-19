@@ -11,6 +11,7 @@
 #include <cfloat>
 #include <sstream>
 #include <iomanip>
+#include <utility>
 
 namespace
 {
@@ -326,6 +327,17 @@ namespace
         { 112, "Resolved ReSTIR Diffuse Luminance", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
         { 113, "Resolved ReSTIR Specular Luminance", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
         { 114, "Resolved ReSTIR Invalid Reason Mask", "RT ReSTIR Env DI", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 115, "ReSTIR Exact Receiver Combined Target", "RT ReSTIR Production", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 116, "ReSTIR Source / Receiver Target Ratio", "RT ReSTIR Production", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 117, "ReSTIR Receiver Reuse Candidate Weight", "RT ReSTIR Production", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 118, "ReSTIR Guide Rejection Reason", "RT ReSTIR Production", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 119, "ReSTIR Selected Sample Lobe Dominance", "RT ReSTIR Production", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 120, "ReSTIR Direct Environment Ownership", "RT ReSTIR Production", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 121, "Exact-target MC reference / ReSTIR relative error", "RT ReSTIR Production", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 122, "ReSTIR W / M Clamp Mask", "RT ReSTIR Production", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 123, "Composed Pre-Denoiser Diffuse", "RT ReSTIR Production", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 124, "Composed Pre-Denoiser Specular", "RT ReSTIR Production", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
+        { 125, "ReSTIR Denoiser Confidence", "RT ReSTIR Production", DebugViewDomain::RT_ReSTIR, kDebugReqRtRestir, true, true, true, true },
     };
 
     DirectX::XMFLOAT3 SubFloat3(
@@ -742,6 +754,112 @@ void Renderer::SetRtAccumulationEnabled(bool enabled)
     ResetRtAccumulation(true);
 }
 
+void Renderer::CycleRtRestirValidationMode()
+{
+    switch (m_rtRestirValidationMode)
+    {
+    case RtRestirValidationMode::Off:
+        m_rtRestirValidationMode =
+            RtRestirValidationMode::InitialOnly;
+        break;
+
+    case RtRestirValidationMode::InitialOnly:
+        m_rtRestirValidationMode =
+            RtRestirValidationMode::TemporalOnly;
+        break;
+
+    case RtRestirValidationMode::TemporalOnly:
+        m_rtRestirValidationMode =
+            RtRestirValidationMode::TemporalSpatial;
+        break;
+
+    case RtRestirValidationMode::TemporalSpatial:
+        m_rtRestirValidationMode =
+            RtRestirValidationMode::ExactTargetReference;
+        break;
+
+    case RtRestirValidationMode::ExactTargetReference:
+        m_rtRestirValidationMode =
+            RtRestirValidationMode::RestirReference;
+        break;
+
+    case RtRestirValidationMode::RestirReference:
+        m_rtRestirValidationMode =
+            RtRestirValidationMode::RestirRobust;
+        break;
+
+    case RtRestirValidationMode::RestirRobust:
+    default:
+        m_rtRestirValidationMode =
+            RtRestirValidationMode::Off;
+        break;
+    }
+
+    const char* name = "Unknown";
+
+    switch (m_rtRestirValidationMode)
+    {
+    case RtRestirValidationMode::Off:
+        name = "Off";
+        break;
+
+    case RtRestirValidationMode::InitialOnly:
+        name = "InitialOnly";
+        break;
+
+    case RtRestirValidationMode::TemporalOnly:
+        name = "TemporalOnly";
+        break;
+
+    case RtRestirValidationMode::TemporalSpatial:
+        name = "TemporalSpatial";
+        break;
+
+    case RtRestirValidationMode::ExactTargetReference:
+        name = "ExactTargetReference";
+        break;
+
+    case RtRestirValidationMode::RestirReference:
+        name = "RestirReference";
+        break;
+
+    case RtRestirValidationMode::RestirRobust:
+        name = "RestirRobust";
+        break;
+    }
+
+    DebugOutput(
+        std::format(
+            "RT ReSTIR validation mode: {}",
+            name));
+}
+
+void Renderer::CycleRtRestirMetricsCapturePoint()
+{
+    RtRestirMetricsCapturePoint next =
+        RtRestirMetricsCapturePoint::ValidationOutput;
+
+    switch (m_rtRestirMetricsCapturePoint)
+    {
+    case RtRestirMetricsCapturePoint::ValidationOutput:
+        next =
+            RtRestirMetricsCapturePoint::ComposedPreDenoiser;
+        break;
+
+    case RtRestirMetricsCapturePoint::ComposedPreDenoiser:
+        next =
+            RtRestirMetricsCapturePoint::FinalDenoised;
+        break;
+
+    case RtRestirMetricsCapturePoint::FinalDenoised:
+        next =
+            RtRestirMetricsCapturePoint::ValidationOutput;
+        break;
+    }
+
+    SetRtRestirMetricsCapturePoint(next);
+}
+
 void Renderer::ToggleRtAccumulation()
 {
     SetRtAccumulationEnabled(!m_rtAccumulate);
@@ -1006,6 +1124,7 @@ bool Renderer::ShouldAdvanceSceneAnimation() const
     // Auto-orbit is presentation mode: camera and demo animation both advance.
     // Manual orbit and free-roam are inspection modes: the scene freezes so
     // progressive RT accumulation can converge once the camera stops moving.
+	//return true; //enable to always advance scene animation for testing
     return m_cameraMode == CameraControlMode::AutoOrbit;
 }
 
@@ -1035,10 +1154,21 @@ float Renderer::UpdateSceneAnimationTime(float frameTime)
 }
 
 
-void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount)
+void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, uint32_t frameCount, uint64_t timestampFrequency)
 {
     m_backbufferFormat = backbufferFormat;
-    
+    m_rtTimestampFrequency = timestampFrequency;
+
+    m_rtRestirGpuProfiler.Initialize(device, frameCount);
+
+    m_rtRestirGpuFrameMetadata.assign(frameCount, {});
+
+    m_rtRestirMetricsReadback.resize(frameCount);
+
+    m_rtRestirMetricsReadbackPending.assign(frameCount, false);
+
+    m_rtRestirMetricsReadbackContext.assign(frameCount, RtRestirMetricsContext{});
+
     ConfigureDefaultPointLights();
 
     // Normal per-frame uploads: constant buffers, small transient data.
@@ -1095,6 +1225,10 @@ void Renderer::Initialize(ID3D12Device* device, DXGI_FORMAT backbufferFormat, ui
 void Renderer::BeginFrame(uint32_t frameIndex)
 {
     // FrameIndex is already fence-safe by the time Application calls this.
+
+    m_rtRestirGpuProfiler.ReadCompletedFrame(frameIndex, m_rtTimestampFrequency);
+    ReadCompletedRtRestirGpuTimings(frameIndex);
+    ReadCompletedRtRestirMetrics(frameIndex);
     m_upload.BeginFrame(frameIndex);
     m_assetUpload.BeginFrame(frameIndex);
 }
@@ -1460,12 +1594,85 @@ void Renderer::RenderFrame(
         }
     }
 
-    const bool drawListChanged =
-        drawListStructuralChanged || drawTransformChanged;
+    bool rtSceneStructureChanged =
+        m_prevRtDrawIdentities.size() !=
+        m_rtDrawItems.size();
 
-    if (drawListStructuralChanged)
+    bool rtObjectTransformsChanged = false;
+
+    if (!rtSceneStructureChanged &&
+        m_prevRtMotionWorldsValid &&
+        m_prevRtMotionWorlds.size() !=
+        m_rtDrawItems.size())
     {
-        m_prevRtMotionWorldsValid = false;
+        // A "valid" motion history whose shape no longer matches
+        // the current TLAS list is structurally unusable.
+        rtSceneStructureChanged = true;
+    }
+
+    if (!rtSceneStructureChanged)
+    {
+        for (size_t i = 0;
+            i < m_rtDrawItems.size();
+            ++i)
+        {
+            const DrawItem* item =
+                m_rtDrawItems[i];
+
+            if (!item)
+            {
+                rtSceneStructureChanged = true;
+                break;
+            }
+
+            const RtDrawHistoryIdentity current =
+                MakeRtDrawHistoryIdentity(*item);
+
+            const RtDrawHistoryIdentity& previous =
+                m_prevRtDrawIdentities[i];
+
+            const bool identityChanged =
+                previous.mesh != current.mesh ||
+                previous.material != current.material ||
+                previous.submeshIndex !=
+                current.submeshIndex ||
+                previous.rtObjectId !=
+                current.rtObjectId ||
+                previous.sceneModelIndex !=
+                current.sceneModelIndex ||
+                previous.sceneModelRtBufferIndex !=
+                current.sceneModelRtBufferIndex ||
+                previous.blasAddress !=
+                current.blasAddress ||
+                previous.reversesWinding !=
+                current.reversesWinding;
+
+            if (identityChanged)
+            {
+                rtSceneStructureChanged = true;
+                break;
+            }
+
+            if (m_prevRtMotionWorldsValid &&
+                i < m_prevRtMotionWorlds.size() &&
+                !MatrixNear(
+                    m_prevRtMotionWorlds[i],
+                    item->world))
+            {
+                rtObjectTransformsChanged = true;
+            }
+        }
+    }
+
+    const bool drawListChanged =
+        drawListStructuralChanged ||
+        drawTransformChanged ||
+        rtSceneStructureChanged ||
+        rtObjectTransformsChanged;
+
+    if (rtSceneStructureChanged)
+    {
+        InvalidateRtMotionHistory();
         m_rtSurfaceIdHistoryValid = false;
     }
 
@@ -1562,14 +1769,65 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtTemporalMotionConfPowerDiffuse - m_prevRtTemporalMotionConfPowerDiffuse) > 1e-6f) ||
         (std::fabs(m_rtTemporalMotionConfPowerSpec - m_prevRtTemporalMotionConfPowerSpec) > 1e-6f) ||
         viewZReconsSettingsChanged ||
+        (m_rtEnableRestirDenoiserConfidence != m_prevRtEnableRestirDenoiserConfidence) ||
+        (std::fabs( m_rtRestirConfidenceFloor - m_prevRtRestirConfidenceFloor) > 1e-6f) ||
         (m_rtTemporalEnableVarianceBoost != m_prevRtTemporalEnableVarianceBoost) ||
-            viewZPolicyChanged;
+        viewZPolicyChanged;
+
+    const RtDirectEnvironmentMode
+        effectiveDirectEnvironmentMode =
+        EffectiveRtDirectEnvironmentMode();
+
+    const RtDirectEnvironmentMode
+        previousEffectiveDirectEnvironmentMode =
+        ResolveRtDirectEnvironmentMode(
+            m_prevRtDirectEnvironmentMode,
+            m_prevRtRestirValidationMode);
+
+    const bool directEnvironmentModeChanged =
+        effectiveDirectEnvironmentMode !=
+        previousEffectiveDirectEnvironmentMode;
+
+    const RtRestirMathMode
+        effectiveRestirMathMode =
+        EffectiveRtRestirMathMode();
+
+    const RtRestirMathMode
+        previousEffectiveRestirMathMode =
+        ResolveRtRestirMathMode(
+            m_prevRtRestirMathMode,
+            m_prevRtRestirValidationMode);
+
+    const float effectiveRestirMaxAge =
+        effectiveRestirMathMode ==
+        RtRestirMathMode::Reference
+        ? kRtRestirReferenceMaxAge
+        : std::max(
+            0.0f,
+            m_rtRestirMaxAge);
+
+    const float previousEffectiveRestirMaxAge =
+        previousEffectiveRestirMathMode ==
+        RtRestirMathMode::Reference
+        ? kRtRestirReferenceMaxAge
+        : std::max(
+            0.0f,
+            m_prevRtRestirMaxAge);
+
+    const bool restirEnvironmentRevisionChanged =
+        m_environmentRevision !=
+        m_prevRtRestirEnvironmentRevision;
 
     const bool restirHistorySettingsChanged =
+        directEnvironmentModeChanged ||
+        (m_rtRestirValidationMode != m_prevRtRestirValidationMode) ||
+        (std::fabs(m_rtRestirDeltaRoughnessCutoff - m_prevRtRestirDeltaRoughnessCutoff) > 1e-6f) ||
+        (effectiveRestirMathMode != previousEffectiveRestirMathMode) ||
+        restirEnvironmentRevisionChanged ||
+        (m_rtEnvAliasVersion != m_prevRtEnvAliasVersion) ||
         (m_rtEnableRestirEnvDi != m_prevRtEnableRestirEnvDi) ||
         (m_rtRestirUseTemporal != m_prevRtRestirUseTemporal) ||
         (m_rtRestirUseSpatial != m_prevRtRestirUseSpatial) ||
-        (m_rtRestirMathMode != m_prevRtRestirMathMode) ||
         (m_rtRestirInitialCandidateCount != m_prevRtRestirInitialCandidateCount) ||
         (m_rtRestirSpatialSamples != m_prevRtRestirSpatialSamples) ||
         (m_rtRestirSpatialRadius != m_prevRtRestirSpatialRadius) ||
@@ -1578,7 +1836,7 @@ void Renderer::RenderFrame(
         (std::fabs(m_rtRestirViewZSigmaScale - m_prevRtRestirViewZSigmaScale) > 1e-6f) ||
         (std::fabs(m_rtRestirRoughnessSigma - m_prevRtRestirRoughnessSigma) > 1e-6f) ||
         (std::fabs(m_rtRestirMaxM - m_prevRtRestirMaxM) > 1e-6f) ||
-        (std::fabs(m_rtRestirMaxAge - m_prevRtRestirMaxAge) > 1e-6f) ||
+        (std::fabs(effectiveRestirMaxAge - previousEffectiveRestirMaxAge) > 1e-6f) ||
         (std::fabs(m_rtRestirMinTarget - m_prevRtRestirMinTarget) > 1e-9f) ||
         (std::fabs(m_rtRestirMaxWeight - m_prevRtRestirMaxWeight) > 1e-6f) ||
         (std::fabs(m_rtRestirTemporalMinConfidence - m_prevRtRestirTemporalMinConfidence) > 1e-6f) ||
@@ -1595,7 +1853,7 @@ void Renderer::RenderFrame(
         temporalSettingsChanged;
 
     const bool resetTemporalHistory =
-        drawListStructuralChanged ||
+        rtSceneStructureChanged ||
         debugViewChanged ||
         accumulationModeChanged ||
         integratorChanged ||
@@ -1606,17 +1864,33 @@ void Renderer::RenderFrame(
         temporalSettingsChanged ||
         !m_prevRtMotionWorldsValid;
 
-    if (resetRawAccumulation)
+    // Transform-only motion uses reprojection and local rejection;
+    // do not globally reset unrelated ReSTIR history.
+    const bool resetRestirHistory =
+        directEnvironmentModeChanged ||
+        rtSceneStructureChanged ||
+        bigCameraChanged ||
+        !m_prevRtMotionWorldsValid ||
+        restirHistorySettingsChanged ||
+        viewZReconsSettingsChanged ||
+        viewZPolicyChanged;
+
+    if (directEnvironmentModeChanged ||
+        resetRawAccumulation)
     {
-        ResetRtAccumulation(resetTemporalHistory);
+        // RenderFrame owns temporal/ReSTIR invalidation explicitly below.
+        // Do not inherit ResetRtAccumulation()'s legacy ReSTIR side effect.
+        ResetRtAccumulation(false);
     }
 
-    if (resetTemporalHistory)
+    if (directEnvironmentModeChanged ||
+        resetTemporalHistory)
     {
         m_rtTemporalHistoryValid = false;
+        m_rtSurfaceIdHistoryValid = false;
     }
 
-    if (drawListStructuralChanged ||
+    if (rtSceneStructureChanged ||
         bigCameraChanged ||
         !m_prevRtMotionWorldsValid ||
         viewZReconsSettingsChanged)
@@ -1624,10 +1898,7 @@ void Renderer::RenderFrame(
         m_rtViewZHistoryValid = false;
     }
 
-    if (resetTemporalHistory ||
-        restirHistorySettingsChanged ||
-        viewZReconsSettingsChanged ||
-        viewZPolicyChanged)
+    if (resetRestirHistory)
     {
         ResetRtRestirHistory();
     }
@@ -1655,7 +1926,10 @@ void Renderer::RenderFrame(
     // advance even when the normal RT post stack is disabled. Debug display
     // ownership must not invalidate the histories required to validate reuse.
     const bool restirNeedsPersistentGuideHistory =
-        m_rtEnableRestirEnvDi ||
+        m_rtDirectEnvironmentMode !=
+        RtDirectEnvironmentMode::LegacyMis ||
+        m_rtRestirValidationMode !=
+        RtRestirValidationMode::Off ||
         rtDebug.wantsRtRestirTemporalDebug ||
         rtDebug.wantsRtRestirSpatialDebug ||
         rtDebug.wantsRtRestirResolveDebug;
@@ -1707,6 +1981,8 @@ void Renderer::RenderFrame(
     m_prevRtTemporalVarianceBias = m_rtTemporalVarianceBias;
     m_prevRtTemporalVarianceAlphaBoost = m_rtTemporalVarianceAlphaBoost;
     m_prevRtTemporalEnableVarianceBoost = m_rtTemporalEnableVarianceBoost;
+    m_prevRtEnableRestirDenoiserConfidence = m_rtEnableRestirDenoiserConfidence;
+    m_prevRtRestirConfidenceFloor = m_rtRestirConfidenceFloor;
     m_prevRtTemporalMotionConfMinDiffuse = m_rtTemporalMotionConfMinDiffuse;
     m_prevRtTemporalMotionConfMinSpec = m_rtTemporalMotionConfMinSpec;
     m_prevRtTemporalMotionConfPowerDiffuse = m_rtTemporalMotionConfPowerDiffuse;
@@ -1741,6 +2017,18 @@ void Renderer::RenderFrame(
     m_prevRtRestirUseSpatial = m_rtRestirUseSpatial;
     m_prevRtRestirMathMode = m_rtRestirMathMode;
 
+    m_prevRtDirectEnvironmentMode =
+        m_rtDirectEnvironmentMode;
+
+    m_prevRtRestirValidationMode =
+        m_rtRestirValidationMode;
+
+    m_prevRtRestirDeltaRoughnessCutoff =
+        m_rtRestirDeltaRoughnessCutoff;
+
+    m_prevRtRestirEnvironmentRevision =
+        m_environmentRevision;
+
     m_prevRtRestirInitialCandidateCount = m_rtRestirInitialCandidateCount;
     m_prevRtRestirSpatialSamples = m_rtRestirSpatialSamples;
     m_prevRtRestirSpatialRadius = m_rtRestirSpatialRadius;
@@ -1774,6 +2062,7 @@ void Renderer::RenderFrame(
         m_rtRestirTemporalValidThisFrame = false;
         m_rtRestirSpatialValidThisFrame = false;
         m_rtRestirResolvedValidThisFrame = false;
+        m_rtExactTargetReferenceValidThisFrame = false;
 
         EnsureRtOutputSize(width, height);
         BuildRtDrawItems();
@@ -1789,10 +2078,16 @@ void Renderer::RenderFrame(
             EnsureRtInstanceData(frameIndex);
             EnsureRtEnvironmentAlias(device, cl);
             EnsureRtRestirResources(width, height);
+
+            EnsureRtRestirOptionalAovs(device, width, height);
+
             UpdateRtGeometryTable(frameIndex);
 
             const bool restirNeedsFreshDxr =
-                m_rtEnableRestirEnvDi ||
+                m_rtDirectEnvironmentMode !=
+                RtDirectEnvironmentMode::LegacyMis ||
+                m_rtRestirValidationMode !=
+                RtRestirValidationMode::Off ||
                 wantsRtRestirDebug;
 
             const bool canReuseAccumulatedOutput =
@@ -1867,6 +2162,52 @@ void Renderer::RenderFrame(
                                 4u);
                     }
 
+                    const bool restirInitialEnabled =
+                        EffectiveRtDirectEnvironmentMode() !=
+                        RtDirectEnvironmentMode::LegacyMis ||
+                        RtRestirValidationRunsRestir() ||
+                        IsRtRestirDebug(m_debugView);
+
+                    if (frameIndex <
+                        m_rtRestirGpuFrameMetadata.size())
+                    {
+                        RtRestirGpuFrameMetadata& metadata =
+                            m_rtRestirGpuFrameMetadata[
+                                frameIndex];
+
+                        metadata.pending = false;
+
+                        metadata.initialRestirEnabled =
+                            restirInitialEnabled;
+
+                        metadata.width = width;
+                        metadata.height = height;
+
+                        metadata.directEnvironmentMode =
+                            EffectiveRtDirectEnvironmentMode();
+
+                        metadata.validationMode =
+                            m_rtRestirValidationMode;
+
+                        metadata.mathMode =
+                            EffectiveRtRestirMathMode();
+                    }
+
+                    // Initial ReSTIR candidate generation lives inside the primary DXR dispatch.
+                    // Total therefore begins here whenever that ReSTIR path is active.
+                    if (restirInitialEnabled)
+                    {
+                        m_rtRestirGpuProfiler.Begin(
+                            cmd4.Get(),
+                            frameIndex,
+                            RtRestirGpuTimer::Total);
+                    }
+
+                    m_rtRestirGpuProfiler.Begin(
+                        cmd4.Get(),
+                        frameIndex,
+                        RtRestirGpuTimer::PrimaryDxr);
+
                     for (uint32_t i = 0; i < dispatchCount; ++i)
                     {
                         m_rtDispatchUsesAccumulationPath =
@@ -1907,21 +2248,59 @@ void Renderer::RenderFrame(
                         }
                     }
 
+                    m_rtRestirGpuProfiler.End(
+                        cmd4.Get(),
+                        frameIndex,
+                        RtRestirGpuTimer::PrimaryDxr);
+
+                    const bool exactTargetReferenceRequested =
+                        m_rtRestirValidationMode ==
+                        RtRestirValidationMode::ExactTargetReference ||
+                        m_debugView == 121u;
+
+                    const bool exactTargetReferenceReady =
+                        m_rtEnvAliasReady &&
+                        m_rtEnvAliasBuffer &&
+                        m_rtEnvAliasCount > 0u &&
+                        m_rtEnvFaceSize > 0u &&
+                        !m_rtEnvAliasFallback &&
+                        m_rtEnvCpuRadianceReady;
+
+                    if (exactTargetReferenceRequested &&
+                        exactTargetReferenceReady &&
+                        m_rtExactTargetReferenceAovsReady &&
+                        m_rtExactTargetReferenceDiffuse &&
+                        m_rtExactTargetReferenceSpec)
+                    {
+                        m_rtExactTargetReferenceValidThisFrame = true;
+                    }
+
                     if (m_rtAccumulateThisFrame)
                         m_rtSampleIndex = std::min(m_rtSampleIndex + dispatchCount, m_rtMaxSamples);
                     else
                         m_rtSampleIndex = 0;
 
-                    if (m_rtRestirResourcesReady &&
-                        m_rtRestirInitialReservoir &&
-                        (m_rtEnableRestirEnvDi || wantsRtRestirDebug))
-                    {
-                        D3D12_RESOURCE_BARRIER b{};
-                        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-                        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-                        b.UAV.pResource = m_rtRestirInitialReservoir.Get();
+                    const bool runRestir =
+                        m_rtDirectEnvironmentMode !=
+                        RtDirectEnvironmentMode::LegacyMis ||
+                        m_rtRestirValidationMode !=
+                        RtRestirValidationMode::Off ||
+                        wantsRtRestirDebug;
 
-                        cmd4->ResourceBarrier(1, &b);
+                    if (m_rtRestirResourcesReady &&
+                        m_rtRestirScratchReservoir &&
+                        runRestir)
+                    {
+                        D3D12_RESOURCE_BARRIER barrier{};
+                        barrier.Type =
+                            D3D12_RESOURCE_BARRIER_TYPE_UAV;
+
+                        barrier.UAV.pResource =
+                            m_rtRestirScratchReservoir.Get();
+
+                        cmd4->ResourceBarrier(
+                            1,
+                            &barrier);
                     }
                 }
             }
@@ -1931,28 +2310,8 @@ void Renderer::RenderFrame(
                 frameIndex,
                 device,
                 width,
-                height);
-
-            const bool ranRestirResolve =
-                RunRtRestirResolve(
-                    cl,
-                    frameIndex,
-                    device,
-                    width,
-                    height,
-                    sceneTime,
-                    rtDebug);
-
-            if (ranRestirResolve)
-            {
-                RunRtRestirApplyBeauty(
-                    cl,
-                    frameIndex,
-                    device,
-                    width,
-                    height,
-                    rtDebug);
-            }
+                height,
+                sceneTime);
 
             // Restore all RT writeable resources to UAV state for the next frame
             // This must run regardless of whether the spatial stage used A-Trous,
@@ -2003,19 +2362,75 @@ void Renderer::RenderFrame(
                 }
             }
 
+            if (m_rtAovSpecularF0Ready)
+            {
+                cl.Transition(
+                    m_rtAovSpecularF0.Get(),
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+
+            if (m_rtRestirConfidenceReady)
+            {
+                cl.Transition(
+                    m_rtRestirConfidence.Get(),
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+
+            if (m_rtRestirReceiverNormalRoughnessReady)
+            {
+                cl.Transition(
+                    m_rtRestirReceiverNormalRoughness.Get(),
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+
+            if (m_rtExactTargetReferenceAovsReady)
+            {
+                cl.Transition(
+                    m_rtExactTargetReferenceDiffuse.Get(),
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+                cl.Transition(
+                    m_rtExactTargetReferenceSpec.Get(),
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+
             if (m_rtRestirResourcesReady)
             {
-                cl.Transition(m_rtRestirInitialReservoir.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                cl.Transition(m_rtRestirScratchReservoir.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 cl.Transition(m_rtRestirTemporalReservoir[0].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 cl.Transition(m_rtRestirTemporalReservoir[1].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                cl.Transition(m_rtRestirSpatialReservoir.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 cl.Transition(m_rtRestirResolvedDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 cl.Transition(m_rtRestirResolvedSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                
+                if (m_rtRestirComposedReady)
+                {
+                    cl.Transition(m_rtRestirComposedDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    cl.Transition(m_rtRestirComposedSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                }
 
                 if (m_rtRestirAppliedReady)
                 {
                     cl.Transition(m_rtRestirAppliedDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                     cl.Transition(m_rtRestirAppliedSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                }
+
+                cl.Transition(
+                    m_rtRestirTemporalConfidence[0].Get(),
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+                cl.Transition(
+                    m_rtRestirTemporalConfidence[1].Get(),
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+                if (m_rtRestirRejectionReasonReady)
+                {
+                    cl.Transition(
+                        m_rtRestirTemporalRejectionReason.Get(),
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+                    cl.Transition(
+                        m_rtRestirRejectionReason.Get(),
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 }
             }
 
@@ -2271,8 +2686,7 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_rtAovMotionReady = false;
     m_rtAovMotionDilatedReady = false;
     m_rtAovMotionConfReady = false;
-    m_prevRtMotionWorldsValid = false;
-    m_prevRtMotionWorlds.clear();
+    InvalidateRtMotionHistory();
     m_rtSpecSelectedMomentsReady = false;
     m_rtAovViewZRawReady = false;
     m_rtAovViewZReconsReady = false;
@@ -2286,6 +2700,7 @@ void Renderer::OnResize(ID3D12Device* device, uint32_t width, uint32_t height)
     m_rtSpecRobustInputReady = false;
     
     ResetRtRestirResources();
+    ResetRtRestirMetricsResources();
 
     // Recreate depth on resize
     m_depth.CreateDepth(device, width, height, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, L"Depth Buffer");
@@ -2477,7 +2892,8 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateGlobalConstants(uint32_t frameIndex, u
 
     cb->cameraPos = cam.position;
     m_currRtCameraPos = cb->cameraPos;
-    cb->time = time; 
+    cb->time = time;
+
     cb->frameIndex = frameIndex;
 
     cb->hasBRDFLut = m_brdfLutTex.IsValid() ? 1 : 0;
@@ -2610,6 +3026,8 @@ void Renderer::SetupResources(ID3D12Device* device, CommandList& cl, uint32_t fr
         m_rtRestirTemporalPass.Initialize(device, Paths::ShaderDir());
         m_rtRestirSpatialPass.Initialize(device, Paths::ShaderDir());
         m_rtRestirApplyPass.Initialize(device, Paths::ShaderDir());
+        m_rtRestirComposeCurrentPass.Initialize(device, Paths::ShaderDir());
+        m_rtRestirMetricsPass.Initialize(device, Paths::ShaderDir());
     }
 
     m_skyboxPass.Initialize(device, m_backbufferFormat, DXGI_FORMAT_D32_FLOAT, Paths::ShaderDir());
@@ -3313,8 +3731,7 @@ void Renderer::EnsureRtOutputSize(uint32_t width, uint32_t height)
 
     if (sizeMismatch)
     {
-        m_prevRtMotionWorldsValid = false;
-        m_prevRtMotionWorlds.clear();
+        InvalidateRtMotionHistory();
 
         CreateRtOutput(m_device5.Get(), width, height);
         CreateRtAccum(m_device5.Get(), width, height);
@@ -3915,7 +4332,7 @@ void Renderer::UpdateRtGeometryTable(
         restirResolveReservoir,
         kRtRegisterRestirResolveReservoir,
         restirResolveReservoir ? pixelCount : 1u,
-        sizeof(RtRestirReservoir));
+        sizeof(RtRestirEnvReservoirPacked));
 
     // t385 = display sky cube for DXR miss / display environment.
     if (m_environment.displayCubeLoaded &&
@@ -3937,22 +4354,11 @@ void Renderer::UpdateRtGeometryTable(
             DXGI_FORMAT_R8G8B8A8_UNORM);
     }
 
-    // t386 = RT lighting radiance source.
-    const Texture* rtRadianceTexture = nullptr;
-    if (m_environment.rtRadianceUsesIblSpecular &&
-        m_iblSpecularTex.IsValid())
-    {
-        rtRadianceTexture = &m_iblSpecularTex;
-    }
-
-    else if (m_rtEnvironmentRadianceTex.IsValid())
-    {
-       rtRadianceTexture = &m_rtEnvironmentRadianceTex;
-    }
-
-    CreateTextureSrv(
-        rtRadianceTexture,
-        kRtRegisterEnvironmentRadiance);
+    // t386 = dedicated RT lighting-radiance source.
+    WriteEnvironmentRadianceSrv(
+        m_device5.Get(),
+        CpuForRegister(
+            kRtRegisterEnvironmentRadiance));
 
     m_rtMaterialCount =
         static_cast<uint32_t>(
@@ -3974,6 +4380,42 @@ void Renderer::WriteRtTextureSrv(
     srv.Texture2D.MipLevels = std::max(1u, texture.MipCount());
 
     device->CreateShaderResourceView(texture.Get(), &srv, dst);
+}
+
+void Renderer::WriteEnvironmentRadianceSrv(
+    ID3D12Device* device,
+    D3D12_CPU_DESCRIPTOR_HANDLE destination) const
+{
+    if (!device)
+        return;
+
+    if (m_rtEnvironmentRadianceTex.IsValid())
+    {
+        WriteRtTextureSrv(
+            device,
+            destination,
+            m_rtEnvironmentRadianceTex);
+
+        return;
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format =
+        DXGI_FORMAT_R32G32B32A32_FLOAT;
+
+    srv.ViewDimension =
+        D3D12_SRV_DIMENSION_TEXTURE2D;
+
+    srv.Shader4ComponentMapping =
+        D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+    srv.Texture2D.MostDetailedMip = 0;
+    srv.Texture2D.MipLevels = 1;
+
+    device->CreateShaderResourceView(
+        nullptr,
+        &srv,
+        destination);
 }
 
 void Renderer::CreateRtFallbackTextures(
@@ -4041,6 +4483,132 @@ void Renderer::CreateRtFallbackTextures(
             true,
             L"RT Fallback Black");
     }
+
+    if (!m_rtRestirConfidenceFallbackWhite)
+    {
+        const D3D12_HEAP_PROPERTIES heapProperties =
+            CD3DX12_HEAP_PROPERTIES(
+                D3D12_HEAP_TYPE_DEFAULT);
+
+        const D3D12_RESOURCE_DESC resourceDesc =
+            CD3DX12_RESOURCE_DESC::Tex2D(
+                DXGI_FORMAT_R16_FLOAT,
+                1,
+                1,
+                1,
+                1,
+                1,
+                0,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heapProperties,
+                D3D12_HEAP_FLAG_NONE,
+                &resourceDesc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(
+                    &m_rtRestirConfidenceFallbackWhite)),
+            "Create RT ReSTIR confidence white fallback");
+
+        SetD3D12ObjectName(
+            m_rtRestirConfidenceFallbackWhite.Get(),
+            L"RT ReSTIR Confidence White Fallback");
+
+        CommandList::SetGlobalState(
+            m_rtRestirConfidenceFallbackWhite.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        if (!m_rtRestirConfidenceFallbackWhiteUav.IsValid())
+        {
+            m_rtRestirConfidenceFallbackWhiteUav =
+                m_srvHeap.Allocate(1);
+        }
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format =
+            DXGI_FORMAT_R16_FLOAT;
+        uav.ViewDimension =
+            D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        // Shader-visible descriptor used by the GPU handle passed to
+        // ClearUnorderedAccessViewFloat and later shader access.
+        device->CreateUnorderedAccessView(
+            m_rtRestirConfidenceFallbackWhite.Get(),
+            nullptr,
+            &uav,
+            m_rtRestirConfidenceFallbackWhiteUav.cpu);
+
+        // ClearUnorderedAccessViewFloat requires its CPU descriptor handle
+        // to come from a NON-shader-visible CBV/SRV/UAV heap.
+        if (!m_rtRestirConfidenceFallbackWhiteClearHeap)
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+            heapDesc.Type =
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            heapDesc.NumDescriptors = 1;
+            heapDesc.Flags =
+                D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+            heapDesc.NodeMask = 0;
+
+            ThrowIfFailed(
+                device->CreateDescriptorHeap(
+                    &heapDesc,
+                    IID_PPV_ARGS(
+                        &m_rtRestirConfidenceFallbackWhiteClearHeap)),
+                "Create RT ReSTIR confidence fallback clear heap");
+
+            SetD3D12ObjectName(
+                m_rtRestirConfidenceFallbackWhiteClearHeap.Get(),
+                L"RT ReSTIR Confidence Fallback Clear Heap");
+        }
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE clearCpuHandle =
+            m_rtRestirConfidenceFallbackWhiteClearHeap
+            ->GetCPUDescriptorHandleForHeapStart();
+
+        // Create an identical UAV in the CPU-only heap.
+        device->CreateUnorderedAccessView(
+            m_rtRestirConfidenceFallbackWhite.Get(),
+            nullptr,
+            &uav,
+            clearCpuHandle);
+
+        ID3D12DescriptorHeap* heaps[] =
+        {
+            m_srvHeap.GetHeap()
+        };
+
+        ID3D12GraphicsCommandList* commandList =
+            cl.Get();
+
+        commandList->SetDescriptorHeaps(
+            _countof(heaps),
+            heaps);
+
+        const float clearValue[4] =
+        {
+            1.0f,
+            1.0f,
+            1.0f,
+            1.0f
+        };
+
+        commandList->ClearUnorderedAccessViewFloat(
+            m_rtRestirConfidenceFallbackWhiteUav.gpu,
+            clearCpuHandle,
+            m_rtRestirConfidenceFallbackWhite.Get(),
+            clearValue,
+            0,
+            nullptr);
+
+        cl.Transition(
+            m_rtRestirConfidenceFallbackWhite.Get(),
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        cl.FlushBarriers();
+    }
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE Renderer::RtUavCpuAt(uint32_t slot) const
@@ -4048,6 +4616,20 @@ D3D12_CPU_DESCRIPTOR_HANDLE Renderer::RtUavCpuAt(uint32_t slot) const
     D3D12_CPU_DESCRIPTOR_HANDLE h = m_rtOutputUav.cpu;
     h.ptr += SIZE_T(slot) * SIZE_T(m_srvHeap.DescriptorSize());
     return h;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE Renderer::RtUavGpuAt(
+    uint32_t slot) const
+{
+    D3D12_GPU_DESCRIPTOR_HANDLE handle =
+        m_rtOutputUav.gpu;
+
+    handle.ptr +=
+        static_cast<UINT64>(slot) *
+        static_cast<UINT64>(
+            m_srvHeap.DescriptorSize());
+
+    return handle;
 }
 
 void Renderer::ResetRtAccumulation(bool resetTemporalHistory)
@@ -4148,6 +4730,82 @@ void Renderer::CreateRtAccum(ID3D12Device* device, uint32_t width, uint32_t heig
     m_rtAccumSpecReady = true;
 }
 
+void Renderer::CreateRtGlobalUavTexture(
+    ID3D12Device* device,
+    ComPtr<ID3D12Resource>& resource,
+    DXGI_FORMAT format,
+    uint32_t width,
+    uint32_t height,
+    uint32_t uavSlot,
+    const wchar_t* name)
+{
+    if (!device)
+        return;
+
+    CD3DX12_HEAP_PROPERTIES heap(
+        D3D12_HEAP_TYPE_DEFAULT);
+
+    auto resourceDesc =
+        CD3DX12_RESOURCE_DESC::Tex2D(
+            format,
+            width,
+            height,
+            1,
+            1,
+            1,
+            0,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+    ThrowIfFailed(
+        device->CreateCommittedResource(
+            &heap,
+            D3D12_HEAP_FLAG_NONE,
+            &resourceDesc,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            nullptr,
+            IID_PPV_ARGS(&resource)),
+        "Create RT global UAV texture");
+
+    SetD3D12ObjectName(
+        resource.Get(),
+        name);
+
+    CommandList::SetGlobalState(
+        resource.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+    uav.Format = format;
+    uav.ViewDimension =
+        D3D12_UAV_DIMENSION_TEXTURE2D;
+
+    device->CreateUnorderedAccessView(
+        resource.Get(),
+        nullptr,
+        &uav,
+        RtUavCpuAt(uavSlot));
+}
+
+void Renderer::WriteNullRtGlobalUav(
+    ID3D12Device* device,
+    DXGI_FORMAT format,
+    uint32_t slot)
+{
+    if (!device)
+        return;
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+    uav.Format = format;
+    uav.ViewDimension =
+        D3D12_UAV_DIMENSION_TEXTURE2D;
+
+    device->CreateUnorderedAccessView(
+        nullptr,
+        nullptr,
+        &uav,
+        RtUavCpuAt(slot));
+}
+
 void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t height)
 {
     m_rtAovReady = false;
@@ -4177,6 +4835,20 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
     m_rtSpecRobustInputReady = false;
     m_rtDiffuseRobustInput.Reset();
     m_rtSpecRobustInput.Reset();
+
+    m_rtAovSpecularF0Ready = false;
+    m_rtAovSpecularF0.Reset();
+
+    m_rtRestirConfidenceReady = false;
+    m_rtRestirConfidence.Reset();
+
+    m_rtRestirReceiverNormalRoughnessReady = false;
+    m_rtRestirReceiverNormalRoughness.Reset();
+
+    m_rtExactTargetReferenceAovsReady = false;
+    m_rtExactTargetReferenceDiffuse.Reset();
+    m_rtExactTargetReferenceSpec.Reset();
+    m_rtExactTargetReferenceValidThisFrame = false;
 
     if (!m_rtOutputUav.IsValid())
         m_rtOutputUav = m_srvHeap.Allocate(kRtUavTableCount);
@@ -4549,6 +5221,7 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     };
 
+
     CreateRobustTexture(m_rtDiffuseRobustInput, L"RT Diffuse Robust Input");
     CreateRobustTexture(m_rtSpecRobustInput, L"RT Spec Robust Input");
 
@@ -4563,6 +5236,41 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
         m_rtAovViewZReconsConf,
         L"RT AOV ViewZ Reconstructed Confidence");
 
+    WriteNullRtGlobalUav(
+        device,
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+        12);
+
+    WriteNullRtGlobalUav(
+        device,
+        DXGI_FORMAT_R16_FLOAT,
+        13);
+
+    WriteNullRtGlobalUav(
+        device,
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+        14);
+
+    WriteNullRtGlobalUav(
+        device,
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+        15);
+
+    WriteNullRtGlobalUav(
+        device,
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+        16);
+
+    m_rtExactTargetReferenceAovsReady =
+        m_rtExactTargetReferenceDiffuse &&
+        m_rtExactTargetReferenceSpec;
+
+    m_rtAovSpecularF0Ready =
+        m_rtAovSpecularF0 != nullptr;
+
+    m_rtRestirConfidenceReady =
+        m_rtRestirConfidence != nullptr;
+
     m_rtAovDiffuseAlbedoReady = true;
     m_rtDiffuseDemodulatedReady = true;
     m_rtAovSurfaceIdReady = true;
@@ -4573,6 +5281,131 @@ void Renderer::CreateRtAovs(ID3D12Device* device, uint32_t width, uint32_t heigh
     m_rtAovMotionDilatedReady = true;
     m_rtAovMotionReady = true;
     m_rtAovReady = true;
+}
+
+void Renderer::EnsureRtRestirOptionalAovs(
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height)
+{
+    if (!device ||
+        width == 0 ||
+        height == 0 ||
+        !m_rtOutputUav.IsValid())
+    {
+        return;
+    }
+
+    const bool needsRestirAovs =
+        EffectiveRtDirectEnvironmentMode() !=
+        RtDirectEnvironmentMode::LegacyMis ||
+        RtRestirValidationRunsRestir() ||
+        IsRtRestirDebug(m_debugView);
+
+    const bool needsExactTargetReference =
+        m_rtRestirValidationMode ==
+        RtRestirValidationMode::ExactTargetReference ||
+        m_debugView == 121u;
+
+    // Lazy-create u12/u13 and retain them across mode changes.
+    if (needsRestirAovs)
+    {
+        if (!m_rtAovSpecularF0)
+        {
+            CreateRtGlobalUavTexture(
+                device,
+                m_rtAovSpecularF0,
+                DXGI_FORMAT_R16G16B16A16_FLOAT,
+                width,
+                height,
+                12,
+                L"RT AOV Specular F0");
+        }
+
+        if (!m_rtRestirConfidence)
+        {
+            CreateRtGlobalUavTexture(
+                device,
+                m_rtRestirConfidence,
+                DXGI_FORMAT_R16_FLOAT,
+                width,
+                height,
+                13,
+                L"RT ReSTIR Final Confidence");
+        }
+
+        if (!m_rtRestirReceiverNormalRoughness)
+        {
+            CreateRtGlobalUavTexture(
+                device,
+                m_rtRestirReceiverNormalRoughness,
+                DXGI_FORMAT_R16G16B16A16_FLOAT,
+                width,
+                height,
+                16,
+                L"RT ReSTIR Receiver Normal Raw Roughness");
+        }
+
+
+    }
+
+    m_rtRestirReceiverNormalRoughnessReady =
+        needsRestirAovs &&
+        m_rtRestirReceiverNormalRoughness != nullptr;
+
+    // "Ready" means active and usable for THIS frame,
+    // not merely allocated somewhere in persistent storage.
+    m_rtAovSpecularF0Ready =
+        needsRestirAovs &&
+        m_rtAovSpecularF0 != nullptr;
+
+    m_rtRestirConfidenceReady =
+        needsRestirAovs &&
+        m_rtRestirConfidence != nullptr;
+
+    // ------------------------------------------------------------
+    // u14/u15
+    //
+    // Same lifetime policy: lazy-create, retain after first use.
+    // ------------------------------------------------------------
+
+    if (needsExactTargetReference)
+    {
+        if (!m_rtExactTargetReferenceDiffuse)
+        {
+            CreateRtGlobalUavTexture(
+                device,
+                m_rtExactTargetReferenceDiffuse,
+                DXGI_FORMAT_R16G16B16A16_FLOAT,
+                width,
+                height,
+                14,
+                L"RT Exact Target Reference Diffuse");
+        }
+
+        if (!m_rtExactTargetReferenceSpec)
+        {
+            CreateRtGlobalUavTexture(
+                device,
+                m_rtExactTargetReferenceSpec,
+                DXGI_FORMAT_R16G16B16A16_FLOAT,
+                width,
+                height,
+                15,
+                L"RT Exact Target Reference Spec");
+        }
+    }
+
+    m_rtExactTargetReferenceAovsReady =
+        needsExactTargetReference &&
+        m_rtExactTargetReferenceDiffuse != nullptr &&
+        m_rtExactTargetReferenceSpec != nullptr;
+
+    if (!m_rtExactTargetReferenceAovsReady)
+    {
+        m_rtExactTargetReferenceValidThisFrame =
+            false;
+    }
 }
 
 bool Renderer::UpdateRtDenoiseSrvTable(
@@ -5409,6 +6242,25 @@ bool Renderer::UpdateRtTemporalTables(
     // t13 = previous SurfaceId history
     WriteR32UintSrv(prevSurfaceIdResource, 13);
 
+    const bool useRestirConfidence =
+        m_rtEnableRestirDenoiserConfidence &&
+        EffectiveRtDirectEnvironmentMode() ==
+        RtDirectEnvironmentMode::RestirProduction &&
+        m_rtRestirResolvedValidThisFrame &&
+        m_rtRestirConfidenceReady &&
+        m_rtRestirConfidence;
+
+    ID3D12Resource* restirConfidenceInput =
+        useRestirConfidence
+        ? m_rtRestirConfidence.Get()
+        : m_rtRestirConfidenceFallbackWhite.Get();
+
+    // t14 = real ReSTIR confidence when production confidence is valid;
+    // otherwise bind the neutral R16_FLOAT white fallback.
+    WriteR16Srv(
+        restirConfidenceInput,
+        14);
+
     return true;
 }
 
@@ -5511,6 +6363,24 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtTemporalConstants(
     cb->confidenceDebugScale = std::max(1e-4f, m_rtConfidenceDebugScale);
     cb->padShape0 = 0.0f;
 
+    const bool useRestirConfidence =
+        m_rtEnableRestirDenoiserConfidence &&
+        EffectiveRtDirectEnvironmentMode() ==
+        RtDirectEnvironmentMode::RestirProduction &&
+        m_rtRestirResolvedValidThisFrame &&
+        m_rtRestirConfidenceReady;
+
+    cb->enableRestirConfidence =
+        useRestirConfidence ? 1u : 0u;
+
+    cb->restirConfidenceFloor =
+        std::clamp(
+            m_rtRestirConfidenceFloor,
+            0.0f,
+            1.0f);
+
+    cb->padRestirConfidence[0] = 0u;
+    cb->padRestirConfidence[1] = 0u;
 
     return alloc.gpu;
 }
@@ -6093,6 +6963,7 @@ bool Renderer::RunRtDenoiseSignal(
 void Renderer::CommitRtMotionWorlds()
 {
     m_prevRtMotionWorlds.clear();
+    m_prevRtDrawIdentities.clear();
 
     if (m_rtDrawItems.empty())
     {
@@ -6100,21 +6971,45 @@ void Renderer::CommitRtMotionWorlds()
         return;
     }
 
-    m_prevRtMotionWorlds.reserve(m_rtDrawItems.size());
+    m_prevRtMotionWorlds.reserve(
+        m_rtDrawItems.size());
 
-    for (const DrawItem* item : m_rtDrawItems)
+    m_prevRtDrawIdentities.reserve(
+        m_rtDrawItems.size());
+
+    for (const DrawItem* item :
+        m_rtDrawItems)
     {
         if (!item)
         {
-            m_prevRtMotionWorldsValid = false;
-            m_prevRtMotionWorlds.clear();
+            InvalidateRtMotionHistory();
             return;
         }
 
-        m_prevRtMotionWorlds.push_back(item->world);
+        const RtDrawHistoryIdentity identity =
+            MakeRtDrawHistoryIdentity(*item);
+
+        // BuildRtDrawItems() should already have excluded this.
+        // Treat violation as unusable motion history rather than
+        // silently creating mismatched instance history.
+        if (identity.blasAddress == 0)
+        {
+            InvalidateRtMotionHistory();
+            return;
+        }
+
+        m_prevRtMotionWorlds.push_back(
+            item->world);
+
+        m_prevRtDrawIdentities.push_back(
+            identity);
     }
 
-    m_prevRtMotionWorldsValid = true;
+    m_prevRtMotionWorldsValid =
+        m_prevRtMotionWorlds.size() ==
+        m_rtDrawItems.size() &&
+        m_prevRtDrawIdentities.size() ==
+        m_rtDrawItems.size();
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex, uint32_t restirDispatchMode)
@@ -6146,19 +7041,41 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
         m_rtEnvAliasCount > 0 &&
         m_rtEnvFaceSize > 0;
 
-    cb->sampling.envSamplingMode =
-        static_cast<uint32_t>(m_rtEnvSamplingMode);
-
     const bool envAliasMatchesRadiance =
         envAliasUsable &&
         !m_rtEnvAliasFallback &&
         m_rtEnvCpuRadianceReady;
 
+    const bool exactTargetReferenceRequested =
+        m_rtRestirValidationMode ==
+        RtRestirValidationMode::ExactTargetReference ||
+        m_debugView == 121u;
+
+    const RtEnvSamplingMode effectiveEnvSamplingMode =
+        m_rtEnvSamplingMode;
+
+    const RtDirectEnvironmentMode effectiveDirectEnvironmentMode =
+        EffectiveRtDirectEnvironmentMode();
+
+    const RtRestirMathMode effectiveRestirMathMode =
+        EffectiveRtRestirMathMode();
+
+    cb->sampling.envSamplingMode =
+        static_cast<uint32_t>(
+            effectiveEnvSamplingMode);
+
     cb->sampling.useEnvImportanceSampling =
-        (m_rtUseEnvImportanceSampling && envAliasMatchesRadiance) ? 1u : 0u;
+        ((m_rtUseEnvImportanceSampling ||
+            exactTargetReferenceRequested) &&
+            envAliasMatchesRadiance)
+        ? 1u
+        : 0u;
 
     cb->sampling.useEnvMIS =
-        (m_rtUseEnvMIS && envAliasMatchesRadiance) ? 1u : 0u;
+        (m_rtUseEnvMIS &&
+            envAliasMatchesRadiance)
+        ? 1u
+        : 0u;
 
     cb->sampling.envAliasCount =
         envAliasMatchesRadiance ? m_rtEnvAliasCount : 0u;
@@ -6172,21 +7089,19 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
     cb->sampling.samplingDebugView = m_debugView;
 
     // Anti-double-counting guard.
-    // When resolved ReSTIR environment lighting is applied to beauty, disable
-    // the older final environment NEE path so direct environment lighting is not
-    // added twice.
-    const bool applyingRestirToBeauty =
-        m_rtEnableRestirEnvDi &&
-        m_rtRestirResolveToBeauty &&
-        m_rtRestirApplyMode != 0u;
+    // When RestirProduction owns primary direct environment lighting,
+    // disable the legacy final environment NEE path to avoid double-counting.
+    const bool restirOwnsDirectEnvironment =
+        effectiveDirectEnvironmentMode ==
+        RtDirectEnvironmentMode::RestirProduction;
 
     cb->sampling.useEnvNeeForFinal =
         (m_rtUseEnvNeeForFinal &&
-            !applyingRestirToBeauty &&
-            envAliasUsable &&
-            !m_rtEnvAliasFallback)
+            !restirOwnsDirectEnvironment &&
+            envAliasMatchesRadiance)
         ? 1u
         : 0u;
+
 
     cb->sampling.envIntensity = m_rtEnvIntensity;
     cb->sampling.envPdfEpsilon = m_rtEnvPdfEpsilon;
@@ -6194,7 +7109,9 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
     cb->sampling.envMISPower = m_rtEnvMISPower;
 
     cb->sampling.envNeeFireflyGuard =
-        m_rtEnvNeeFireflyGuard ? 1u : 0u;
+        m_rtEnvNeeFireflyGuard
+        ? 1u
+        : 0u;
 
     cb->sampling.envAliasVersion =
         m_rtEnvAliasVersion;
@@ -6205,7 +7122,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
     cb->sampling.pad1 = 0.0f;
 
     const bool useReferenceRestirMath =
-        m_rtRestirMathMode ==
+        effectiveRestirMathMode ==
         RtRestirMathMode::Reference;
 
     const float effectiveRestirMaxM =
@@ -6215,6 +7132,13 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
             1.0f,
             m_rtRestirMaxM);
 
+    const float effectiveRestirMaxAge =
+        useReferenceRestirMath
+        ? kRtRestirReferenceMaxAge
+        : std::max(
+            0.0f,
+            m_rtRestirMaxAge);
+
     const float effectiveRestirMaxWeight =
         useReferenceRestirMath
         ? kRtRestirReferenceMaxWeight
@@ -6223,7 +7147,14 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
             m_rtRestirMaxWeight);
 
     cb->restir.enableRestirEnvDi =
-        (m_rtEnableRestirEnvDi || IsRtRestirDebug(m_debugView)) ? 1u : 0u;
+        (
+            effectiveDirectEnvironmentMode !=
+            RtDirectEnvironmentMode::LegacyMis ||
+            RtRestirValidationRunsRestir() ||
+            IsRtRestirDebug(m_debugView)
+            )
+        ? 1u
+        : 0u;
 
     cb->restir.restirInitialCandidateCount =
         std::max(1u, m_rtRestirInitialCandidateCount);
@@ -6238,7 +7169,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
         effectiveRestirMaxM;
 
     cb->restir.restirMaxAge =
-        std::max(0.0f, m_rtRestirMaxAge);
+        effectiveRestirMaxAge;
 
     cb->restir.restirMinTarget =
         std::max(0.0f, m_rtRestirMinTarget);
@@ -6248,11 +7179,50 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
 
     cb->restir.restirMathMode =
         static_cast<uint32_t>(
-            m_rtRestirMathMode);
+            effectiveRestirMathMode);
 
-    cb->restir.padMath[0] = 0u;
-    cb->restir.padMath[1] = 0u;
-    cb->restir.padMath[2] = 0u;
+    cb->restir.directEnvironmentMode =
+        static_cast<uint32_t>(
+            effectiveDirectEnvironmentMode);
+
+    cb->restir.validationMode =
+        static_cast<uint32_t>(
+            m_rtRestirValidationMode);
+
+    cb->restir.deltaRoughnessCutoff =
+        std::max(
+            0.0f,
+            m_rtRestirDeltaRoughnessCutoff);
+
+    const bool primaryDispatch =
+        restirDispatchMode == 0u;
+
+    if (primaryDispatch)
+    {
+        m_rtPrimaryAovSampleIndex =
+            m_rtDispatchSampleIndex;
+
+        m_rtPrimaryAovResetId =
+            m_rtResetId;
+
+        m_rtPrimaryAovJitterEnabled =
+            RtPrimaryJitterEnabledForCurrentDispatch();
+    }
+
+    // Primary and resolve dispatches both receive the metadata
+    // belonging to the primary dispatch that produced the AOVs.
+    cb->restir.primarySampleIndex =
+        m_rtPrimaryAovSampleIndex;
+
+    cb->restir.primaryResetId =
+        m_rtPrimaryAovResetId;
+
+    cb->restir.primaryJitterEnabled =
+        m_rtPrimaryAovJitterEnabled
+        ? 1u
+        : 0u;
+
+    cb->restir.padRestir = 0u;
     
     cb->sky.enabled =
         m_environment.enabled ? 1u : 0u;
@@ -6297,9 +7267,9 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRayGenConstants(uint32_t frameIndex,
     };
 
     const bool hasRtRadiance =
-        (m_environment.rtRadianceUsesIblSpecular &&
-            m_iblSpecularTex.IsValid()) ||
-        m_rtEnvironmentRadianceTex.IsValid();
+        m_environment.lightingRadianceLoaded &&
+        m_rtEnvironmentRadianceTex.IsValid() &&
+        m_rtEnvCpuRadianceReady;
 
     cb->environment.hasRadianceTexture =
         hasRtRadiance ? 1u : 0u;
@@ -7005,15 +7975,15 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtDiffuseDemodulateConstants(
 
 bool Renderer::UpdateRtDiffuseDemodulateTables(
     uint32_t frameIndex,
-    ID3D12Device* device)
+    ID3D12Device* device,
+    ID3D12Resource* diffuseInput)
 {
     if (!device ||
-        !m_rtAccumDiffuse ||
+        !diffuseInput ||
         !m_rtAovDiffuseAlbedo ||
         !m_rtAovDepth ||
         !m_rtDiffuseDemodulated ||
         !m_rtOutput ||
-        !m_rtAccumDiffuseReady ||
         !m_rtAovDiffuseAlbedoReady ||
         !m_rtAovReady ||
         !m_rtDiffuseDemodulatedReady ||
@@ -7067,7 +8037,7 @@ bool Renderer::UpdateRtDiffuseDemodulateTables(
     };
 
     // t0 = diffuse radiance
-    WriteRgba16Srv(m_rtAccumDiffuse.Get(), 0);
+    WriteRgba16Srv(diffuseInput, 0);
 
     // t1 = diffuse albedo
     WriteRgba16Srv(m_rtAovDiffuseAlbedo.Get(), 1);
@@ -7121,15 +8091,15 @@ bool Renderer::RunRtDiffuseDemodulate(
     uint32_t frameIndex,
     ID3D12Device* device,
     uint32_t width,
-    uint32_t height)
+    uint32_t height,
+    ID3D12Resource* diffuseInput)
 {
     if (!device ||
-        !m_rtAccumDiffuse ||
+        !diffuseInput ||
         !m_rtAovDiffuseAlbedo ||
         !m_rtAovDepth ||
         !m_rtDiffuseDemodulated ||
         !m_rtOutput ||
-        !m_rtAccumDiffuseReady ||
         !m_rtAovDiffuseAlbedoReady ||
         !m_rtAovReady ||
         !m_rtDiffuseDemodulatedReady ||
@@ -7145,17 +8115,18 @@ bool Renderer::RunRtDiffuseDemodulate(
 
     CmdBeginEvent(cmdList, "RT Diffuse Demodulate");
 
-    cl.Transition(m_rtAccumDiffuse.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtAovDiffuseAlbedo.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtAovDepth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(m_rtDiffuseDemodulated.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(diffuseInput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.FlushBarriers();
 
     const bool okTables =
         UpdateRtDiffuseDemodulateTables(
             frameIndex,
-            device);
+            device,
+            diffuseInput);
 
     if (!okTables)
     {
@@ -7284,6 +8255,12 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
     {
         r.owner = RtDebugOwner::GuideReconstruct;
     }
+    else if (IsRtRestirTargetDebug(debugView) ||
+        IsRtRestirGuideDebug(debugView) ||
+        r.wantsRtRestirSpatialDebug)
+    {
+        r.owner = RtDebugOwner::Spatial;
+    }
     else if (r.wantsTemporalDebug ||
         r.wantsRtRestirTemporalDebug)
     {
@@ -7293,12 +8270,8 @@ Renderer::RtDebugRouting Renderer::BuildRtDebugRouting(uint32_t debugView) const
     {
         r.owner = RtDebugOwner::HistorySelect;
     }
-    else if (r.wantsSvgfDebug ||
-        r.wantsRtRestirSpatialDebug)
-    {
-        r.owner = RtDebugOwner::Spatial;
-    }
-    else if (r.wantsRtRestirResolveDebug)
+    else if (r.wantsRtRestirResolveDebug ||
+        IsRtRestirComposeDebug(debugView))
     {
         r.owner = RtDebugOwner::Combine;
     }
@@ -7448,7 +8421,8 @@ void Renderer::RunRtDenoiser(
     uint32_t frameIndex,
     ID3D12Device* device,
     uint32_t width,
-    uint32_t height)
+    uint32_t height,
+    float sceneTime)
 {
     auto* cmdList = cl.Get();
 
@@ -7466,6 +8440,15 @@ void Renderer::RunRtDenoiser(
     const bool wantsSpecAtrousOutputDebug = rtDebug.wantsSpecAtrousOutputDebug;
     const bool wantsHistorySelectDebug = rtDebug.wantsHistorySelectDebug;
 
+    const RtDirectEnvironmentMode effectiveDirectEnvironmentMode =
+        EffectiveRtDirectEnvironmentMode();
+
+    const bool runRestir =
+        effectiveDirectEnvironmentMode !=
+        RtDirectEnvironmentMode::LegacyMis ||
+        RtRestirValidationRunsRestir() ||
+        IsRtRestirDebug(m_debugView);
+
     bool ranDiffuseTemporal = false;
     bool ranSpecStableTemporal = false;
     bool ranSpecResponsiveTemporal = false;
@@ -7478,19 +8461,6 @@ void Renderer::RunRtDenoiser(
 
     const uint32_t writeIndex =
         1u - m_rtHistoryReadIndex;
-
-
-    if (rtPostMode == RtPostMode::RawCombineOnly)
-    {
-        RunRtRawCombineOnly(
-            device,
-            cl,
-            frameIndex,
-            width,
-            height);
-
-        return;
-    }
 
     // ---------------------------------------------------------------------
     // GuideReconstructionPath
@@ -7519,10 +8489,7 @@ void Renderer::RunRtDenoiser(
         m_rtViewZSigmaScale > 0.0f;
 
     const bool restirNeedsTemporalGuides =
-        m_rtEnableRestirEnvDi ||
-        rtDebug.wantsRtRestirTemporalDebug ||
-        rtDebug.wantsRtRestirSpatialDebug ||
-        rtDebug.wantsRtRestirResolveDebug;
+        runRestir;
 
     const bool shouldRunViewZReconstruct =
         temporalWouldRun ||
@@ -7586,29 +8553,158 @@ void Renderer::RunRtDenoiser(
         guides.motionConf = m_rtAovMotionConf.Get();
     }
 
-    const bool ranRestirTemporal =
-        RunRtRestirTemporal(
-            cl,
-            frameIndex,
-            device,
-            width,
-            height,
-            guides,
-            ranViewZReconstruct,
-            ranMotionDilate,
-            rtDebug);
+    bool ranRestirTemporal = false;
+    bool ranRestirSpatial = false;
+    bool ranRestirResolve = false;
+    bool ranRestirCompose = false;
 
-    const bool ranRestirSpatial =
-        RunRtRestirSpatial(
+    if (runRestir)
+    {
+        const bool forceFullRestirPipeline =
+            IsRtRestirTargetDebug(
+                rtDebug.debugView) ||
+            IsRtRestirGuideDebug(
+                rtDebug.debugView) ||
+            IsRtRestirResolveProductionDebug(
+                rtDebug.debugView) ||
+            IsRtRestirComposeDebug(
+                rtDebug.debugView);
+
+        const bool allowTemporal =
+            forceFullRestirPipeline ||
+            EffectiveRtRestirTemporalEnabled();
+
+        if (allowTemporal)
+        {
+            ranRestirTemporal =
+                RunRtRestirTemporal(
+                    cl,
+                    frameIndex,
+                    device,
+                    width,
+                    height,
+                    guides,
+                    ranViewZReconstruct,
+                    ranMotionDilate,
+                    rtDebug);
+        }
+
+        const bool allowSpatial =
+            forceFullRestirPipeline ||
+            EffectiveRtRestirSpatialEnabled();
+
+        if (allowSpatial)
+        {
+            ranRestirSpatial =
+                RunRtRestirSpatial(
+                    cl,
+                    frameIndex,
+                    device,
+                    width,
+                    height,
+                    guides,
+                    ranViewZReconstruct,
+                    ranRestirTemporal,
+                    rtDebug);
+        }
+
+        ranRestirResolve =
+            RunRtRestirResolve(
+                cl,
+                frameIndex,
+                device,
+                width,
+                height,
+                sceneTime,
+                rtDebug);
+    }
+
+    const bool productionRestir =
+        effectiveDirectEnvironmentMode ==
+        RtDirectEnvironmentMode::RestirProduction;
+
+    const bool wantsComposeDebug =
+        IsRtRestirComposeDebug(
+            rtDebug.debugView);
+
+    if ((productionRestir ||
+        wantsComposeDebug) &&
+        ranRestirResolve)
+    {
+        ranRestirCompose =
+            RunRtRestirComposeCurrent(
+                cl,
+                frameIndex,
+                device,
+                width,
+                height);
+    }
+
+    if (runRestir)
+    {
+        m_rtRestirGpuProfiler.End(
+            cmdList,
+            frameIndex,
+            RtRestirGpuTimer::Total);
+    }
+
+    // Metrics instrumentation is outside the ReSTIR GPU Total.
+    // Capture selection is independent of validation mode.
+    RtRestirMetricsCapture metricsCapture{};
+
+    if (BuildRtRestirMetricsCapture(
+        m_rtRestirMetricsCapturePoint,
+        ranRestirResolve,
+        ranRestirCompose,
+        metricsCapture))
+    {
+        RunRtRestirMetrics(
             cl,
             frameIndex,
             device,
             width,
             height,
-            guides,
-            ranViewZReconstruct,
-            ranRestirTemporal,
-            rtDebug);
+            metricsCapture);
+    }
+
+    m_rtRestirGpuProfiler.Resolve(
+        cmdList,
+        frameIndex);
+
+    if (frameIndex <
+        m_rtRestirGpuFrameMetadata.size())
+    {
+        m_rtRestirGpuFrameMetadata[
+            frameIndex].pending = true;
+    }
+
+    ID3D12Resource* currentDiffuseInput =
+        ranRestirCompose
+        ? m_rtRestirComposedDiffuse.Get()
+        : m_rtAccumDiffuse.Get();
+
+    ID3D12Resource* currentSpecularInput =
+        ranRestirCompose
+        ? m_rtRestirComposedSpec.Get()
+        : m_rtAccumSpec.Get();
+
+    // Raw-combine must happen after resolve/composition so production ReSTIR
+    // appears in the raw combined result.
+    if (rtPostMode == RtPostMode::RawCombineOnly)
+    {
+        CombineRtSignalsToOutput(
+            device,
+            cl,
+            frameIndex,
+            currentDiffuseInput,
+            currentSpecularInput,
+            width,
+            height,
+            "RT Raw Current Combine",
+            false);
+
+        return;
+    }
 
     const bool outlierClampCanUseViewZ =
         ranViewZReconstruct &&
@@ -7649,7 +8745,8 @@ void Renderer::RunRtDenoiser(
             frameIndex,
             device,
             width,
-            height);
+            height,
+            currentDiffuseInput);
 
     if (ranDiffuseDemodulate)
     {
@@ -7659,10 +8756,10 @@ void Renderer::RunRtDenoiser(
     ID3D12Resource* diffuseTemporalInput =
         ranDiffuseDemodulate
         ? guides.diffuseDemodulated
-        : m_rtAccumDiffuse.Get();
+        : currentDiffuseInput;
 
     ID3D12Resource* specTemporalInput =
-        m_rtAccumSpec.Get();
+        currentSpecularInput;
 
     const bool shouldClampDiffuse =
         m_rtEnableOutlierClamp &&
@@ -7795,6 +8892,13 @@ void Renderer::RunRtDenoiser(
             cl.Transition(guides.viewZHistoryRead, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             cl.Transition(guides.viewZConfHistoryRead, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
+
+        if (m_rtRestirConfidenceReady &&
+            m_rtRestirConfidence)
+        {
+            cl.Transition(m_rtRestirConfidence.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+
         cl.FlushBarriers();
 
         // Diffuse temporal
@@ -8468,6 +9572,43 @@ void Renderer::RunRtDenoiser(
         rtSignals.FinalDiffuseSignal() &&
         rtSignals.FinalSpecSignal())
     {
+        if (m_rtRestirMetricsCapturePoint ==
+            RtRestirMetricsCapturePoint::FinalDenoised)
+        {
+            RtRestirMetricsCapture capture{};
+
+            capture.domain =
+                RtRestirMetricsDomain::FinalDenoised;
+
+            capture.diffuse =
+                rtSignals.FinalDiffuseSignal();
+
+            capture.specular =
+                rtSignals.FinalSpecSignal();
+
+            capture.diffuseAlbedo =
+                diffuseIsDemodulated
+                ? m_rtAovDiffuseAlbedo.Get()
+                : nullptr;
+
+            capture.diffuseIsDemodulated =
+                diffuseIsDemodulated;
+
+            // FinalDenoised measures the final signal only.
+            // Reservoir diagnostics do not belong to this capture point.
+            capture.reservoir = nullptr;
+            capture.rejectionReason = nullptr;
+            capture.measureReservoirDiagnostics = false;
+
+            RunRtRestirMetrics(
+                cl,
+                frameIndex,
+                device,
+                width,
+                height,
+                capture);
+        }
+
         CombineRtSignalsToOutput(
             device,
             cl,
@@ -9187,6 +10328,92 @@ bool Renderer::LoadRtEnvironmentCpuRadiance(const std::filesystem::path& path)
     return true;
 }
 
+bool Renderer::UploadRtEnvironmentRadianceAtlas(
+    ID3D12Device* device,
+    CommandList& cl,
+    uint32_t frameIndex)
+{
+    if (!device ||
+        !m_rtEnvCpuRadianceReady ||
+        m_rtEnvCpuRadiance.empty() ||
+        m_rtEnvCpuFaceSize == 0u)
+    {
+        return false;
+    }
+
+    const size_t faceSize =
+        static_cast<size_t>(
+            m_rtEnvCpuFaceSize);
+
+    const size_t expectedCount =
+        6u *
+        faceSize *
+        faceSize;
+
+    if (m_rtEnvCpuRadiance.size() !=
+        expectedCount)
+    {
+        DebugOutput(
+            "Warning: RT environment radiance atlas "
+            "source size mismatch.");
+
+        return false;
+    }
+
+    std::vector<DirectX::XMFLOAT4> atlas;
+    atlas.resize(expectedCount);
+
+    for (size_t i = 0;
+        i < expectedCount;
+        ++i)
+    {
+        const DirectX::XMFLOAT3& src =
+            m_rtEnvCpuRadiance[i];
+
+        atlas[i] =
+            DirectX::XMFLOAT4(
+                src.x,
+                src.y,
+                src.z,
+                1.0f);
+    }
+
+    const uint32_t atlasWidth =
+        m_rtEnvCpuFaceSize;
+
+    const uint32_t atlasHeight =
+        m_rtEnvCpuFaceSize * 6u;
+
+    try
+    {
+        m_rtEnvironmentRadianceTex
+            .CreateFromRGBA32FData(
+                device,
+                cl,
+                m_upload,
+                frameIndex,
+                atlasWidth,
+                atlasHeight,
+                atlas.data(),
+                L"Tex: RT Environment Radiance Atlas");
+    }
+    catch (const std::exception& e)
+    {
+        m_rtEnvironmentRadianceTex.Reset();
+
+        DebugOutput(
+            std::string(
+                "Warning: failed to upload RT "
+                "environment radiance atlas: ") +
+            e.what());
+
+        return false;
+    }
+
+    return
+        m_rtEnvironmentRadianceTex.IsValid();
+}
+
 void Renderer::ClearRtEnvironmentCpuRadiance()
 {
     const bool hadEnvSource =
@@ -9214,12 +10441,20 @@ void Renderer::ClearRtEnvironmentCpuRadiance()
 
 void Renderer::ResetRtRestirResources()
 {
-    m_rtRestirInitialReservoir.Reset();
+    m_rtRestirCoreUavBindingState = RtRestirCoreUavBindingState::Uninitialized;
+    m_rtRestirTemporalRejectionReason.Reset();
+    m_rtRestirRejectionReason.Reset();
+    m_rtRestirRejectionReasonReady = false;
 
     for (auto& r : m_rtRestirTemporalReservoir)
         r.Reset();
 
-    m_rtRestirSpatialReservoir.Reset();
+    for (auto& c : m_rtRestirTemporalConfidence)
+        c.Reset();
+
+    m_rtRestirTemporalConfidenceReady = false;
+
+    m_rtRestirScratchReservoir.Reset();
 
     m_rtRestirResolvedDiffuse.Reset();
     m_rtRestirResolvedSpec.Reset();
@@ -9227,6 +10462,10 @@ void Renderer::ResetRtRestirResources()
     m_rtRestirAppliedDiffuse.Reset();
     m_rtRestirAppliedSpec.Reset();
     m_rtRestirAppliedReady = false;
+
+    m_rtRestirComposedDiffuse.Reset();
+    m_rtRestirComposedSpec.Reset();
+    m_rtRestirComposedReady = false;
 
     m_rtRestirResourcesReady = false;
     ResetRtRestirHistory();
@@ -9254,7 +10493,7 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
             uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
             uav.Buffer.FirstElement = 0;
             uav.Buffer.NumElements = 1;
-            uav.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+            uav.Buffer.StructureByteStride = sizeof(RtRestirEnvReservoirPacked);
             uav.Buffer.CounterOffsetInBytes = 0;
             uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
 
@@ -9283,12 +10522,15 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
                 &uav,
                 RtUavCpuAt(11));
         }
+
+        m_rtRestirCoreUavBindingState =
+            RtRestirCoreUavBindingState::Null;
     };
 
     auto WriteLiveRestirUavs = [&]()
     {
         if (!m_rtOutputUav.IsValid() ||
-            !m_rtRestirInitialReservoir ||
+            !m_rtRestirScratchReservoir ||
             !m_rtRestirResolvedDiffuse ||
             !m_rtRestirResolvedSpec)
         {
@@ -9308,19 +10550,20 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
 
         const UINT pixelCount = static_cast<UINT>(pixelCount64);
 
-        // u9 = initial reservoir
+        // u9 = packed ReSTIR scratch reservoir
         {
             D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
             uav.Format = DXGI_FORMAT_UNKNOWN;
             uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
             uav.Buffer.FirstElement = 0;
             uav.Buffer.NumElements = pixelCount;
-            uav.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+            uav.Buffer.StructureByteStride =
+                sizeof(RtRestirEnvReservoirPacked);
             uav.Buffer.CounterOffsetInBytes = 0;
             uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
 
             device->CreateUnorderedAccessView(
-                m_rtRestirInitialReservoir.Get(),
+                m_rtRestirScratchReservoir.Get(),
                 nullptr,
                 &uav,
                 RtUavCpuAt(9));
@@ -9344,57 +10587,71 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
                 &uav,
                 RtUavCpuAt(11));
         }
+        m_rtRestirCoreUavBindingState =
+            RtRestirCoreUavBindingState::Live;
 
         return true;
     };
 
     const bool wantsRestir =
-        m_rtEnableRestirEnvDi ||
+        m_rtDirectEnvironmentMode !=
+        RtDirectEnvironmentMode::LegacyMis ||
+        m_rtRestirValidationMode !=
+        RtRestirValidationMode::Off ||
         IsRtRestirDebug(m_debugView);
 
     if (!wantsRestir)
     {
-        // Do not destroy ReSTIR resources just because the current frame does not
-        // need ReSTIR. They may still be referenced by recently submitted GPU work,
-        // and keeping them alive also avoids churn while cycling debug views.
-        //
-        // The shared DXR UAV table is still made deterministic for non-ReSTIR
-        // frames by binding null descriptors to the ReSTIR UAV slots.
-
         m_rtRestirTemporalValidThisFrame = false;
         m_rtRestirSpatialValidThisFrame = false;
         m_rtRestirResolvedValidThisFrame = false;
         m_rtRestirAppliedReady = false;
 
-        // Keep the expanded DXR UAV table deterministic even when ReSTIR is off.
-        WriteNullRestirUavs();
+        // Initialize u9-u11 deterministically once if they have never
+        // been populated. If live ReSTIR descriptors already exist,
+        // leave them untouched: their backing resources remain alive
+        // and LegacyMis does not access them.
+        if (m_rtRestirCoreUavBindingState ==
+            RtRestirCoreUavBindingState::Uninitialized)
+        {
+            WriteNullRestirUavs();
+        }
+
         return;
     }
 
     const bool needCreate =
         !m_rtRestirResourcesReady ||
-        !m_rtRestirInitialReservoir ||
+        !m_rtRestirScratchReservoir ||
         !m_rtRestirTemporalReservoir[0] ||
         !m_rtRestirTemporalReservoir[1] ||
-        !m_rtRestirSpatialReservoir ||
         !m_rtRestirResolvedDiffuse ||
         !m_rtRestirResolvedSpec ||
-        !m_rtRestirAppliedDiffuse ||
-        !m_rtRestirAppliedSpec ||
         m_rtOutputWidth != width ||
+        !m_rtRestirComposedDiffuse ||
+        !m_rtRestirTemporalConfidence[0] ||
+        !m_rtRestirTemporalConfidence[1] ||
+        !m_rtRestirTemporalRejectionReason ||
+        !m_rtRestirRejectionReason ||
+        !m_rtRestirComposedSpec ||
         m_rtOutputHeight != height;
 
     if (!needCreate)
     {
-        // Resources may have stayed alive while the previous non-ReSTIR frame
-        // wrote null UAVs into u9/u10/u11. Rebind the live descriptors every time
-        // ReSTIR is wanted and resources already exist.
-        if (!WriteLiveRestirUavs())
+        // Existing live descriptors are intentionally left untouched while
+        // resources remain valid. The global DXR UAV table is shared across
+        // frames in flight, so only populate u9-u11 when they are not already
+        // bound to these live resources.
+        if (m_rtRestirCoreUavBindingState !=
+            RtRestirCoreUavBindingState::Live)
         {
-            m_rtRestirResourcesReady = false;
-            m_rtRestirAppliedReady = false;
-            ResetRtRestirHistory();
-            return;
+            if (!WriteLiveRestirUavs())
+            {
+                m_rtRestirResourcesReady = false;
+                m_rtRestirAppliedReady = false;
+                ResetRtRestirHistory();
+                return;
+            }
         }
 
         m_rtRestirResourcesReady = true;
@@ -9406,29 +10663,29 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
     }
     ResetRtRestirResources();
 
-    const uint64_t pixelCount64 =
+    const uint64_t pixelCount =
         static_cast<uint64_t>(width) *
         static_cast<uint64_t>(height);
 
-    if (pixelCount64 == 0 || pixelCount64 > UINT32_MAX)
+    if (pixelCount == 0 || pixelCount > UINT32_MAX)
     {
         WriteNullRestirUavs();
         return;
     }
 
-    const UINT pixelCount = static_cast<UINT>(pixelCount64);
+    const uint64_t reservoirBytes =
+        pixelCount *
+        sizeof(RtRestirEnvReservoirPacked);
 
     CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
 
     auto CreateReservoirBuffer =
         [&](ComPtr<ID3D12Resource>& resource, const wchar_t* name)
     {
-        const uint64_t byteSize =
-            pixelCount64 * static_cast<uint64_t>(sizeof(RtRestirReservoir));
-
-        auto desc = CD3DX12_RESOURCE_DESC::Buffer(
-            byteSize,
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        auto desc =
+            CD3DX12_RESOURCE_DESC::Buffer(
+                reservoirBytes,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
         ThrowIfFailed(
             device->CreateCommittedResource(
@@ -9438,9 +10695,11 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 nullptr,
                 IID_PPV_ARGS(&resource)),
-            "Create RT ReSTIR reservoir buffer");
+            "Create RT ReSTIR packed reservoir buffer");
 
-        SetD3D12ObjectName(resource.Get(), name);
+        SetD3D12ObjectName(
+            resource.Get(),
+            name);
 
         CommandList::SetGlobalState(
             resource.Get(),
@@ -9477,9 +10736,77 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     };
 
+    auto CreateR16UavTexture =
+        [&](ComPtr<ID3D12Resource>& resource,
+            const wchar_t* name)
+    {
+        auto desc =
+            CD3DX12_RESOURCE_DESC::Tex2D(
+                DXGI_FORMAT_R16_FLOAT,
+                width,
+                height,
+                1,
+                1,
+                1,
+                0,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&resource)),
+            "Create RT ReSTIR confidence texture");
+
+        SetD3D12ObjectName(
+            resource.Get(),
+            name);
+
+        CommandList::SetGlobalState(
+            resource.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    };
+
+    auto CreateR32UintUavTexture =
+        [&](ComPtr<ID3D12Resource>& resource,
+            const wchar_t* name)
+    {
+        auto desc =
+            CD3DX12_RESOURCE_DESC::Tex2D(
+                DXGI_FORMAT_R32_UINT,
+                width,
+                height,
+                1,
+                1,
+                1,
+                0,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&resource)),
+            "Create RT ReSTIR rejection-reason texture");
+
+        SetD3D12ObjectName(
+            resource.Get(),
+            name);
+
+        CommandList::SetGlobalState(
+            resource.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    };
+
     CreateReservoirBuffer(
-        m_rtRestirInitialReservoir,
-        L"RT ReSTIR Initial Reservoir");
+        m_rtRestirScratchReservoir,
+        L"RT ReSTIR Scratch Reservoir");
 
     CreateReservoirBuffer(
         m_rtRestirTemporalReservoir[0],
@@ -9488,10 +10815,6 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
     CreateReservoirBuffer(
         m_rtRestirTemporalReservoir[1],
         L"RT ReSTIR Temporal Reservoir 1");
-
-    CreateReservoirBuffer(
-        m_rtRestirSpatialReservoir,
-        L"RT ReSTIR Spatial Reservoir");
 
     CreateRgba16UavTexture(
         m_rtRestirResolvedDiffuse,
@@ -9502,15 +10825,57 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
         L"RT ReSTIR Resolved Spec");
 
     CreateRgba16UavTexture(
-        m_rtRestirAppliedDiffuse,
-        L"RT ReSTIR Applied Diffuse");
+        m_rtRestirComposedDiffuse,
+        L"RT ReSTIR Composed Current Diffuse");
 
     CreateRgba16UavTexture(
-        m_rtRestirAppliedSpec,
-        L"RT ReSTIR Applied Spec");
+        m_rtRestirComposedSpec,
+        L"RT ReSTIR Composed Current Specular");
+
+    CreateR16UavTexture(
+        m_rtRestirTemporalConfidence[0],
+        L"RT ReSTIR Temporal Confidence 0");
+
+    CreateR16UavTexture(
+        m_rtRestirTemporalConfidence[1],
+        L"RT ReSTIR Temporal Confidence 1");
+
+    CreateR32UintUavTexture(
+        m_rtRestirTemporalRejectionReason,
+        L"RT ReSTIR Temporal Rejection Reason");
+
+    CreateR32UintUavTexture(
+        m_rtRestirRejectionReason,
+        L"RT ReSTIR Final Rejection Reason");
+
+    m_rtRestirRejectionReasonReady =
+        m_rtRestirTemporalRejectionReason &&
+        m_rtRestirRejectionReason;
+
+    m_rtRestirTemporalConfidenceReady =
+        m_rtRestirTemporalConfidence[0] &&
+        m_rtRestirTemporalConfidence[1];
+
+    m_rtRestirComposedReady =
+        m_rtRestirComposedDiffuse &&
+        m_rtRestirComposedSpec;
+
+    const bool resolvedReady =
+        m_rtRestirResolvedDiffuse &&
+        m_rtRestirResolvedSpec;
+
+    if (!resolvedReady ||
+        !m_rtRestirComposedReady ||
+        !m_rtRestirTemporalConfidenceReady ||
+        !m_rtRestirRejectionReasonReady)
+    {
+        m_rtRestirResourcesReady = false;
+        ResetRtRestirHistory();
+        return;
+    }
 
     // DXR global UAV table slots:
-    // u9  = initial reservoir
+    // u9  = packed scratch reservoir
     // u10 = resolved diffuse
     // u11 = resolved spec
     if (!WriteLiveRestirUavs())
@@ -9520,9 +10885,1330 @@ void Renderer::EnsureRtRestirResources(uint32_t width, uint32_t height)
         return;
     }
 
+
     m_rtRestirResourcesReady = true;
-    m_rtRestirAppliedReady = true;
+    m_rtRestirAppliedReady =
+        m_rtRestirAppliedDiffuse &&
+        m_rtRestirAppliedSpec;
     ResetRtRestirHistory();
+}
+
+void Renderer::EnsureRtRestirAppliedResources(
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height)
+{
+    m_rtRestirAppliedReady = false;
+
+    if (!device ||
+        width == 0 ||
+        height == 0)
+    {
+        return;
+    }
+
+    auto EnsureTexture =
+        [&](ComPtr<ID3D12Resource>& resource,
+            const wchar_t* name)
+    {
+        if (resource)
+            return;
+
+        const CD3DX12_HEAP_PROPERTIES heap(
+            D3D12_HEAP_TYPE_DEFAULT);
+
+        const auto desc =
+            CD3DX12_RESOURCE_DESC::Tex2D(
+                DXGI_FORMAT_R16G16B16A16_FLOAT,
+                width,
+                height,
+                1,
+                1,
+                1,
+                0,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(&resource)),
+            "Create RT ReSTIR validation apply texture");
+
+        SetD3D12ObjectName(
+            resource.Get(),
+            name);
+
+        CommandList::SetGlobalState(
+            resource.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    };
+
+    EnsureTexture(
+        m_rtRestirAppliedDiffuse,
+        L"RT ReSTIR Applied Diffuse");
+
+    EnsureTexture(
+        m_rtRestirAppliedSpec,
+        L"RT ReSTIR Applied Spec");
+
+    m_rtRestirAppliedReady =
+        m_rtRestirAppliedDiffuse &&
+        m_rtRestirAppliedSpec;
+}
+
+void Renderer::ResetRtRestirMetricsResources()
+{
+    m_rtRestirMetricsPartial.Reset();
+
+    for (auto& readback :
+        m_rtRestirMetricsReadback)
+    {
+        readback.Reset();
+    }
+
+    std::fill(
+        m_rtRestirMetricsReadbackPending.begin(),
+        m_rtRestirMetricsReadbackPending.end(),
+        false);
+
+    std::fill(
+        m_rtRestirMetricsReadbackContext.begin(),
+        m_rtRestirMetricsReadbackContext.end(),
+        RtRestirMetricsContext{});
+
+    m_rtRestirMetricsPartialCount = 0;
+    m_rtRestirMetricsReady = false;
+}
+
+ID3D12Resource* Renderer::CurrentRtRestirFinalReservoir() const
+{
+    if (m_rtRestirSpatialValidThisFrame &&
+        m_rtRestirScratchReservoir)
+    {
+        return m_rtRestirScratchReservoir.Get();
+    }
+
+    if (m_rtRestirTemporalValidThisFrame)
+    {
+        ID3D12Resource* temporal =
+            m_rtRestirTemporalReservoir[
+                m_rtRestirHistoryReadIndex].Get();
+
+                if (temporal)
+                    return temporal;
+    }
+
+    // Initial-only path.
+    return m_rtRestirScratchReservoir.Get();
+}
+
+ID3D12Resource* Renderer::CurrentRtRestirRejectionReason() const
+{
+    if (m_rtRestirSpatialValidThisFrame &&
+        m_rtRestirRejectionReasonReady &&
+        m_rtRestirRejectionReason)
+    {
+        return m_rtRestirRejectionReason.Get();
+    }
+
+    if (m_rtRestirTemporalValidThisFrame &&
+        m_rtRestirTemporalRejectionReason)
+    {
+        return m_rtRestirTemporalRejectionReason.Get();
+    }
+
+    // Initial-only and exact-target reference have no reuse rejection reason.
+    return nullptr;
+}
+
+void Renderer::EnsureRtRestirMetricsResources(
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height)
+{
+    if (!device ||
+        width == 0 ||
+        height == 0 ||
+        m_frameCount == 0)
+    {
+        return;
+    }
+
+    const uint32_t groupCountX =
+        (width +
+            kRtRestirMetricsGroupSizeX -
+            1u) /
+        kRtRestirMetricsGroupSizeX;
+
+    const uint32_t groupCountY =
+        (height +
+            kRtRestirMetricsGroupSizeY -
+            1u) /
+        kRtRestirMetricsGroupSizeY;
+
+    const uint64_t partialCount64 =
+        static_cast<uint64_t>(groupCountX) *
+        static_cast<uint64_t>(groupCountY);
+
+    if (partialCount64 == 0 ||
+        partialCount64 > UINT32_MAX)
+    {
+        ResetRtRestirMetricsResources();
+        return;
+    }
+
+    const uint32_t partialCount =
+        static_cast<uint32_t>(
+            partialCount64);
+
+    bool readbacksReady =
+        m_rtRestirMetricsReadback.size() ==
+        m_frameCount &&
+        m_rtRestirMetricsReadbackPending.size() ==
+        m_frameCount;
+
+    if (readbacksReady)
+    {
+        for (const auto& readback :
+            m_rtRestirMetricsReadback)
+        {
+            if (!readback)
+            {
+                readbacksReady = false;
+                break;
+            }
+        }
+    }
+
+    if (m_rtRestirMetricsReady &&
+        m_rtRestirMetricsPartial &&
+        m_rtRestirMetricsPartialCount ==
+        partialCount &&
+        readbacksReady)
+    {
+        return;
+    }
+
+    ResetRtRestirMetricsResources();
+
+    m_rtRestirMetricsReadback.resize(
+        m_frameCount);
+
+    m_rtRestirMetricsReadbackPending.assign(
+        m_frameCount,
+        false);
+
+    m_rtRestirMetricsReadbackContext.assign(
+        m_frameCount,
+        RtRestirMetricsContext{});
+
+    const uint64_t bufferBytes =
+        partialCount64 *
+        sizeof(RtRestirMetricPartial);
+
+    {
+        const auto heapProperties =
+            CD3DX12_HEAP_PROPERTIES(
+                D3D12_HEAP_TYPE_DEFAULT);
+
+        const auto resourceDesc =
+            CD3DX12_RESOURCE_DESC::Buffer(
+                bufferBytes,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &heapProperties,
+                D3D12_HEAP_FLAG_NONE,
+                &resourceDesc,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                nullptr,
+                IID_PPV_ARGS(
+                    &m_rtRestirMetricsPartial)),
+            "Create RT ReSTIR metrics partial buffer");
+
+        SetD3D12ObjectName(
+            m_rtRestirMetricsPartial.Get(),
+            L"RT ReSTIR Metrics Partial");
+
+        CommandList::SetGlobalState(
+            m_rtRestirMetricsPartial.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    const auto readbackHeap =
+        CD3DX12_HEAP_PROPERTIES(
+            D3D12_HEAP_TYPE_READBACK);
+
+    const auto readbackDesc =
+        CD3DX12_RESOURCE_DESC::Buffer(
+            bufferBytes);
+
+    for (uint32_t i = 0;
+        i < m_frameCount;
+        ++i)
+    {
+        ThrowIfFailed(
+            device->CreateCommittedResource(
+                &readbackHeap,
+                D3D12_HEAP_FLAG_NONE,
+                &readbackDesc,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                nullptr,
+                IID_PPV_ARGS(
+                    &m_rtRestirMetricsReadback[i])),
+            "Create RT ReSTIR metrics readback buffer");
+
+        const std::wstring name =
+            L"RT ReSTIR Metrics Readback " +
+            std::to_wstring(i);
+
+        SetD3D12ObjectName(
+            m_rtRestirMetricsReadback[i].Get(),
+            name.c_str());
+
+        CommandList::SetGlobalState(
+            m_rtRestirMetricsReadback[i].Get(),
+            D3D12_RESOURCE_STATE_COPY_DEST);
+    }
+
+    m_rtRestirMetricsPartialCount =
+        partialCount;
+
+    m_rtRestirMetricsReady = true;
+
+    LogRtRestirAllocationSizes(
+        device);
+}
+
+bool Renderer::UpdateRtRestirMetricsTables(
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    const RtRestirMetricsCapture& capture)
+{
+    if (!device ||
+        frameIndex >= m_rtFrames.size() ||
+        capture.domain ==
+        RtRestirMetricsDomain::Unknown ||
+        !capture.diffuse ||
+        !capture.specular ||
+        !m_rtRestirMetricsPartial ||
+        m_rtRestirMetricsPartialCount == 0)
+    {
+        return false;
+    }
+
+    if (capture.measureReservoirDiagnostics &&
+        !capture.reservoir)
+    {
+        return false;
+    }
+
+    if (capture.diffuseIsDemodulated &&
+        !capture.diffuseAlbedo)
+    {
+        return false;
+    }
+
+    uint32_t reservoirElementCount = 0;
+
+    if (capture.reservoir)
+    {
+        const D3D12_RESOURCE_DESC reservoirDesc =
+            capture.reservoir->GetDesc();
+
+        if (reservoirDesc.Dimension !=
+            D3D12_RESOURCE_DIMENSION_BUFFER)
+        {
+            return false;
+        }
+
+        const uint64_t reservoirElementCount64 =
+            reservoirDesc.Width /
+            sizeof(RtRestirEnvReservoirPacked);
+
+        if (reservoirElementCount64 == 0 ||
+            reservoirElementCount64 > UINT32_MAX)
+        {
+            return false;
+        }
+
+        reservoirElementCount =
+            static_cast<uint32_t>(
+                reservoirElementCount64);
+    }
+
+    auto& frame =
+        m_rtFrames[frameIndex];
+
+    EnsureRtDescriptorTable(
+        frame.restirMetricsSrvTable,
+        frame.restirMetricsSrvCount,
+        kRtRestirMetricsSrvCount);
+
+    EnsureRtDescriptorTable(
+        frame.restirMetricsUavTable,
+        frame.restirMetricsUavCount,
+        kRtRestirMetricsUavCount);
+
+    const uint32_t descriptorSize =
+        m_srvHeap.DescriptorSize();
+
+    auto SrvAt =
+        [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle =
+            frame.restirMetricsSrvTable.cpu;
+
+        handle.ptr +=
+            static_cast<SIZE_T>(slot) *
+            descriptorSize;
+
+        return handle;
+    };
+
+    auto UavAt =
+        [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle =
+            frame.restirMetricsUavTable.cpu;
+
+        handle.ptr +=
+            static_cast<SIZE_T>(slot) *
+            descriptorSize;
+
+        return handle;
+    };
+
+    auto WriteRgba16Srv =
+        [&](ID3D12Resource* resource,
+            uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format =
+            DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+        srv.ViewDimension =
+            D3D12_SRV_DIMENSION_TEXTURE2D;
+
+        srv.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
+
+    // t0/t1 = measured diffuse/specular.
+    WriteRgba16Srv(
+        capture.diffuse,
+        0);
+
+    WriteRgba16Srv(
+        capture.specular,
+        1);
+
+    // t2 = optional packed ReSTIR reservoir.
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_UNKNOWN;
+
+        srv.ViewDimension =
+            D3D12_SRV_DIMENSION_BUFFER;
+
+        srv.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+        srv.Buffer.FirstElement = 0;
+
+        srv.Buffer.NumElements =
+            capture.reservoir
+            ? reservoirElementCount
+            : 1u;
+
+        srv.Buffer.StructureByteStride =
+            sizeof(RtRestirEnvReservoirPacked);
+
+        srv.Buffer.Flags =
+            D3D12_BUFFER_SRV_FLAG_NONE;
+
+        device->CreateShaderResourceView(
+            capture.reservoir,
+            &srv,
+            SrvAt(2));
+    }
+
+    // t3 = optional ReSTIR rejection reason.
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_UINT;
+
+        srv.ViewDimension =
+            D3D12_SRV_DIMENSION_TEXTURE2D;
+
+        srv.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            capture.rejectionReason,
+            &srv,
+            SrvAt(3));
+    }
+
+    // t4 = optional diffuse albedo used to reconstruct
+    // final linear diffuse radiance from demodulated lighting.
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+
+        srv.Format =
+            DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+        srv.ViewDimension =
+            D3D12_SRV_DIMENSION_TEXTURE2D;
+
+        srv.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        device->CreateShaderResourceView(
+            capture.diffuseAlbedo,
+            &srv,
+            SrvAt(4));
+    }
+
+    // u0 = one 32-byte partial per 16x16 group.
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_UNKNOWN;
+
+        uav.ViewDimension =
+            D3D12_UAV_DIMENSION_BUFFER;
+
+        uav.Buffer.FirstElement = 0;
+
+        uav.Buffer.NumElements =
+            m_rtRestirMetricsPartialCount;
+
+        uav.Buffer.StructureByteStride =
+            sizeof(RtRestirMetricPartial);
+
+        uav.Buffer.CounterOffsetInBytes = 0;
+
+        uav.Buffer.Flags =
+            D3D12_BUFFER_UAV_FLAG_NONE;
+
+        device->CreateUnorderedAccessView(
+            m_rtRestirMetricsPartial.Get(),
+            nullptr,
+            &uav,
+            UavAt(0));
+    }
+
+    return true;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS
+Renderer::UpdateRtRestirMetricsConstants(
+    uint32_t frameIndex,
+    const RtRestirMetricsCapture& capture)
+{
+    constexpr uint32_t cbSize =
+        (sizeof(RtRestirMetricsConstants) + 255u) &
+        ~255u;
+
+    auto alloc =
+        m_upload.Allocate(
+            frameIndex,
+            cbSize,
+            256);
+
+    auto* cb =
+        reinterpret_cast<RtRestirMetricsConstants*>(
+            alloc.cpu);
+
+    *cb = {};
+
+    cb->measureReservoirDiagnostics =
+        capture.measureReservoirDiagnostics
+        ? 1u
+        : 0u;
+
+    cb->diffuseIsDemodulated =
+        capture.diffuseIsDemodulated
+        ? 1u
+        : 0u;
+
+    return alloc.gpu;
+}
+
+bool Renderer::RunRtRestirMetrics(
+    CommandList& cl,
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height,
+    const RtRestirMetricsCapture& capture)
+{
+    if (!device ||
+        frameIndex >= m_frameCount ||
+        capture.domain ==
+        RtRestirMetricsDomain::Unknown ||
+        !capture.diffuse ||
+        !capture.specular)
+    {
+        return false;
+    }
+
+    if (capture.measureReservoirDiagnostics &&
+        !capture.reservoir)
+    {
+        return false;
+    }
+
+    if (capture.diffuseIsDemodulated &&
+        !capture.diffuseAlbedo)
+    {
+        return false;
+    }
+
+    EnsureRtRestirMetricsResources(
+        device,
+        width,
+        height);
+
+    if (!m_rtRestirMetricsReady ||
+        !m_rtRestirMetricsPartial ||
+        frameIndex >=
+        m_rtRestirMetricsReadback.size() ||
+        frameIndex >=
+        m_rtRestirMetricsReadbackContext.size() ||
+        !m_rtRestirMetricsReadback[frameIndex])
+    {
+        return false;
+    }
+
+    ID3D12GraphicsCommandList* commandList =
+        cl.Get();
+
+    ID3D12DescriptorHeap* heaps[] =
+    {
+        m_srvHeap.GetHeap()
+    };
+
+    commandList->SetDescriptorHeaps(
+        _countof(heaps),
+        heaps);
+
+    CmdBeginEvent(
+        commandList,
+        "RT ReSTIR Metrics");
+
+    cl.Transition(
+        capture.diffuse,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.Transition(
+        capture.specular,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    if (capture.diffuseAlbedo)
+    {
+        cl.Transition(
+            capture.diffuseAlbedo,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    if (capture.reservoir)
+    {
+        cl.Transition(
+            capture.reservoir,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    if (capture.rejectionReason)
+    {
+        cl.Transition(
+            capture.rejectionReason,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    cl.Transition(
+        m_rtRestirMetricsPartial.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.FlushBarriers();
+
+    if (!UpdateRtRestirMetricsTables(
+        frameIndex,
+        device,
+        capture))
+    {
+        CmdEndEvent(commandList);
+        return false;
+    }
+
+    const D3D12_GPU_VIRTUAL_ADDRESS constants =
+        UpdateRtRestirMetricsConstants(
+            frameIndex,
+            capture);
+
+    m_rtRestirMetricsPass.Dispatch(
+        cl,
+        constants,
+        m_rtFrames[frameIndex].restirMetricsSrvTable.gpu,
+        m_rtFrames[frameIndex].restirMetricsUavTable.gpu,
+        width,
+        height);
+
+    D3D12_RESOURCE_BARRIER uavBarrier{};
+    uavBarrier.Type =
+        D3D12_RESOURCE_BARRIER_TYPE_UAV;
+
+    uavBarrier.UAV.pResource =
+        m_rtRestirMetricsPartial.Get();
+
+    commandList->ResourceBarrier(
+        1,
+        &uavBarrier);
+
+    cl.Transition(
+        m_rtRestirMetricsPartial.Get(),
+        D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+    cl.FlushBarriers();
+
+    const uint64_t copyBytes =
+        static_cast<uint64_t>(
+            m_rtRestirMetricsPartialCount) *
+        sizeof(RtRestirMetricPartial);
+
+    commandList->CopyBufferRegion(
+        m_rtRestirMetricsReadback[
+            frameIndex].Get(),
+            0,
+            m_rtRestirMetricsPartial.Get(),
+            0,
+            copyBytes);
+
+    // Restore the partial buffer for the next metrics capture.
+    cl.Transition(
+        m_rtRestirMetricsPartial.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.FlushBarriers();
+
+    m_rtRestirMetricsReadbackPending[
+        frameIndex] = true;
+
+    RtRestirMetricsContext& context =
+        m_rtRestirMetricsReadbackContext[
+            frameIndex];
+
+    context.domain = capture.domain;
+
+    context.validationMode =
+        m_rtRestirValidationMode;
+
+    context.directEnvironmentMode =
+        EffectiveRtDirectEnvironmentMode();
+
+    context.mathMode =
+        EffectiveRtRestirMathMode();
+
+    context.width = width;
+    context.height = height;
+
+    context.measureReservoirDiagnostics =
+        capture.measureReservoirDiagnostics;
+
+    CmdEndEvent(commandList);
+    return true;
+}
+
+void Renderer::ReadCompletedRtRestirGpuTimings(
+    uint32_t frameIndex)
+{
+    if (frameIndex >=
+        m_rtRestirGpuFrameMetadata.size())
+    {
+        return;
+    }
+
+    RtRestirGpuFrameMetadata& metadata =
+        m_rtRestirGpuFrameMetadata[
+            frameIndex];
+
+    if (!metadata.pending)
+        return;
+
+    metadata.pending = false;
+
+    if (!m_rtRestirGpuProfiler.HasCompletedResultThisRead(
+        RtRestirGpuTimer::PrimaryDxr))
+    {
+        return;
+    }
+
+    const double primaryMs =
+        m_rtRestirGpuProfiler
+        .LastCompletedMilliseconds(
+            RtRestirGpuTimer::PrimaryDxr);
+
+    if (primaryMs < 0.0)
+        return;
+
+    AccumulateRtRestirGpuTimings(
+        metadata);
+
+    if (metadata.initialRestirEnabled)
+    {
+        m_rtRestirPrimaryInitialMs =
+            primaryMs;
+    }
+    else
+    {
+        m_rtRestirPrimaryLegacyMs =
+            primaryMs;
+    }
+
+    ++m_rtRestirGpuCompletedFrameCount;
+
+    const auto TimerText =
+        [this](RtRestirGpuTimer timer)
+    {
+        if (!m_rtRestirGpuProfiler
+            .HasCompletedResultThisRead(
+                timer))
+        {
+            return std::string("n/a");
+        }
+
+        const double milliseconds =
+            m_rtRestirGpuProfiler
+            .LastCompletedMilliseconds(
+                timer);
+
+        if (milliseconds < 0.0)
+            return std::string("n/a");
+
+        return std::format(
+            "{:.3f} ms",
+            milliseconds);
+    };
+
+    std::string primaryComparison =
+        "Primary comparison pending";
+
+    if (m_rtRestirPrimaryLegacyMs >= 0.0 &&
+        m_rtRestirPrimaryInitialMs >= 0.0)
+    {
+        const double initialCostMs =
+            m_rtRestirPrimaryInitialMs -
+            m_rtRestirPrimaryLegacyMs;
+
+        primaryComparison =
+            std::format(
+                "Latest Primary Legacy={:.3f} ms, "
+                "Latest Primary Initial-ReSTIR={:.3f} ms, "
+                "latest-sample difference={:+.3f} ms "
+                "(not context matched; use aggregate stats for comparison)",
+                m_rtRestirPrimaryLegacyMs,
+                m_rtRestirPrimaryInitialMs,
+                initialCostMs);
+    }
+
+    DebugOutput(
+        std::format(
+            "RT ReSTIR GPU [{}]: "
+            "PrimaryDxr={:.3f} ms ({}), "
+            "Temporal={}, "
+            "Spatial={}, "
+            "Resolve={}, "
+            "Compose={}, "
+            "Total={} | {}",
+            m_rtRestirGpuCompletedFrameCount,
+            primaryMs,
+            metadata.initialRestirEnabled
+            ? "initial ReSTIR enabled"
+            : "Legacy baseline",
+            TimerText(
+                RtRestirGpuTimer::Temporal),
+            TimerText(
+                RtRestirGpuTimer::Spatial),
+            TimerText(
+                RtRestirGpuTimer::Resolve),
+            TimerText(
+                RtRestirGpuTimer::Compose),
+            TimerText(
+                RtRestirGpuTimer::Total),
+            primaryComparison));
+}
+
+void Renderer::LogRtRestirAllocationSizes(
+    ID3D12Device* device) const
+{
+    if (!device)
+        return;
+
+    const auto AllocationBytes =
+        [device](ID3D12Resource* resource) -> uint64_t
+    {
+        if (!resource)
+            return 0;
+
+        const D3D12_RESOURCE_DESC desc =
+            resource->GetDesc();
+
+        const D3D12_RESOURCE_ALLOCATION_INFO info =
+            device->GetResourceAllocationInfo(
+                0,
+                1,
+                &desc);
+
+        return info.SizeInBytes;
+    };
+
+    const auto ToMiB =
+        [](uint64_t bytes) -> double
+    {
+        return
+            static_cast<double>(bytes) /
+            (1024.0 * 1024.0);
+    };
+
+    const auto LogResource =
+        [&](const char* category,
+            const char* name,
+            ID3D12Resource* resource,
+            uint64_t& categoryTotal)
+    {
+        const uint64_t bytes =
+            AllocationBytes(resource);
+
+        categoryTotal += bytes;
+
+        DebugOutput(
+            std::format(
+                "RT ReSTIR allocation [{}] {}: "
+                "{} bytes ({:.3f} MiB)",
+                category,
+                name,
+                bytes,
+                ToMiB(bytes)));
+    };
+
+    uint64_t persistentBytes = 0;
+    uint64_t scratchBytes = 0;
+    uint64_t validationOnlyBytes = 0;
+
+    // ---------------------------------------------------------
+    // Persistent
+    // ---------------------------------------------------------
+
+    LogResource(
+        "Persistent",
+        "Temporal reservoir 0",
+        m_rtRestirTemporalReservoir[0].Get(),
+        persistentBytes);
+
+    LogResource(
+        "Persistent",
+        "Temporal reservoir 1",
+        m_rtRestirTemporalReservoir[1].Get(),
+        persistentBytes);
+
+    LogResource(
+        "Persistent",
+        "Resolved diffuse",
+        m_rtRestirResolvedDiffuse.Get(),
+        persistentBytes);
+
+    LogResource(
+        "Persistent",
+        "Resolved specular",
+        m_rtRestirResolvedSpec.Get(),
+        persistentBytes);
+
+    LogResource(
+        "Persistent",
+        "Specular F0 AOV",
+        m_rtAovSpecularF0.Get(),
+        persistentBytes);
+
+    LogResource(
+        "Persistent",
+        "ReSTIR confidence",
+        m_rtRestirConfidence.Get(),
+        persistentBytes);
+
+    LogResource(
+        "Persistent",
+        "Receiver normal/raw roughness",
+        m_rtRestirReceiverNormalRoughness.Get(),
+        persistentBytes);
+
+    LogResource(
+        "Persistent",
+        "Composed diffuse",
+        m_rtRestirComposedDiffuse.Get(),
+        persistentBytes);
+
+    LogResource(
+        "Persistent",
+        "Composed specular",
+        m_rtRestirComposedSpec.Get(),
+        persistentBytes);
+
+    // ---------------------------------------------------------
+    // Scratch
+    // ---------------------------------------------------------
+
+    LogResource(
+        "Scratch",
+        "Scratch reservoir",
+        m_rtRestirScratchReservoir.Get(),
+        scratchBytes);
+
+    LogResource(
+        "Scratch",
+        "Temporal confidence 0",
+        m_rtRestirTemporalConfidence[0].Get(),
+        scratchBytes);
+
+    LogResource(
+        "Scratch",
+        "Temporal confidence 1",
+        m_rtRestirTemporalConfidence[1].Get(),
+        scratchBytes);
+
+    LogResource(
+        "Scratch",
+        "Rejection reason",
+        m_rtRestirRejectionReason.Get(),
+        scratchBytes);
+
+    LogResource(
+        "Scratch",
+        "Metrics partial",
+        m_rtRestirMetricsPartial.Get(),
+        scratchBytes);
+
+    // ---------------------------------------------------------
+    // Validation-only
+    // ---------------------------------------------------------
+
+    LogResource(
+        "Validation-only",
+        "Applied diffuse",
+        m_rtRestirAppliedDiffuse.Get(),
+        validationOnlyBytes);
+
+    LogResource(
+        "Validation-only",
+        "Applied specular",
+        m_rtRestirAppliedSpec.Get(),
+        validationOnlyBytes);
+
+    LogResource(
+        "Validation-only",
+        "Exact-target reference diffuse",
+        m_rtExactTargetReferenceDiffuse.Get(),
+        validationOnlyBytes);
+
+    LogResource(
+        "Validation-only",
+        "Exact-target reference specular",
+        m_rtExactTargetReferenceSpec.Get(),
+        validationOnlyBytes);
+
+    uint64_t metricsReadbackBytes = 0;
+
+    for (const auto& readback :
+        m_rtRestirMetricsReadback)
+    {
+        metricsReadbackBytes +=
+            AllocationBytes(
+                readback.Get());
+    }
+
+    validationOnlyBytes +=
+        metricsReadbackBytes;
+
+    DebugOutput(
+        std::format(
+            "RT ReSTIR allocation [Validation-only] "
+            "Metrics readback ({} frame slots): "
+            "{} bytes ({:.3f} MiB)",
+            m_rtRestirMetricsReadback.size(),
+            metricsReadbackBytes,
+            ToMiB(metricsReadbackBytes)));
+
+    // Theoretical packed-reservoir payload: 3 * width * height * 32 bytes.
+    // Actual allocation totals use GetResourceAllocationInfo().
+
+    uint64_t theoreticalReservoirBytes = 0;
+
+    if (m_rtRestirScratchReservoir)
+    {
+        const D3D12_RESOURCE_DESC desc =
+            m_rtRestirScratchReservoir->GetDesc();
+
+        if (desc.Dimension ==
+            D3D12_RESOURCE_DIMENSION_BUFFER &&
+            desc.Width >=
+            sizeof(RtRestirEnvReservoirPacked))
+        {
+            const uint64_t pixelCount =
+                desc.Width /
+                sizeof(RtRestirEnvReservoirPacked);
+
+            theoreticalReservoirBytes =
+                pixelCount *
+                3ull *
+                sizeof(RtRestirEnvReservoirPacked);
+        }
+    }
+
+    const uint64_t totalBytes =
+        persistentBytes +
+        scratchBytes +
+        validationOnlyBytes;
+
+    DebugOutput(
+        std::format(
+            "RT ReSTIR allocation totals: "
+            "Persistent={} bytes ({:.3f} MiB), "
+            "Scratch={} bytes ({:.3f} MiB), "
+            "Validation-only={} bytes ({:.3f} MiB), "
+            "Total={} bytes ({:.3f} MiB)",
+            persistentBytes,
+            ToMiB(persistentBytes),
+            scratchBytes,
+            ToMiB(scratchBytes),
+            validationOnlyBytes,
+            ToMiB(validationOnlyBytes),
+            totalBytes,
+            ToMiB(totalBytes)));
+
+    DebugOutput(
+        std::format(
+            "RT ReSTIR theoretical 3-reservoir payload: "
+            "{} bytes ({:.3f} MiB). "
+            "Actual allocation report above uses "
+            "ID3D12Device::GetResourceAllocationInfo().",
+            theoreticalReservoirBytes,
+            ToMiB(theoreticalReservoirBytes)));
+}
+
+void Renderer::ReadCompletedRtRestirMetrics(
+    uint32_t frameIndex)
+{
+    if (frameIndex >=
+        m_rtRestirMetricsReadback.size() ||
+        frameIndex >=
+        m_rtRestirMetricsReadbackPending.size() ||
+        !m_rtRestirMetricsReadbackPending[
+            frameIndex])
+    {
+        return;
+    }
+
+    m_rtRestirMetricsReadbackPending[
+        frameIndex] = false;
+
+    const RtRestirMetricsContext context =
+        frameIndex <
+        m_rtRestirMetricsReadbackContext.size()
+        ? m_rtRestirMetricsReadbackContext[frameIndex]
+        : RtRestirMetricsContext{};
+
+    const bool reservoirStatisticsMeaningful =
+        context.measureReservoirDiagnostics;
+
+    ID3D12Resource* readback =
+        m_rtRestirMetricsReadback[
+            frameIndex].Get();
+
+            if (!readback ||
+                m_rtRestirMetricsPartialCount == 0)
+            {
+                return;
+            }
+
+            const uint64_t readBytes =
+                static_cast<uint64_t>(
+                    m_rtRestirMetricsPartialCount) *
+                sizeof(RtRestirMetricPartial);
+
+            D3D12_RANGE readRange{};
+            readRange.Begin = 0;
+            readRange.End =
+                static_cast<SIZE_T>(
+                    readBytes);
+
+            void* mapped = nullptr;
+
+            const HRESULT mapResult =
+                readback->Map(
+                    0,
+                    &readRange,
+                    &mapped);
+
+            if (FAILED(mapResult) ||
+                !mapped)
+            {
+                return;
+            }
+
+            const auto* partials =
+                reinterpret_cast<
+                const RtRestirMetricPartial*>(
+                    mapped);
+
+            double diffuseSum = 0.0;
+            double specularSum = 0.0;
+            double combinedSum = 0.0;
+
+            float maximumLuminance = 0.0f;
+
+            uint64_t reservoirInvalidCount = 0;
+            uint64_t signalInvalidCount = 0;
+            uint64_t mClampCount = 0;
+            uint64_t wClampCount = 0;
+            uint64_t rejectionCount = 0;
+            uint64_t sampleCount = 0;
+
+            for (uint32_t i = 0;
+                i < m_rtRestirMetricsPartialCount;
+                ++i)
+            {
+                const RtRestirMetricPartial& partial =
+                    partials[i];
+
+                diffuseSum +=
+                    partial.diffuseLuminanceSum;
+
+                specularSum +=
+                    partial.specularLuminanceSum;
+
+                combinedSum +=
+                    partial.combinedLuminanceSum;
+
+                maximumLuminance =
+                    std::max(
+                        maximumLuminance,
+                        partial.maximumLuminance);
+
+                if (reservoirStatisticsMeaningful)
+                {
+                    reservoirInvalidCount +=
+                        partial.invalidCounts &
+                        0xFFFFu;
+
+                    mClampCount +=
+                        partial.clampCounts &
+                        0xFFFFu;
+
+                    wClampCount +=
+                        (partial.clampCounts >>
+                            16u) &
+                        0xFFFFu;
+
+                    rejectionCount +=
+                        partial.rejectionCount;
+                }
+
+                // Signal validity is meaningful for every metrics domain,
+                // including ExactTargetReference where reservoir statistics are not.
+                signalInvalidCount +=
+                    (partial.invalidCounts >>
+                        16u) &
+                    0xFFFFu;
+
+                sampleCount +=
+                    partial.sampleCount;
+            }
+
+            const D3D12_RANGE writtenRange
+            {
+                0,
+                0
+            };
+
+            readback->Unmap(
+                0,
+                &writtenRange);
+
+            if (frameIndex <
+                m_rtRestirMetricsReadbackContext.size())
+            {
+                m_rtRestirMetricsReadbackContext[
+                    frameIndex] =
+                    RtRestirMetricsContext{};
+            }
+
+            if (sampleCount == 0)
+                return;
+
+            const double inverseSampleCount =
+                1.0 /
+                static_cast<double>(
+                    sampleCount);
+
+            ++m_rtRestirMetricsCapturedFrameCount;
+
+            DebugOutput(
+                std::format(
+                    "RT ReSTIR metrics [{}]: "
+                    "domain={}, "
+                    "validation={}, "
+                    "direct={}, "
+                    "math={}, "
+                    "resolution={}x{}, "
+                    "mean diffuse={:.6f}, "
+                    "mean specular={:.6f}, "
+                    "mean combined={:.6f}, "
+                    "max={:.6f}, "
+                    "reservoir invalid={}, "
+                    "signal non-finite={}, "
+                    "W clamp={}, "
+                    "M clamp={}, "
+                    "rejection={}, "
+                    "samples={}",
+                    m_rtRestirMetricsCapturedFrameCount,
+                    RtRestirMetricsDomainName(
+                        context.domain),
+                    RtRestirValidationModeName(
+                        context.validationMode),
+                    RtDirectEnvironmentModeName(
+                        context.directEnvironmentMode),
+                    RtRestirMathModeName(
+                        context.mathMode),
+                    context.width,
+                    context.height,
+                    diffuseSum * inverseSampleCount,
+                    specularSum * inverseSampleCount,
+                    combinedSum * inverseSampleCount,
+                    maximumLuminance,
+                    reservoirInvalidCount,
+                    signalInvalidCount,
+                    wClampCount,
+                    mClampCount,
+                    rejectionCount,
+                    sampleCount));
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirTemporalConstants(
@@ -9548,7 +12234,9 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirTemporalConstants(
     };
 
     cb->temporalEnabled =
-        m_rtRestirUseTemporal ? 1u : 0u;
+        EffectiveRtRestirTemporalEnabled()
+        ? 1u
+        : 0u;
 
     cb->historyValid =
         temporalHistoryValid ? 1u : 0u;
@@ -9560,6 +12248,7 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirTemporalConstants(
         viewZHistoryValid ? 1u : 0u;
 
     cb->debugView = m_debugView;
+
     cb->frameIndex = frameIndex;
 
     cb->depthSigma = std::max(1e-5f, m_rtRestirDepthSigma);
@@ -9570,9 +12259,16 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirTemporalConstants(
     cb->reprojectMinWeight =
         std::clamp(m_rtRestirTemporalMinConfidence, 0.0f, 1.0f);
 
+    const RtRestirMathMode effectiveMathMode =
+        EffectiveRtRestirMathMode();
+
     const bool useReferenceMath =
-        m_rtRestirMathMode ==
+        effectiveMathMode ==
         RtRestirMathMode::Reference;
+
+    cb->mathMode =
+        static_cast<uint32_t>(
+            effectiveMathMode);
 
     cb->maxM =
         useReferenceMath
@@ -9582,7 +12278,11 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirTemporalConstants(
             m_rtRestirMaxM);
 
     cb->maxAge =
-        std::max(0.0f, m_rtRestirMaxAge);
+        useReferenceMath
+        ? kRtRestirReferenceMaxAge
+        : std::max(
+            0.0f,
+            m_rtRestirMaxAge);
 
     cb->maxWeight =
         useReferenceMath
@@ -9601,13 +12301,47 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirTemporalConstants(
     cb->distanceNormSigma =
         kRtDistanceNormSigma;
 
-    cb->mathMode =
-        static_cast<uint32_t>(
-            m_rtRestirMathMode);
-
     cb->padMath[0] = 0u;
     cb->padMath[1] = 0u;
     cb->padMath[2] = 0u;
+
+    cb->inverseViewProjection =
+        m_currInvViewProj;
+
+    cb->deltaRoughnessCutoff =
+        std::max(
+            0.0f,
+            m_rtRestirDeltaRoughnessCutoff);
+
+    cb->primarySampleIndex =
+        m_rtPrimaryAovSampleIndex;
+
+    cb->primaryResetId =
+        m_rtPrimaryAovResetId;
+
+    cb->primaryJitterEnabled =
+        m_rtPrimaryAovJitterEnabled
+        ? 1u
+        : 0u;
+
+    const bool hasRtRadiance =
+        m_environment.lightingRadianceLoaded &&
+        m_rtEnvironmentRadianceTex.IsValid() &&
+        m_rtEnvCpuRadianceReady;
+
+    cb->hasEnvironmentRadiance =
+        hasRtRadiance ? 1u : 0u;
+
+    cb->lightingIntensity =
+        m_environment.lightingIntensity;
+
+    cb->lightingRotationRadians =
+        m_environment.lightingRotationRadians;
+
+    cb->environmentFaceSize =
+        hasRtRadiance
+        ? m_rtEnvFaceSize
+        : 0u;
 
     return alloc.gpu;
 }
@@ -9617,6 +12351,7 @@ bool Renderer::UpdateRtRestirTemporalTables(
     ID3D12Device* device,
     ID3D12Resource* prevTemporalReservoir,
     ID3D12Resource* outTemporalReservoir,
+    ID3D12Resource* outTemporalConfidence,
     ID3D12Resource* currPrevUvResource,
     ID3D12Resource* currViewZResource,
     ID3D12Resource* prevViewZResource,
@@ -9627,12 +12362,16 @@ bool Renderer::UpdateRtRestirTemporalTables(
     uint32_t height)
 {
     if (!device ||
-        !m_rtRestirInitialReservoir ||
+        !m_rtRestirScratchReservoir ||
         !outTemporalReservoir ||
         !currPrevUvResource ||
         !m_rtAovNormal ||
         !m_rtAovDepth ||
         !m_rtAovSurfaceId ||
+        !m_rtAovDiffuseAlbedo ||
+        !m_rtAovDiffuseAlbedoReady ||
+        !m_rtAovSpecularF0 ||
+        !m_rtAovSpecularF0Ready ||
         !currViewZResource ||
         !prevViewZResource ||
         !prevNormalResource ||
@@ -9642,6 +12381,9 @@ bool Renderer::UpdateRtRestirTemporalTables(
         !m_rtRestirResourcesReady ||
         !m_rtAovReady ||
         !m_rtAovSurfaceIdReady ||
+        !m_rtRestirReceiverNormalRoughness ||
+        !m_rtRestirReceiverNormalRoughnessReady ||
+        !outTemporalConfidence ||
         !m_rtOutputReady)
     {
         return false;
@@ -9686,7 +12428,7 @@ bool Renderer::UpdateRtRestirTemporalTables(
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Buffer.FirstElement = 0;
         srv.Buffer.NumElements = pixelCount;
-        srv.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+        srv.Buffer.StructureByteStride = sizeof(RtRestirEnvReservoirPacked);
         srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 
         device->CreateShaderResourceView(
@@ -9702,7 +12444,7 @@ bool Renderer::UpdateRtRestirTemporalTables(
         uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
         uav.Buffer.FirstElement = 0;
         uav.Buffer.NumElements = pixelCount;
-        uav.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+        uav.Buffer.StructureByteStride = sizeof(RtRestirEnvReservoirPacked);
         uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
 
         device->CreateUnorderedAccessView(
@@ -9741,7 +12483,7 @@ bool Renderer::UpdateRtRestirTemporalTables(
     };
 
     // t0 = current initial reservoir from DXR section 8.
-    WriteReservoirSrv(m_rtRestirInitialReservoir.Get(), 0);
+    WriteReservoirSrv(m_rtRestirScratchReservoir.Get(), 0);
 
     // t1 = previous temporal reservoir. Null is valid when historyValid == 0.
     WriteReservoirSrv(prevTemporalReservoir, 1);
@@ -9775,6 +12517,22 @@ bool Renderer::UpdateRtRestirTemporalTables(
     // t10 = previous SurfaceId history.
     WriteSrv2D(prevSurfaceIdResource, DXGI_FORMAT_R32_UINT, 10);
 
+    // t11 = current diffuse albedo
+    WriteSrv2D(m_rtAovDiffuseAlbedo.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 11);
+
+    // t12 = current specular F0
+    WriteSrv2D(m_rtAovSpecularF0.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 12);
+
+    // t13 = environment radiance
+    // Bind the same lighting-radiance texture selected for global t386.
+    WriteEnvironmentRadianceSrv(device, SrvAt(13));
+
+    // t14 = exact current ReSTIR receiver normal/raw roughness
+    WriteSrv2D(
+        m_rtRestirReceiverNormalRoughness.Get(),
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+        14);
+
     // u0 = current temporal reservoir output.
     WriteReservoirUav(outTemporalReservoir, 0);
 
@@ -9782,6 +12540,12 @@ bool Renderer::UpdateRtRestirTemporalTables(
     // Bound consistently because the shader declares it. RunRtRestirTemporal()
     // transitions m_rtOutput to UAV before dispatch.
     WriteUav2D(m_rtOutput.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, 1);
+
+    // u2 = current temporal confidence
+    WriteUav2D(outTemporalConfidence, DXGI_FORMAT_R16_FLOAT, 2);
+
+    // u3 = temporal rejection reasons
+    WriteUav2D(m_rtRestirTemporalRejectionReason.Get(), DXGI_FORMAT_R32_UINT, 3);
 
     return true;
 }
@@ -9799,12 +12563,21 @@ bool Renderer::RunRtRestirTemporal(
 {
     if (!device ||
         !m_rtRestirResourcesReady ||
-        !m_rtRestirInitialReservoir ||
+        !m_rtRestirScratchReservoir ||
         !m_rtRestirTemporalReservoir[0] ||
         !m_rtRestirTemporalReservoir[1] ||
+        !m_rtRestirTemporalConfidenceReady ||
+        !m_rtRestirTemporalConfidence[0] ||
+        !m_rtRestirTemporalConfidence[1] ||
         !guides.normalRough ||
         !guides.depth ||
         !guides.surfaceId ||
+        !m_rtAovDiffuseAlbedo ||
+        !m_rtAovDiffuseAlbedoReady ||
+        !m_rtAovSpecularF0 ||
+        !m_rtAovSpecularF0Ready ||
+        !m_rtRestirReceiverNormalRoughness ||
+        !m_rtRestirReceiverNormalRoughnessReady ||
         !m_rtOutput ||
         !m_rtOutputReady)
     {
@@ -9812,7 +12585,7 @@ bool Renderer::RunRtRestirTemporal(
     }
 
     const bool wantsRestirTemporal =
-        m_rtEnableRestirEnvDi ||
+        EffectiveRtRestirTemporalEnabled() ||
         rtDebug.wantsRtRestirTemporalDebug ||
         rtDebug.wantsRtRestirSpatialDebug ||
         rtDebug.wantsRtRestirResolveDebug;
@@ -9840,6 +12613,9 @@ bool Renderer::RunRtRestirTemporal(
     ID3D12Resource* outTemporalReservoir =
         m_rtRestirTemporalReservoir[writeIndex].Get();
 
+    ID3D12Resource* outTemporalConfidence =
+        m_rtRestirTemporalConfidence[writeIndex].Get();
+
     RtDenoiserHistories histories =
         BuildRtDenoiserHistories(
             m_rtHistoryReadIndex,
@@ -9865,7 +12641,7 @@ bool Renderer::RunRtRestirTemporal(
         currViewZ;
 
     const bool canUseTemporalHistory =
-        m_rtRestirUseTemporal &&
+        EffectiveRtRestirTemporalEnabled() &&
         m_rtRestirHistoryValid &&
         ranMotionDilate &&
         guides.prevUVDilated &&
@@ -9906,7 +12682,7 @@ bool Renderer::RunRtRestirTemporal(
 
     CmdBeginEvent(cmdList, "RT ReSTIR Temporal");
 
-    cl.Transition(m_rtRestirInitialReservoir.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtRestirScratchReservoir.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     if (prevTemporalReservoir)
     {
@@ -9914,6 +12690,7 @@ bool Renderer::RunRtRestirTemporal(
     }
 
     cl.Transition(outTemporalReservoir, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(outTemporalConfidence, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     cl.Transition(guides.normalRough, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(guides.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -9943,9 +12720,24 @@ bool Renderer::RunRtRestirTemporal(
         cl.Transition(prevSurfaceId, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
 
-    // Bound as u1 for debug 106/107. Keeping the transition here is simple and
-    // matches your other debug-capable compute passes.
+    // u1 is used by debug views 106/107.
     cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    if (m_rtRestirRejectionReasonReady)
+    {
+        cl.Transition(
+            m_rtRestirTemporalRejectionReason.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    // t11 = current diffuse albedo
+    cl.Transition(m_rtAovDiffuseAlbedo.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    // t12 = current specular F0
+    cl.Transition(m_rtAovSpecularF0.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    // t14 = exact ReSTIR receiver normal/raw material roughness
+    cl.Transition(m_rtRestirReceiverNormalRoughness.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     cl.FlushBarriers();
 
@@ -9955,6 +12747,7 @@ bool Renderer::RunRtRestirTemporal(
             device,
             prevTemporalReservoir,
             outTemporalReservoir,
+            outTemporalConfidence,
             currPrevUv,
             currViewZ,
             prevViewZ,
@@ -9982,6 +12775,11 @@ bool Renderer::RunRtRestirTemporal(
             surfaceIdHistoryValid,
             viewZHistoryValid);
 
+    m_rtRestirGpuProfiler.Begin(
+        cmdList,
+        frameIndex,
+        RtRestirGpuTimer::Temporal);
+
     m_rtRestirTemporalPass.Dispatch(
         cl,
         cb,
@@ -9990,7 +12788,7 @@ bool Renderer::RunRtRestirTemporal(
         width,
         height);
 
-    D3D12_RESOURCE_BARRIER barriers[2]{};
+    D3D12_RESOURCE_BARRIER barriers[4]{};
 
     barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     barriers[0].UAV.pResource = outTemporalReservoir;
@@ -9998,7 +12796,20 @@ bool Renderer::RunRtRestirTemporal(
     barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     barriers[1].UAV.pResource = m_rtOutput.Get();
 
-    cmdList->ResourceBarrier(2, barriers);
+    barriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+
+    barriers[2].UAV.pResource = outTemporalConfidence;
+
+    barriers[3].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+
+    barriers[3].UAV.pResource = m_rtRestirTemporalRejectionReason.Get();
+
+    cmdList->ResourceBarrier(_countof(barriers), barriers);
+
+    m_rtRestirGpuProfiler.End(
+        cmdList,
+        frameIndex,
+        RtRestirGpuTimer::Temporal);
 
     // Swap so the current frame's temporal output is readable by spatial/resolve.
     m_rtRestirHistoryReadIndex = writeIndex;
@@ -10008,9 +12819,10 @@ bool Renderer::RunRtRestirTemporal(
     m_rtRestirTemporalOutputReady = true;
 
     m_rtRestirHistoryValid =
-        m_rtRestirUseTemporal &&
+        EffectiveRtRestirTemporalEnabled() &&
         m_rtRestirTemporalValidThisFrame &&
-        m_rtRestirTemporalReservoir[m_rtRestirHistoryReadIndex].Get() != nullptr;
+        m_rtRestirTemporalReservoir[
+            m_rtRestirHistoryReadIndex].Get() != nullptr;
 
     CmdEndEvent(cmdList);
     return true;
@@ -10053,8 +12865,11 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirSpatialConstants(
     cb->viewZSigmaScale =
         std::max(1e-5f, m_rtRestirViewZSigmaScale);
 
+    const RtRestirMathMode effectiveMathMode =
+        EffectiveRtRestirMathMode();
+
     const bool useReferenceMath =
-        m_rtRestirMathMode ==
+        effectiveMathMode ==
         RtRestirMathMode::Reference;
 
     cb->maxM =
@@ -10092,10 +12907,48 @@ D3D12_GPU_VIRTUAL_ADDRESS Renderer::UpdateRtRestirSpatialConstants(
 
     cb->mathMode =
         static_cast<uint32_t>(
-            m_rtRestirMathMode);
+            effectiveMathMode);
 
     cb->padMath[0] = 0u;
     cb->padMath[1] = 0u;
+
+    cb->inverseViewProjection =
+        m_currInvViewProj;
+
+    cb->deltaRoughnessCutoff =
+        std::max(
+            0.0f,
+            m_rtRestirDeltaRoughnessCutoff);
+
+    cb->primarySampleIndex =
+        m_rtPrimaryAovSampleIndex;
+
+    cb->primaryResetId =
+        m_rtPrimaryAovResetId;
+
+    cb->primaryJitterEnabled =
+        m_rtPrimaryAovJitterEnabled
+        ? 1u
+        : 0u;
+
+    const bool hasRtRadiance =
+        m_environment.lightingRadianceLoaded &&
+        m_rtEnvironmentRadianceTex.IsValid() &&
+        m_rtEnvCpuRadianceReady;
+
+    cb->hasEnvironmentRadiance =
+        hasRtRadiance ? 1u : 0u;
+
+    cb->lightingIntensity =
+        m_environment.lightingIntensity;
+
+    cb->lightingRotationRadians =
+        m_environment.lightingRotationRadians;
+
+    cb->environmentFaceSize =
+        hasRtRadiance
+        ? m_rtEnvFaceSize
+        : 0u;
 
     return alloc.gpu;
 }
@@ -10104,6 +12957,7 @@ bool Renderer::UpdateRtRestirSpatialTables(
     uint32_t frameIndex,
     ID3D12Device* device,
     ID3D12Resource* temporalReservoir,
+    ID3D12Resource* temporalConfidence,
     ID3D12Resource* currNormalResource,
     ID3D12Resource* currDepthResource,
     ID3D12Resource* currSurfaceIdResource,
@@ -10118,9 +12972,21 @@ bool Renderer::UpdateRtRestirSpatialTables(
         !currDepthResource ||
         !currSurfaceIdResource ||
         !currViewZResource ||
+        !m_rtAovDiffuseAlbedo ||
+        !m_rtAovDiffuseAlbedoReady ||
+        !m_rtAovSpecularF0 ||
+        !m_rtAovSpecularF0Ready ||
         !outSpatialReservoir ||
         !m_rtOutput ||
         !m_rtOutputReady ||
+        !temporalConfidence ||
+        !m_rtRestirConfidence ||
+        !m_rtRestirConfidenceReady ||
+        !m_rtRestirTemporalRejectionReason ||
+        !m_rtRestirRejectionReason ||
+        !m_rtRestirRejectionReasonReady ||
+        !m_rtRestirReceiverNormalRoughness ||
+        !m_rtRestirReceiverNormalRoughnessReady ||
         !m_rtRestirResourcesReady)
     {
         return false;
@@ -10136,6 +13002,12 @@ bool Renderer::UpdateRtRestirSpatialTables(
     EnsureRtDescriptorTable(
         frame.restirSpatialUavTable,
         frame.restirSpatialUavCount,
+        kRtRestirSpatialUavCount);
+
+    assert(frame.restirSpatialSrvCount ==
+        kRtRestirSpatialSrvCount);
+
+    assert(frame.restirSpatialUavCount ==
         kRtRestirSpatialUavCount);
 
     const uint32_t descriptorSize = m_srvHeap.DescriptorSize();
@@ -10165,7 +13037,7 @@ bool Renderer::UpdateRtRestirSpatialTables(
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Buffer.FirstElement = 0;
         srv.Buffer.NumElements = pixelCount;
-        srv.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+        srv.Buffer.StructureByteStride = sizeof(RtRestirEnvReservoirPacked);
         srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 
         device->CreateShaderResourceView(
@@ -10181,7 +13053,7 @@ bool Renderer::UpdateRtRestirSpatialTables(
         uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
         uav.Buffer.FirstElement = 0;
         uav.Buffer.NumElements = pixelCount;
-        uav.Buffer.StructureByteStride = sizeof(RtRestirReservoir);
+        uav.Buffer.StructureByteStride = sizeof(RtRestirEnvReservoirPacked);
         uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
 
         device->CreateUnorderedAccessView(
@@ -10234,11 +13106,35 @@ bool Renderer::UpdateRtRestirSpatialTables(
     // t4 = current ViewZ
     WriteSrv2D(currViewZResource, DXGI_FORMAT_R16_FLOAT, 4);
 
+    // t5 = current diffuse albedo
+    WriteSrv2D(m_rtAovDiffuseAlbedo.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 5);
+
+    // t6 = current specular F0
+    WriteSrv2D(m_rtAovSpecularF0.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 6);
+
+    // t7 = environment radiance
+    WriteEnvironmentRadianceSrv(device, SrvAt(7));
+
+    // t8 = center temporal confidence
+    WriteSrv2D(temporalConfidence, DXGI_FORMAT_R16_FLOAT, 8);
+
+    // t9 = temporal rejection reasons
+    WriteSrv2D(m_rtRestirTemporalRejectionReason.Get(), DXGI_FORMAT_R32_UINT, 9);
+
+    // t10 = exact ReSTIR receiver normal/raw roughness
+    WriteSrv2D(m_rtRestirReceiverNormalRoughness.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 10);
+
     // u0 = spatial reservoir
     WriteReservoirUav(outSpatialReservoir, 0);
 
     // u1 = debug output
     WriteUav2D(m_rtOutput.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, 1);
+
+    // u2 = final spatial confidence
+    WriteUav2D(m_rtRestirConfidence.Get(), DXGI_FORMAT_R16_FLOAT, 2);
+
+    // u3 = combined/final rejection reasons
+    WriteUav2D(m_rtRestirRejectionReason.Get(), DXGI_FORMAT_R32_UINT, 3);
 
     return true;
 }
@@ -10256,18 +13152,27 @@ bool Renderer::RunRtRestirSpatial(
 {
     if (!device ||
         !m_rtRestirResourcesReady ||
-        !m_rtRestirSpatialReservoir ||
+        !m_rtRestirScratchReservoir ||
         !m_rtOutput ||
         !m_rtOutputReady ||
         !guides.normalRough ||
         !guides.depth ||
-        !guides.surfaceId)
+        !guides.surfaceId ||
+        !m_rtAovDiffuseAlbedo ||
+        !m_rtAovDiffuseAlbedoReady ||
+        !m_rtAovSpecularF0 ||
+        !m_rtAovSpecularF0Ready ||
+        !m_rtRestirTemporalRejectionReason ||
+        !m_rtRestirRejectionReason ||
+        !m_rtRestirReceiverNormalRoughness ||
+        !m_rtRestirReceiverNormalRoughnessReady ||
+        !m_rtRestirRejectionReasonReady)
     {
         return false;
     }
 
     const bool wantsRestirSpatial =
-        (m_rtEnableRestirEnvDi && m_rtRestirUseSpatial) ||
+        EffectiveRtRestirSpatialEnabled() ||
         rtDebug.wantsRtRestirSpatialDebug ||
         rtDebug.wantsRtRestirResolveDebug;
 
@@ -10280,8 +13185,17 @@ bool Renderer::RunRtRestirSpatial(
     ID3D12Resource* temporalReservoir =
         m_rtRestirTemporalReservoir[m_rtRestirHistoryReadIndex].Get();
 
-    if (!temporalReservoir)
+    ID3D12Resource* temporalConfidence =
+        m_rtRestirTemporalConfidence[
+            m_rtRestirHistoryReadIndex].Get();
+
+    if (!temporalReservoir ||
+        !temporalConfidence ||
+        !m_rtRestirConfidence ||
+        !m_rtRestirConfidenceReady)
+    {
         return false;
+    }
 
     ID3D12Resource* currViewZ =
         (ranViewZReconstruct && guides.viewZRecons)
@@ -10292,7 +13206,7 @@ bool Renderer::RunRtRestirSpatial(
         return false;
 
     ID3D12Resource* outSpatialReservoir =
-        m_rtRestirSpatialReservoir.Get();
+        m_rtRestirScratchReservoir.Get();
 
     auto* cmdList = cl.Get();
 
@@ -10306,19 +13220,64 @@ bool Renderer::RunRtRestirSpatial(
     cl.Transition(guides.depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(guides.surfaceId, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     cl.Transition(currViewZ, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovDiffuseAlbedo.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(m_rtAovSpecularF0.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-    cl.Transition(outSpatialReservoir, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(
+        outSpatialReservoir,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // Bound as u1 for debug 108/109.
-    cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cl.Transition(
+        m_rtOutput.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.Transition(
+        temporalConfidence,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.Transition(
+        m_rtRestirConfidence.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+
+    cl.Transition(
+        m_rtRestirTemporalRejectionReason.Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.Transition(
+        m_rtRestirRejectionReason.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.Transition(
+        m_rtRestirReceiverNormalRoughness.Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     cl.FlushBarriers();
+
+    // Scratch was previously written by the primary DXR dispatch.
+    // Spatial now overwrites that same resource, so explicitly order
+    // the earlier UAV writes before the spatial UAV writes.
+    D3D12_RESOURCE_BARRIER scratchBarrier{};
+    scratchBarrier.Type =
+        D3D12_RESOURCE_BARRIER_TYPE_UAV;
+
+    scratchBarrier.Flags =
+        D3D12_RESOURCE_BARRIER_FLAG_NONE;
+
+    scratchBarrier.UAV.pResource =
+        outSpatialReservoir;
+
+    cmdList->ResourceBarrier(
+        1,
+        &scratchBarrier);
 
     const bool okTables =
         UpdateRtRestirSpatialTables(
             frameIndex,
             device,
             temporalReservoir,
+            temporalConfidence,
             guides.normalRough,
             guides.depth,
             guides.surfaceId,
@@ -10340,6 +13299,11 @@ bool Renderer::RunRtRestirSpatial(
             width,
             height);
 
+    m_rtRestirGpuProfiler.Begin(
+        cmdList,
+        frameIndex,
+        RtRestirGpuTimer::Spatial);
+
     m_rtRestirSpatialPass.Dispatch(
         cl,
         cb,
@@ -10348,7 +13312,7 @@ bool Renderer::RunRtRestirSpatial(
         width,
         height);
 
-    D3D12_RESOURCE_BARRIER barriers[2]{};
+    D3D12_RESOURCE_BARRIER barriers[4]{};
 
     barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -10358,7 +13322,18 @@ bool Renderer::RunRtRestirSpatial(
     barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
     barriers[1].UAV.pResource = m_rtOutput.Get();
 
-    cmdList->ResourceBarrier(2, barriers);
+    barriers[2].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[2].UAV.pResource = m_rtRestirConfidence.Get();
+
+    barriers[3].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    barriers[3].UAV.pResource = m_rtRestirRejectionReason.Get();
+
+    cmdList->ResourceBarrier(_countof(barriers), barriers);
+
+    m_rtRestirGpuProfiler.End(
+        cmdList,
+        frameIndex,
+        RtRestirGpuTimer::Spatial);
 
     m_rtRestirSpatialValidThisFrame = true;
     m_rtRestirSpatialOutputReady = true;
@@ -10382,6 +13357,8 @@ bool Renderer::RunRtRestirResolve(
         !m_rtRestirResourcesReady ||
         !m_rtRestirResolvedDiffuse ||
         !m_rtRestirResolvedSpec ||
+        !m_rtRestirConfidence ||
+        !m_rtRestirConfidenceReady ||
         !m_rtOutputReady ||
         m_rtFrames[frameIndex].tlas.GpuAddress() == 0)
     {
@@ -10389,7 +13366,10 @@ bool Renderer::RunRtRestirResolve(
     }
 
     const bool wantsResolve =
-        (m_rtEnableRestirEnvDi && m_rtRestirResolveToBeauty) ||
+        m_rtDirectEnvironmentMode !=
+        RtDirectEnvironmentMode::LegacyMis ||
+        m_rtRestirValidationMode !=
+        RtRestirValidationMode::Off ||
         rtDebug.wantsRtRestirResolveDebug;
 
     if (!wantsResolve)
@@ -10404,22 +13384,25 @@ bool Renderer::RunRtRestirResolve(
     // reservoir through t34 and must not regenerate initial reservoirs.
     ID3D12Resource* resolveReservoir = nullptr;
 
-    if (m_rtRestirUseSpatial &&
-        m_rtRestirSpatialValidThisFrame &&
-        m_rtRestirSpatialReservoir)
-    {
-        resolveReservoir = m_rtRestirSpatialReservoir.Get();
-    }
-    else if (m_rtRestirUseTemporal && m_rtRestirTemporalValidThisFrame &&
-        m_rtRestirTemporalReservoir[m_rtRestirHistoryReadIndex])
+    if (m_rtRestirSpatialValidThisFrame &&
+        m_rtRestirScratchReservoir)
     {
         resolveReservoir =
-            m_rtRestirTemporalReservoir[m_rtRestirHistoryReadIndex].Get();
+            m_rtRestirScratchReservoir.Get();
     }
-    else if (m_rtRestirInitialReservoir)
+    else if (m_rtRestirTemporalValidThisFrame &&
+        m_rtRestirTemporalReservoir[
+            m_rtRestirHistoryReadIndex])
     {
-        // Fallback useful for bring-up/debug if temporal/spatial did not run.
-        resolveReservoir = m_rtRestirInitialReservoir.Get();
+        resolveReservoir =
+            m_rtRestirTemporalReservoir[
+                m_rtRestirHistoryReadIndex].Get();
+    }
+    else if (m_rtRestirScratchReservoir)
+    {
+        // Initial-reservoir fallback when temporal/spatial did not run.
+        resolveReservoir =
+            m_rtRestirScratchReservoir.Get();
     }
 
     if (!resolveReservoir)
@@ -10436,12 +13419,60 @@ bool Renderer::RunRtRestirResolve(
 
     CmdBeginEvent(cmdList, "RT ReSTIR Resolve");
 
-    cl.Transition(resolveReservoir, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    cl.Transition(m_rtRestirResolvedDiffuse.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    cl.Transition(m_rtRestirResolvedSpec.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    // Spatial writes its result directly into m_rtRestirConfidence.
+    //
+    // When spatial did not run, the current confidence still lives in the
+    // temporal confidence ping-pong texture. Copy it into the final confidence
+    // texture before resolve applies visibility.
+    if (!m_rtRestirSpatialValidThisFrame &&
+        m_rtRestirTemporalValidThisFrame)
+    {
+        ID3D12Resource* temporalConfidence =
+            m_rtRestirTemporalConfidence[
+                m_rtRestirHistoryReadIndex].Get();
 
-    // Bound as g_Output for debug 110..114.
-    cl.Transition(m_rtOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                if (!temporalConfidence)
+                {
+                    CmdEndEvent(cmdList);
+                    return false;
+                }
+
+                cl.Transition(
+                    temporalConfidence,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+                cl.Transition(
+                    m_rtRestirConfidence.Get(),
+                    D3D12_RESOURCE_STATE_COPY_DEST);
+
+                cl.FlushBarriers();
+
+                cmdList->CopyResource(
+                    m_rtRestirConfidence.Get(),
+                    temporalConfidence);
+    }
+
+    cl.Transition(
+        resolveReservoir,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl.Transition(
+        m_rtRestirResolvedDiffuse.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.Transition(
+        m_rtRestirResolvedSpec.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // Resolve reads the temporal/spatial confidence and overwrites it with
+    // confidence multiplied by current visibility.
+    cl.Transition(
+        m_rtRestirConfidence.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // Bound as g_Output for resolve debug views.
+    cl.Transition(
+        m_rtOutput.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     cl.FlushBarriers();
 
@@ -10501,9 +13532,14 @@ bool Renderer::RunRtRestirResolve(
     rays.Height = height;
     rays.Depth = 1;
 
+    m_rtRestirGpuProfiler.Begin(
+        cmdList,
+        frameIndex,
+        RtRestirGpuTimer::Resolve);
+
     cmd4->DispatchRays(&rays);
 
-    D3D12_RESOURCE_BARRIER barriers[3]{};
+    D3D12_RESOURCE_BARRIER barriers[4]{};
 
     barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -10517,7 +13553,18 @@ bool Renderer::RunRtRestirResolve(
     barriers[2].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
     barriers[2].UAV.pResource = m_rtOutput.Get();
 
-    cmdList->ResourceBarrier(3, barriers);
+    barriers[3].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+
+    barriers[3].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+
+    barriers[3].UAV.pResource = m_rtRestirConfidence.Get();
+
+    cmdList->ResourceBarrier(_countof(barriers), barriers);
+
+    m_rtRestirGpuProfiler.End(
+        cmdList,
+        frameIndex,
+        RtRestirGpuTimer::Resolve);
 
     m_rtRestirResolvedValidThisFrame = true;
     m_rtRestirResolveOutputReady = true;
@@ -10640,10 +13687,7 @@ bool Renderer::UpdateRtRestirApplyTables(
     return true;
 }
 
-// Optional validation apply for resolved ReSTIR environment lighting.
-// The resolved diffuse/specular terms are added after the existing RT signal
-// pipeline, so this is useful for inspection but is not equivalent to injecting
-// the signal before temporal/spatial filtering.
+// Validation-only post-process apply; production composes before denoising.
 bool Renderer::RunRtRestirApplyBeauty(
     CommandList& cl,
     uint32_t frameIndex,
@@ -10653,17 +13697,28 @@ bool Renderer::RunRtRestirApplyBeauty(
     const RtDebugRouting& rtDebug)
 {
     if (!m_rtEnableRestirEnvDi ||
+        m_rtDirectEnvironmentMode !=
+        RtDirectEnvironmentMode::RestirValidation ||
         !m_rtRestirResolveToBeauty ||
         rtDebug.wantsRtRestirResolveDebug ||
         !m_rtRestirResolvedValidThisFrame ||
-        !m_rtRestirAppliedReady ||
         !m_rtRestirResolvedDiffuse ||
         !m_rtRestirResolvedSpec ||
-        !m_rtRestirAppliedDiffuse ||
-        !m_rtRestirAppliedSpec ||
         !m_rtPostReady ||
         !m_rtPostDiffuse ||
         !m_rtPostSpec)
+    {
+        return false;
+    }
+
+    EnsureRtRestirAppliedResources(
+        device,
+        width,
+        height);
+
+    if (!m_rtRestirAppliedReady ||
+        !m_rtRestirAppliedDiffuse ||
+        !m_rtRestirAppliedSpec)
     {
         return false;
     }
@@ -11305,7 +14360,7 @@ void Renderer::AssignSceneModelRtBufferIndices()
             OutputDebugStringW(
                 (L"Scene model '" +
                     std::wstring(model.desc.name.begin(), model.desc.name.end()) +
-                    L"' exceeds kRtMaxImportedModelBuffers; it will be raster-only this phase.\n").c_str());
+                    L"' exceeds kRtMaxImportedModelBuffers; it will be raster-only for this run.\n").c_str());
 
             model.desc.dxrEnabled = false;
             continue;
@@ -12000,7 +15055,9 @@ void Renderer::ResolveLightingEnvironmentSources(
     if (env.useDisplayForLighting)
     {
         OutputDebugStringW(
-            L"useDisplayForLighting=true, but Phase 3L requires explicit precomputed lightingDiffuse/specular/radiance assets. Falling back to default lighting environment.\n");
+            L"useDisplayForLighting=true requires explicit precomputed "
+            L"lightingDiffuse/specular/radiance assets; falling back to "
+            L"the default lighting environment.\n");
     }
 
     m_environment.resolvedLightingDiffusePath = defaultDiffuse;
@@ -12016,7 +15073,6 @@ void Renderer::LoadLightingEnvironment(
     m_environment.lightingDiffuseLoaded = false;
     m_environment.lightingSpecularLoaded = false;
     m_environment.lightingRadianceLoaded = false;
-    m_environment.rtRadianceUsesIblSpecular = false;
 
     m_iblDiffuseTex.Reset();
     m_iblSpecularTex.Reset();
@@ -12097,46 +15153,43 @@ void Renderer::LoadLightingEnvironment(
                 L"\n").c_str());
     }
 
-    std::error_code ec;
-
-    const bool radianceSameAsSpecular =
-        !radiancePath.empty() &&
-        !specularPath.empty() &&
-        std::filesystem::equivalent(
-            radiancePath,
-            specularPath,
-            ec) &&
-        !ec;
-
-    if (radianceSameAsSpecular &&
-        m_iblSpecularTex.IsValid())
-    {
-        m_environment.rtRadianceUsesIblSpecular = true;
-        m_environment.lightingRadianceLoaded = true;
-    }
-    else if (!radiancePath.empty() &&
+    if (!radiancePath.empty() &&
         std::filesystem::exists(radiancePath))
     {
-        std::wstring error;
+        const bool cpuLoaded =
+            LoadRtEnvironmentCpuRadiance(
+                radiancePath);
 
-        if (m_rtEnvironmentRadianceTex.TryLoadFromFile_DirectXTex(
-            device,
-            cl,
-            m_upload,
-            frameIndex,
-            radiancePath,
-            false,
-            L"Tex: RT Environment Radiance",
-            &error))
+        if (cpuLoaded)
         {
-            m_environment.lightingRadianceLoaded = true;
+            const bool gpuUploaded =
+                UploadRtEnvironmentRadianceAtlas(
+                    device,
+                    cl,
+                    frameIndex);
+
+            if (gpuUploaded)
+            {
+                m_environment
+                    .lightingRadianceLoaded = true;
+            }
+            else
+            {
+                OutputDebugStringW(
+                    L"RT environment radiance atlas "
+                    L"upload failed.\n");
+
+                m_rtEnvironmentRadianceTex.Reset();
+                ClearRtEnvironmentCpuRadiance();
+            }
         }
         else
         {
             OutputDebugStringW(
-                (L"RT environment radiance texture failed: " +
-                    error +
-                    L"\n").c_str());
+                L"RT environment CPU radiance "
+                L"conversion failed.\n");
+
+            m_rtEnvironmentRadianceTex.Reset();
         }
     }
     else
@@ -12145,37 +15198,8 @@ void Renderer::LoadLightingEnvironment(
             (L"RT environment radiance missing: " +
                 radiancePath.wstring() +
                 L"\n").c_str());
-    }
 
-    if (m_dxrAvailable && m_device5)
-    {
-        const bool hasValidRadiancePath =
-            m_environment.lightingRadianceLoaded &&
-            !radiancePath.empty() &&
-            std::filesystem::exists(radiancePath);
-
-        if (hasValidRadiancePath)
-        {
-            const bool cpuRadianceLoaded =
-                LoadRtEnvironmentCpuRadiance(radiancePath);
-
-            if (!cpuRadianceLoaded)
-            {
-                OutputDebugStringW(
-                    L"RT environment alias table disabled: CPU radiance source failed to load.\n");
-
-                // LoadRtEnvironmentCpuRadiance() already clears the CPU source
-                // before trying to load. This call keeps the failure path obvious.
-                ClearRtEnvironmentCpuRadiance();
-            }
-        }
-        else
-        {
-            ClearRtEnvironmentCpuRadiance();
-        }
-    }
-    else
-    {
+        m_rtEnvironmentRadianceTex.Reset();
         ClearRtEnvironmentCpuRadiance();
     }
 
@@ -12254,15 +15278,19 @@ void Renderer::LogEnvironmentContract() const
 
     const bool invalidRadianceContract =
         m_environment.lightingRadianceLoaded &&
-        m_environment.resolvedLightingRadiancePath.empty();
+        (
+            m_environment.resolvedLightingRadiancePath.empty() ||
+            !m_rtEnvCpuRadianceReady ||
+            !m_rtEnvironmentRadianceTex.IsValid()
+        );
 
     if (invalidRadianceContract)
     {
         OutputDebugStringW(
             L"ERROR: Environment contract invalid: "
-            L"lightingRadianceLoaded=true but resolvedLightingRadiancePath is empty. "
-            L"RT alias table/PDF source cannot be proven to match "
-            L"LookupEnvironmentRadiance().\n");
+            L"lightingRadianceLoaded=true without both "
+            L"the CPU face-major radiance source and its "
+            L"dedicated GPU atlas.\n");
     }
 
     OutputDebugStringW(
@@ -12298,6 +15326,24 @@ void Renderer::LogEnvironmentContract() const
     OutputDebugStringW(
         (L"  Specular miss uses display sky: " +
             std::wstring(BoolText(m_environment.specularMissUsesDisplaySky)) +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  RT CPU radiance ready: " +
+            std::wstring(
+                BoolText(m_rtEnvCpuRadianceReady)) +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  RT GPU radiance atlas ready: " +
+            std::wstring(
+                BoolText(
+                    m_rtEnvironmentRadianceTex.IsValid())) +
+            L"\n").c_str());
+
+    OutputDebugStringW(
+        (L"  RT radiance face size: " +
+            std::to_wstring(m_rtEnvCpuFaceSize) +
             L"\n").c_str());
 }
 
@@ -12497,7 +15543,7 @@ bool Renderer::ReloadSceneManifestLive()
     {
         OutputDebugStringW(
             L"Scene live reload rejected. "
-            L"Use a full scene reload phase for model or asset path changes.\n");
+            L"Model or environment-asset path changes require a full scene reload.\n");
 
         return false;
     }
@@ -13013,7 +16059,7 @@ void Renderer::InvalidateRtHistoryForSceneEdit(
     ++m_rtResetId;
 
     m_rtHistoryValid = false;
-    m_prevRtMotionWorldsValid = false;
+    InvalidateRtMotionHistory();
 
     m_rtTemporalHistoryValid = false;
     m_rtViewZHistoryValid = false;
@@ -13024,7 +16070,6 @@ void Renderer::InvalidateRtHistoryForSceneEdit(
     m_rtRestirSpatialValidThisFrame = false;
     m_rtRestirResolvedValidThisFrame = false;
 
-    m_rtPostReady = false;
     m_rtRestirAppliedReady = false;
 
     OutputDebugStringW(
@@ -13115,4 +16160,1105 @@ void Renderer::DebugDumpManifestCamera() const
     OutputDebugStringA(
         "\n--- End Manifest Camera Preset ---\n");
 #endif
+}
+
+bool Renderer::UpdateRtRestirComposeCurrentTables(
+    uint32_t frameIndex,
+    ID3D12Device* device)
+{
+    if (!device ||
+        !m_rtAccumDiffuse ||
+        !m_rtAccumSpec ||
+        !m_rtRestirResolvedDiffuse ||
+        !m_rtRestirResolvedSpec ||
+        !m_rtRestirReceiverNormalRoughness ||
+        !m_rtRestirReceiverNormalRoughnessReady ||
+        !m_rtRestirComposedDiffuse ||
+        !m_rtRestirComposedSpec ||
+        !m_rtOutput)
+    {
+        return false;
+    }
+
+    auto& frame = m_rtFrames[frameIndex];
+
+    EnsureRtDescriptorTable(
+        frame.restirComposeSrvTable,
+        frame.restirComposeSrvCount,
+        kRtRestirComposeSrvCount);
+
+    EnsureRtDescriptorTable(
+        frame.restirComposeUavTable,
+        frame.restirComposeUavCount,
+        kRtRestirComposeUavCount);
+
+    const uint32_t descriptorSize =
+        m_srvHeap.DescriptorSize();
+
+    auto SrvAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle =
+            frame.restirComposeSrvTable.cpu;
+
+        handle.ptr +=
+            static_cast<SIZE_T>(slot) *
+            descriptorSize;
+
+        return handle;
+    };
+
+    auto UavAt = [&](uint32_t slot)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle =
+            frame.restirComposeUavTable.cpu;
+
+        handle.ptr +=
+            static_cast<SIZE_T>(slot) *
+            descriptorSize;
+
+        return handle;
+    };
+
+    auto WriteRgba16Srv =
+        [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format =
+            DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+        srv.ViewDimension =
+            D3D12_SRV_DIMENSION_TEXTURE2D;
+
+        srv.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+
+        // Passing nullptr creates a valid null descriptor.
+        device->CreateShaderResourceView(
+            resource,
+            &srv,
+            SrvAt(slot));
+    };
+
+    auto WriteRgba16Uav =
+        [&](ID3D12Resource* resource, uint32_t slot)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format =
+            DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+        uav.ViewDimension =
+            D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            resource,
+            nullptr,
+            &uav,
+            UavAt(slot));
+    };
+
+    // t0..t6
+    WriteRgba16Srv(m_rtAccumDiffuse.Get(), 0);
+    WriteRgba16Srv(m_rtAccumSpec.Get(), 1);
+    WriteRgba16Srv(m_rtRestirResolvedDiffuse.Get(), 2);
+    WriteRgba16Srv(m_rtRestirResolvedSpec.Get(), 3);
+    WriteRgba16Srv(m_rtRestirReceiverNormalRoughness.Get(), 4);
+
+    WriteRgba16Srv(
+        m_rtExactTargetReferenceAovsReady
+        ? m_rtExactTargetReferenceDiffuse.Get()
+        : nullptr,
+        5);
+
+    WriteRgba16Srv(
+        m_rtExactTargetReferenceAovsReady
+        ? m_rtExactTargetReferenceSpec.Get()
+        : nullptr,
+        6);
+
+    // u0..u1
+    WriteRgba16Uav(
+        m_rtRestirComposedDiffuse.Get(),
+        0);
+
+    WriteRgba16Uav(
+        m_rtRestirComposedSpec.Get(),
+        1);
+
+    // u2 = R8G8B8A8_UNORM debug output.
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        uav.ViewDimension =
+            D3D12_UAV_DIMENSION_TEXTURE2D;
+
+        device->CreateUnorderedAccessView(
+            m_rtOutput.Get(),
+            nullptr,
+            &uav,
+            UavAt(2));
+    }
+
+    return true;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS
+Renderer::UpdateRtRestirComposeCurrentConstants(
+    uint32_t frameIndex)
+{
+    constexpr uint32_t cbSize =
+        (sizeof(RtRestirComposeCurrentConstants) +
+            255u) &
+        ~255u;
+
+    auto allocation =
+        m_upload.Allocate(
+            frameIndex,
+            cbSize,
+            256);
+
+    auto* constants =
+        reinterpret_cast<
+        RtRestirComposeCurrentConstants*>(
+            allocation.cpu);
+
+    *constants = {};
+
+    constants->directEnvironmentMode =
+        static_cast<uint32_t>(
+            EffectiveRtDirectEnvironmentMode());
+
+    constants->debugView =
+        m_debugView;
+
+    constants->deltaRoughnessCutoff =
+        std::max(
+            0.0f,
+            m_rtRestirDeltaRoughnessCutoff);
+
+    constants->hasExactTargetReference =
+        m_rtExactTargetReferenceValidThisFrame &&
+        m_rtExactTargetReferenceAovsReady &&
+        m_rtExactTargetReferenceDiffuse &&
+        m_rtExactTargetReferenceSpec
+        ? 1u
+        : 0u;
+
+    return allocation.gpu;
+}
+
+bool Renderer::RunRtRestirComposeCurrent(
+    CommandList& cl,
+    uint32_t frameIndex,
+    ID3D12Device* device,
+    uint32_t width,
+    uint32_t height)
+{
+    const bool wantsCompose =
+        EffectiveRtDirectEnvironmentMode() ==
+        RtDirectEnvironmentMode::RestirProduction ||
+        IsRtRestirComposeDebug(
+            m_debugView);
+
+    if (!wantsCompose ||
+        !m_rtRestirResolvedValidThisFrame ||
+        !m_rtRestirComposedReady ||
+        !m_rtAccumDiffuse ||
+        !m_rtAccumSpec ||
+        !m_rtRestirResolvedDiffuse ||
+        !m_rtRestirResolvedSpec ||
+        !m_rtRestirReceiverNormalRoughness ||
+        !m_rtRestirReceiverNormalRoughnessReady ||
+        !m_rtRestirComposedDiffuse ||
+        !m_rtRestirComposedSpec ||
+        !m_rtOutputReady)
+    {
+        return false;
+    }
+
+    auto* commandList = cl.Get();
+
+    ID3D12DescriptorHeap* heaps[] =
+    {
+        m_srvHeap.GetHeap()
+    };
+
+    commandList->SetDescriptorHeaps(
+        _countof(heaps),
+        heaps);
+
+    CmdBeginEvent(
+        commandList,
+        "RT ReSTIR Compose Current");
+
+    cl.Transition(
+        m_rtAccumDiffuse.Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.Transition(
+        m_rtAccumSpec.Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.Transition(
+        m_rtRestirResolvedDiffuse.Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.Transition(
+        m_rtRestirResolvedSpec.Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    cl.Transition(
+        m_rtRestirReceiverNormalRoughness.Get(),
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    if (m_rtExactTargetReferenceAovsReady)
+    {
+        cl.Transition(
+            m_rtExactTargetReferenceDiffuse.Get(),
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        cl.Transition(
+            m_rtExactTargetReferenceSpec.Get(),
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    cl.Transition(
+        m_rtRestirComposedDiffuse.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.Transition(
+        m_rtRestirComposedSpec.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.Transition(
+        m_rtOutput.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    cl.FlushBarriers();
+
+    if (!UpdateRtRestirComposeCurrentTables(
+        frameIndex,
+        device))
+    {
+        CmdEndEvent(commandList);
+        return false;
+    }
+
+    const D3D12_GPU_VIRTUAL_ADDRESS constants =
+        UpdateRtRestirComposeCurrentConstants(
+            frameIndex);
+
+    m_rtRestirGpuProfiler.Begin(
+        commandList,
+        frameIndex,
+        RtRestirGpuTimer::Compose);
+
+    m_rtRestirComposeCurrentPass.Dispatch(
+        cl,
+        constants,
+        m_rtFrames[frameIndex]
+        .restirComposeSrvTable.gpu,
+        m_rtFrames[frameIndex]
+        .restirComposeUavTable.gpu,
+        width,
+        height);
+
+    D3D12_RESOURCE_BARRIER barriers[3]{};
+
+    barriers[0].Type =
+        D3D12_RESOURCE_BARRIER_TYPE_UAV;
+
+    barriers[0].UAV.pResource =
+        m_rtRestirComposedDiffuse.Get();
+
+    barriers[1].Type =
+        D3D12_RESOURCE_BARRIER_TYPE_UAV;
+
+    barriers[1].UAV.pResource =
+        m_rtRestirComposedSpec.Get();
+
+    barriers[2].Type =
+        D3D12_RESOURCE_BARRIER_TYPE_UAV;
+
+    barriers[2].UAV.pResource =
+        m_rtOutput.Get();
+
+    commandList->ResourceBarrier(
+        _countof(barriers),
+        barriers);
+
+    m_rtRestirGpuProfiler.End(
+        commandList,
+        frameIndex,
+        RtRestirGpuTimer::Compose);
+
+    CmdEndEvent(commandList);
+    return true;
+}
+
+Renderer::RtDirectEnvironmentMode
+Renderer::ResolveRtDirectEnvironmentMode(
+    RtDirectEnvironmentMode configuredMode,
+    RtRestirValidationMode validationMode)
+{
+    switch (validationMode)
+    {
+    case RtRestirValidationMode::ExactTargetReference:
+        return RtDirectEnvironmentMode::LegacyMis;
+
+    case RtRestirValidationMode::RestirReference:
+    case RtRestirValidationMode::RestirRobust:
+        return RtDirectEnvironmentMode::RestirProduction;
+
+    default:
+        return configuredMode;
+    }
+}
+
+Renderer::RtRestirMathMode
+Renderer::ResolveRtRestirMathMode(
+    RtRestirMathMode configuredMode,
+    RtRestirValidationMode validationMode)
+{
+    switch (validationMode)
+    {
+    case RtRestirValidationMode::RestirReference:
+        return RtRestirMathMode::Reference;
+
+    case RtRestirValidationMode::RestirRobust:
+        return RtRestirMathMode::Robust;
+
+    default:
+        return configuredMode;
+    }
+}
+
+Renderer::RtDirectEnvironmentMode
+Renderer::EffectiveRtDirectEnvironmentMode() const
+{
+    return ResolveRtDirectEnvironmentMode(
+        m_rtDirectEnvironmentMode,
+        m_rtRestirValidationMode);
+}
+
+Renderer::RtRestirMathMode
+Renderer::EffectiveRtRestirMathMode() const
+{
+    return ResolveRtRestirMathMode(
+        m_rtRestirMathMode,
+        m_rtRestirValidationMode);
+}
+
+bool Renderer::EffectiveRtRestirTemporalEnabled() const
+{
+    switch (m_rtRestirValidationMode)
+    {
+    case RtRestirValidationMode::InitialOnly:
+    case RtRestirValidationMode::ExactTargetReference:
+        return false;
+
+    case RtRestirValidationMode::TemporalOnly:
+    case RtRestirValidationMode::TemporalSpatial:
+    case RtRestirValidationMode::RestirReference:
+    case RtRestirValidationMode::RestirRobust:
+        return true;
+
+    default:
+        return m_rtRestirUseTemporal;
+    }
+}
+
+bool Renderer::EffectiveRtRestirSpatialEnabled() const
+{
+    switch (m_rtRestirValidationMode)
+    {
+    case RtRestirValidationMode::InitialOnly:
+    case RtRestirValidationMode::TemporalOnly:
+    case RtRestirValidationMode::ExactTargetReference:
+        return false;
+
+    case RtRestirValidationMode::TemporalSpatial:
+    case RtRestirValidationMode::RestirReference:
+    case RtRestirValidationMode::RestirRobust:
+        return true;
+
+    default:
+        return m_rtRestirUseSpatial;
+    }
+}
+
+bool Renderer::RtRestirValidationRunsRestir() const
+{
+    switch (m_rtRestirValidationMode)
+    {
+    case RtRestirValidationMode::InitialOnly:
+    case RtRestirValidationMode::TemporalOnly:
+    case RtRestirValidationMode::TemporalSpatial:
+    case RtRestirValidationMode::RestirReference:
+    case RtRestirValidationMode::RestirRobust:
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+Renderer::RtDrawHistoryIdentity
+Renderer::MakeRtDrawHistoryIdentity(
+    const DrawItem& item) const
+{
+    RtDrawHistoryIdentity identity{};
+
+    identity.mesh = item.mesh;
+    identity.material = item.material;
+
+    identity.submeshIndex = item.submeshIndex;
+    identity.rtObjectId = item.rtObjectId;
+
+    identity.sceneModelIndex =
+        item.sceneModelIndex;
+
+    identity.sceneModelRtBufferIndex =
+        item.sceneModelRtBufferIndex;
+
+    identity.reversesWinding =
+        item.reversesWinding ? 1u : 0u;
+
+    const AccelerationStructure* blas =
+        GetBlasForDrawItem(item);
+
+    identity.blasAddress =
+        blas
+        ? blas->GpuAddress()
+        : 0;
+
+    return identity;
+}
+
+void Renderer::InvalidateRtMotionHistory()
+{
+    m_prevRtMotionWorldsValid = false;
+    m_prevRtMotionWorlds.clear();
+    m_prevRtDrawIdentities.clear();
+}
+
+Renderer::RtRestirMetricsDomain
+Renderer::ResolveRtRestirMetricsDomain(
+    RtRestirValidationMode validationMode)
+{
+    switch (validationMode)
+    {
+    case RtRestirValidationMode::InitialOnly:
+        return RtRestirMetricsDomain::Initial;
+
+    case RtRestirValidationMode::TemporalOnly:
+        return RtRestirMetricsDomain::Temporal;
+
+    case RtRestirValidationMode::TemporalSpatial:
+        return RtRestirMetricsDomain::TemporalSpatial;
+
+    case RtRestirValidationMode::ExactTargetReference:
+        return RtRestirMetricsDomain::ExactTargetReference;
+
+    case RtRestirValidationMode::RestirReference:
+        return RtRestirMetricsDomain::RestirReference;
+
+    case RtRestirValidationMode::RestirRobust:
+        return RtRestirMetricsDomain::RestirRobust;
+
+    case RtRestirValidationMode::Off:
+    default:
+        return RtRestirMetricsDomain::Unknown;
+    }
+}
+
+const char* Renderer::RtRestirMetricsDomainName(
+    RtRestirMetricsDomain domain)
+{
+    switch (domain)
+    {
+    case RtRestirMetricsDomain::Initial:
+        return "Initial";
+
+    case RtRestirMetricsDomain::Temporal:
+        return "Temporal";
+
+    case RtRestirMetricsDomain::TemporalSpatial:
+        return "TemporalSpatial";
+
+    case RtRestirMetricsDomain::ExactTargetReference:
+        return "ExactTargetReference";
+
+    case RtRestirMetricsDomain::RestirReference:
+        return "RestirReference";
+
+    case RtRestirMetricsDomain::RestirRobust:
+        return "RestirRobust";
+
+    case RtRestirMetricsDomain::ComposedPreDenoiser:
+        return "ComposedPreDenoiser";
+
+    case RtRestirMetricsDomain::FinalDenoised:
+        return "FinalDenoised";
+
+    case RtRestirMetricsDomain::Unknown:
+    default:
+        return "Unknown";
+    }
+}
+
+const char* Renderer::RtRestirValidationModeName(
+    RtRestirValidationMode mode)
+{
+    switch (mode)
+    {
+    case RtRestirValidationMode::Off:
+        return "Off";
+    case RtRestirValidationMode::InitialOnly:
+        return "InitialOnly";
+    case RtRestirValidationMode::TemporalOnly:
+        return "TemporalOnly";
+    case RtRestirValidationMode::TemporalSpatial:
+        return "TemporalSpatial";
+    case RtRestirValidationMode::ExactTargetReference:
+        return "ExactTargetReference";
+    case RtRestirValidationMode::RestirReference:
+        return "RestirReference";
+    case RtRestirValidationMode::RestirRobust:
+        return "RestirRobust";
+    default:
+        return "Unknown";
+    }
+}
+
+const char* Renderer::RtDirectEnvironmentModeName(
+    RtDirectEnvironmentMode mode)
+{
+    switch (mode)
+    {
+    case RtDirectEnvironmentMode::LegacyMis:
+        return "LegacyMis";
+    case RtDirectEnvironmentMode::RestirValidation:
+        return "RestirValidation";
+    case RtDirectEnvironmentMode::RestirProduction:
+        return "RestirProduction";
+    default:
+        return "Unknown";
+    }
+}
+
+const char* Renderer::RtRestirMathModeName(
+    RtRestirMathMode mode)
+{
+    switch (mode)
+    {
+    case RtRestirMathMode::Reference:
+        return "Reference";
+    case RtRestirMathMode::Robust:
+        return "Robust";
+    default:
+        return "Unknown";
+    }
+}
+
+const char* Renderer::RtRestirGpuTimerName(
+    RtRestirGpuTimer timer)
+{
+    switch (timer)
+    {
+    case RtRestirGpuTimer::PrimaryDxr:
+        return "PrimaryDxr";
+
+    case RtRestirGpuTimer::Temporal:
+        return "Temporal";
+
+    case RtRestirGpuTimer::Spatial:
+        return "Spatial";
+
+    case RtRestirGpuTimer::Resolve:
+        return "Resolve";
+
+    case RtRestirGpuTimer::Compose:
+        return "Compose";
+
+    case RtRestirGpuTimer::Total:
+        return "Total";
+
+    case RtRestirGpuTimer::Count:
+    default:
+        return "Unknown";
+    }
+}
+
+Renderer::RtRestirGpuTimingStats
+Renderer::ComputeRtRestirGpuTimingStats(
+    const std::vector<double>& samplesMs)
+{
+    RtRestirGpuTimingStats stats{};
+
+    if (samplesMs.empty())
+        return stats;
+
+    stats.sampleCount =
+        static_cast<uint64_t>(
+            samplesMs.size());
+
+    double sum = 0.0;
+
+    for (double value :
+    samplesMs)
+    {
+        sum += value;
+    }
+
+    stats.meanMs =
+        sum /
+        static_cast<double>(
+            samplesMs.size());
+
+    std::vector<double> sorted =
+        samplesMs;
+
+    std::sort(
+        sorted.begin(),
+        sorted.end());
+
+    const size_t count =
+        sorted.size();
+
+    if ((count & 1u) != 0u)
+    {
+        stats.medianMs =
+            sorted[count / 2u];
+    }
+    else
+    {
+        stats.medianMs =
+            0.5 *
+            (
+                sorted[count / 2u - 1u] +
+                sorted[count / 2u]
+                );
+    }
+
+    const size_t p95Index =
+        std::min(
+            count - 1u,
+            static_cast<size_t>(
+                std::ceil(
+                    0.95 *
+                    static_cast<double>(
+                        count))) -
+            1u);
+
+    stats.p95Ms =
+        sorted[p95Index];
+
+    return stats;
+}
+
+Renderer::RtRestirGpuTimingBucket&
+Renderer::GetOrCreateRtRestirGpuTimingBucket(
+    const RtRestirGpuFrameMetadata& metadata)
+{
+    const auto it =
+        std::find_if(
+            m_rtRestirGpuTimingBuckets.begin(),
+            m_rtRestirGpuTimingBuckets.end(),
+            [&](const RtRestirGpuTimingBucket& bucket)
+    {
+        return
+            bucket.width ==
+            metadata.width &&
+            bucket.height ==
+            metadata.height &&
+            bucket.directEnvironmentMode ==
+            metadata.directEnvironmentMode &&
+            bucket.validationMode ==
+            metadata.validationMode &&
+            bucket.mathMode ==
+            metadata.mathMode &&
+            bucket.initialRestirEnabled ==
+            metadata.initialRestirEnabled;
+    });
+
+    if (it !=
+        m_rtRestirGpuTimingBuckets.end())
+    {
+        return *it;
+    }
+
+    RtRestirGpuTimingBucket bucket{};
+
+    bucket.width =
+        metadata.width;
+
+    bucket.height =
+        metadata.height;
+
+    bucket.directEnvironmentMode =
+        metadata.directEnvironmentMode;
+
+    bucket.validationMode =
+        metadata.validationMode;
+
+    bucket.mathMode =
+        metadata.mathMode;
+
+    bucket.initialRestirEnabled =
+        metadata.initialRestirEnabled;
+
+    m_rtRestirGpuTimingBuckets.push_back(
+        std::move(bucket));
+
+    return
+        m_rtRestirGpuTimingBuckets.back();
+}
+
+void Renderer::LogRtRestirGpuTimingBucket(
+    const RtRestirGpuTimingBucket& bucket) const
+{
+    for (uint32_t timerIndex = 0;
+        timerIndex <
+        RtRestirGpuProfiler::kTimerCount;
+        ++timerIndex)
+    {
+        const RtRestirGpuTimer timer =
+            static_cast<RtRestirGpuTimer>(
+                timerIndex);
+
+        const RtRestirGpuTimingStats stats =
+            ComputeRtRestirGpuTimingStats(
+                bucket.stageSamplesMs[
+                    timerIndex]);
+
+        if (stats.sampleCount == 0)
+            continue;
+
+        DebugOutput(
+            std::format(
+                "RT ReSTIR GPU aggregate: "
+                "resolution={}x{}, "
+                "direct={}, "
+                "validation={}, "
+                "math={}, "
+                "initialRestir={}, "
+                "stage={}, "
+                "samples={}, "
+                "mean={:.3f} ms, "
+                "median={:.3f} ms, "
+                "p95={:.3f} ms",
+                bucket.width,
+                bucket.height,
+                RtDirectEnvironmentModeName(
+                    bucket.directEnvironmentMode),
+                RtRestirValidationModeName(
+                    bucket.validationMode),
+                RtRestirMathModeName(
+                    bucket.mathMode),
+                bucket.initialRestirEnabled
+                ? "yes"
+                : "no",
+                RtRestirGpuTimerName(
+                    timer),
+                stats.sampleCount,
+                stats.meanMs,
+                stats.medianMs,
+                stats.p95Ms));
+    }
+}
+
+void Renderer::AccumulateRtRestirGpuTimings(
+    const RtRestirGpuFrameMetadata& metadata)
+{
+    RtRestirGpuTimingBucket& bucket =
+        GetOrCreateRtRestirGpuTimingBucket(
+            metadata);
+
+    for (uint32_t timerIndex = 0;
+        timerIndex <
+        RtRestirGpuProfiler::kTimerCount;
+        ++timerIndex)
+    {
+        const RtRestirGpuTimer timer =
+            static_cast<RtRestirGpuTimer>(
+                timerIndex);
+
+        if (!m_rtRestirGpuProfiler
+            .HasCompletedResultThisRead(
+                timer))
+        {
+            continue;
+        }
+
+        const double milliseconds =
+            m_rtRestirGpuProfiler
+            .LastCompletedMilliseconds(
+                timer);
+
+        if (milliseconds < 0.0 ||
+            !std::isfinite(milliseconds))
+        {
+            continue;
+        }
+
+        std::vector<double>& samples =
+            bucket.stageSamplesMs[
+                timerIndex];
+
+        samples.push_back(
+            milliseconds);
+
+        if (samples.size() >
+            kRtRestirGpuTimingWindowSize)
+        {
+            samples.erase(
+                samples.begin());
+        }
+    }
+
+    ++bucket.completedFrameCount;
+
+    const bool firstReport =
+        bucket.completedFrameCount ==
+        kRtRestirGpuTimingFirstReportSamples;
+
+    const bool periodicReport =
+        bucket.completedFrameCount >
+        kRtRestirGpuTimingFirstReportSamples &&
+        (
+            bucket.completedFrameCount %
+            kRtRestirGpuTimingReportInterval
+            ) == 0;
+
+    if (firstReport ||
+        periodicReport)
+    {
+        LogRtRestirGpuTimingBucket(
+            bucket);
+    }
+}
+
+bool Renderer::RtPrimaryJitterEnabledForCurrentDispatch() const
+{
+    const uint32_t debugView =
+        m_debugView;
+
+    const bool shadingDebug =
+        (debugView != 0u &&
+            debugView <= 17u) ||
+        debugView == 27u ||
+        IsRtSamplingDebug(debugView);
+
+    const bool motionDebug =
+        debugView == 51u ||
+        debugView == 52u ||
+        debugView == 53u;
+
+    const bool viewZDebug =
+        debugView == 61u ||
+        debugView == 62u;
+
+    const bool surfaceIdDebug =
+        debugView == 65u ||
+        debugView == 66u ||
+        debugView == 74u ||
+        debugView == 75u;
+
+    const bool diffuseAlbedoDebug =
+        debugView == 67u ||
+        debugView == 68u;
+
+    return
+        m_rtDispatchUsesAccumulationPath &&
+        !shadingDebug &&
+        !motionDebug &&
+        !viewZDebug &&
+        !surfaceIdDebug &&
+        !diffuseAlbedoDebug &&
+        !IsRtRestirDebug(debugView);
+}
+
+Renderer::RtRestirMetricsCapturePoint Renderer::GetRtRestirMetricsCapturePoint() const
+{
+    return m_rtRestirMetricsCapturePoint;
+}
+
+void Renderer::SetRtRestirMetricsCapturePoint(
+    RtRestirMetricsCapturePoint capturePoint)
+{
+    if (m_rtRestirMetricsCapturePoint ==
+        capturePoint)
+    {
+        return;
+    }
+
+    m_rtRestirMetricsCapturePoint =
+        capturePoint;
+
+    DebugOutput(
+        std::format(
+            "RT ReSTIR metrics capture point: {}",
+            RtRestirMetricsCapturePointName(
+                capturePoint)));
+}
+
+const char*
+Renderer::RtRestirMetricsCapturePointName(
+    RtRestirMetricsCapturePoint capturePoint)
+{
+    switch (capturePoint)
+    {
+    case RtRestirMetricsCapturePoint::ValidationOutput:
+        return "ValidationOutput";
+
+    case RtRestirMetricsCapturePoint::ComposedPreDenoiser:
+        return "ComposedPreDenoiser";
+
+    case RtRestirMetricsCapturePoint::FinalDenoised:
+        return "FinalDenoised";
+
+    default:
+        return "Unknown";
+    }
+}
+
+bool Renderer::BuildRtRestirValidationMetricsCapture(
+    bool ranRestirResolve,
+    RtRestirMetricsCapture& outCapture) const
+{
+    outCapture = {};
+
+    if (m_rtRestirValidationMode ==
+        RtRestirValidationMode::Off)
+    {
+        return false;
+    }
+
+    outCapture.domain =
+        ResolveRtRestirMetricsDomain(
+            m_rtRestirValidationMode);
+
+    if (outCapture.domain ==
+        RtRestirMetricsDomain::Unknown)
+    {
+        return false;
+    }
+
+    if (m_rtRestirValidationMode ==
+        RtRestirValidationMode::ExactTargetReference)
+    {
+        if (!m_rtExactTargetReferenceValidThisFrame ||
+            !m_rtExactTargetReferenceDiffuse ||
+            !m_rtExactTargetReferenceSpec)
+        {
+            return false;
+        }
+
+        outCapture.diffuse =
+            m_rtExactTargetReferenceDiffuse.Get();
+
+        outCapture.specular =
+            m_rtExactTargetReferenceSpec.Get();
+
+        // Exact-target reference is a signal reference,
+        // not a ReSTIR reservoir diagnostic domain.
+        outCapture.reservoir = nullptr;
+        outCapture.rejectionReason = nullptr;
+        outCapture.measureReservoirDiagnostics = false;
+
+        return true;
+    }
+
+    if (!ranRestirResolve ||
+        !m_rtRestirResolvedDiffuse ||
+        !m_rtRestirResolvedSpec)
+    {
+        return false;
+    }
+
+    outCapture.diffuse =
+        m_rtRestirResolvedDiffuse.Get();
+
+    outCapture.specular =
+        m_rtRestirResolvedSpec.Get();
+
+    outCapture.reservoir =
+        CurrentRtRestirFinalReservoir();
+
+    if (!outCapture.reservoir)
+    {
+        return false;
+    }
+
+    outCapture.rejectionReason =
+        CurrentRtRestirRejectionReason();
+
+    outCapture.measureReservoirDiagnostics = true;
+
+    return true;
+}
+
+bool Renderer::BuildRtRestirMetricsCapture(
+    RtRestirMetricsCapturePoint capturePoint,
+    bool ranRestirResolve,
+    bool ranRestirCompose,
+    RtRestirMetricsCapture& outCapture) const
+{
+    outCapture = {};
+
+    switch (capturePoint)
+    {
+    case RtRestirMetricsCapturePoint::ValidationOutput:
+        return BuildRtRestirValidationMetricsCapture(
+            ranRestirResolve,
+            outCapture);
+
+    case RtRestirMetricsCapturePoint::ComposedPreDenoiser:
+    {
+        if (!ranRestirCompose ||
+            !m_rtRestirComposedDiffuse ||
+            !m_rtRestirComposedSpec)
+        {
+            return false;
+        }
+
+        ID3D12Resource* reservoir =
+            CurrentRtRestirFinalReservoir();
+
+        if (!reservoir)
+        {
+            return false;
+        }
+
+        outCapture.domain =
+            RtRestirMetricsDomain::ComposedPreDenoiser;
+
+        outCapture.diffuse =
+            m_rtRestirComposedDiffuse.Get();
+
+        outCapture.specular =
+            m_rtRestirComposedSpec.Get();
+
+        outCapture.reservoir =
+            reservoir;
+
+        outCapture.rejectionReason =
+            CurrentRtRestirRejectionReason();
+
+        outCapture.measureReservoirDiagnostics = true;
+
+        return true;
+    }
+
+    case RtRestirMetricsCapturePoint::FinalDenoised:
+        // FinalDenoised is captured later in RunRtDenoiser(),
+        // immediately before the normal final beauty combine.
+        return false;
+
+    default:
+        return false;
+    }
 }

@@ -57,6 +57,16 @@ public:
         bool treatAsSRGB,
         const wchar_t* debugName);
 
+    void CreateFromRGBA32FData(
+        ID3D12Device* device,
+        CommandList& cl,
+        UploadArena& upload,
+        uint32_t frameIndex,
+        uint32_t width,
+        uint32_t height,
+        const void* rgba32fPixels,
+        const wchar_t* debugName);
+
     void Reset();
 
     bool TryLoadFromFile_DirectXTex(
